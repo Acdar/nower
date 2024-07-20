@@ -896,7 +896,7 @@ class BaseSolver:
                 logger.error("Server酱的sendKey未配置")
                 return
 
-            url = f'http://sft.acdar.dev/message/push?pushkey={send_key}'
+            url = f"http://sft.acdar.dev/message/push?pushkey={send_key}"
             data = {"text": "[Mower通知]" + subject, "desp": mkBody}
 
             try:
