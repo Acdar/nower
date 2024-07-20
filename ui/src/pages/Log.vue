@@ -218,7 +218,6 @@ const bg_opacity = computed(() => {
 	margin: 2em 0;
 	height: 50vh;
 	width: 90vw;
-
   content: '';
   opacity: v-bind(bg_opacity);
   background-image: url(/bg.webp);
