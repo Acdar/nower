@@ -1,22 +1,14 @@
 import random
-import smtplib
 import sys
 import time
 import traceback
 from abc import abstractmethod
 from datetime import datetime, timedelta
-from email.mime.image import MIMEImage
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from inspect import getframeinfo, stack
-from io import BytesIO
-from threading import Thread
 from typing import Literal, Optional, Tuple
 
 import cv2
 import numpy as np
-import requests
-from bs4 import BeautifulSoup
 
 from arknights_mower.utils import config
 from arknights_mower.utils import typealias as tp
@@ -25,6 +17,7 @@ from arknights_mower.utils.device.adb_client.const import KeyCode
 from arknights_mower.utils.device.adb_client.session import Session
 from arknights_mower.utils.device.device import Device
 from arknights_mower.utils.device.scrcpy import Scrcpy
+from arknights_mower.utils.email import send_message
 from arknights_mower.utils.image import cropimg, thres2
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.recognize import RecognizeError, Recognizer, Scene
@@ -65,17 +58,18 @@ class BaseSolver:
                 try:
                     self.device = Device()
                     self.device.client.check_server_alive()
-                    Session().connect(config.ADB_DEVICE[0])
+                    Session().connect(config.conf.adb)
                     if not self.device.check_resolution():
                         raise MowerExit
-                    if config.droidcast["enable"]:
+                    if config.conf.droidcast.enable:
                         self.device.start_droidcast()
-                    if config.ADB_CONTROL_CLIENT == "scrcpy":
+                    if config.conf.touch_method == "scrcpy":
                         self.device.control.scrcpy = Scrcpy(self.device.client)
                     break
                 except MowerExit:
                     raise
-                except Exception:
+                except Exception as e:
+                    logger.exception(e)
                     restart_simulator()
 
         self.recog = recog if recog is not None else Recognizer(self.device)
@@ -523,7 +517,7 @@ class BaseSolver:
                         else:
                             break
                     if captcha_times <= 0:
-                        self.send_message("验证码自动滑动失败，退出游戏，停止运行mower")
+                        send_message("验证码自动滑动失败，退出游戏，停止运行mower")
                         self.device.exit()
                         sys.exit()
                 elif scene == Scene.LOGIN_INPUT:

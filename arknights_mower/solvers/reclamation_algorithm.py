@@ -6,7 +6,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from arknights_mower.utils import rapidocr
+from arknights_mower.utils import config, rapidocr
 from arknights_mower.utils import typealias as tp
 from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.image import cropimg, loadres, thres2
@@ -58,12 +58,11 @@ class ReclamationAlgorithm(BaseSolver):
     def run(
         self,
         duration: Optional[timedelta] = None,
-        timeout: timedelta = timedelta(seconds=30),
     ) -> None:
         logger.info("Start: 生息演算")
 
-        self.timeout = timeout
-        self.deadline = datetime.now() + duration - timeout if duration else None
+        self.timeout = config.conf.reclamation_algorithm.timeout
+        self.deadline = datetime.now() + duration - self.timeout if duration else None
 
         self.battle_wait = 0  # 进入战斗后等待剧情出现
 
