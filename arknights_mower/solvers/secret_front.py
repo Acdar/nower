@@ -72,7 +72,7 @@ class SecretFront(BaseSolver):
     ):
         logger.info("Start: 隐秘战线")
 
-        self.timeout = config.conf.reclamation_algorithm.timeout
+        self.timeout = timedelta(seconds=config.conf.reclamation_algorithm.timeout)
         self.deadline = datetime.now() + duration - self.timeout if duration else None
         self.unknown_time = None
 
@@ -430,7 +430,8 @@ class SecretFront(BaseSolver):
                     super().back_to_index()
                 except MowerExit:
                     raise
-                except Exception:
+                except Exception as e:
+                    logger.exception(e)
                     self.device.exit()
                     self.check_current_focus()
         else:

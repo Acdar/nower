@@ -14,7 +14,7 @@ from arknights_mower.utils.device.adb_client.session import Session
 from arknights_mower.utils.device.scrcpy import Scrcpy
 from arknights_mower.utils.email import send_message, task_template
 from arknights_mower.utils.hot_update import get_listing
-from arknights_mower.utils.log import init_fhlr, logger
+from arknights_mower.utils.log import logger
 from arknights_mower.utils.logic_expression import LogicExpression
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.plan import Plan, PlanConfig, Room
@@ -26,7 +26,6 @@ operators = config.operators
 
 # 执行自动排班
 def main():
-    init_fhlr()
     logger.info("开始运行Mower")
     rapidocr.initialize_ocr()
     simulate()
@@ -48,7 +47,7 @@ def initialize(tasks, scheduler=None):
     base_scheduler = BaseSchedulerSolver()
     base_scheduler.operators = {}
     plan1 = {}
-    plan = config.plan
+    plan = config.plan.model_dump(exclude_none=True)
     conf = config.conf
     plan_config = PlanConfig(
         plan["conf"]["rest_in_full"],
@@ -110,9 +109,7 @@ def initialize(tasks, scheduler=None):
     plan["backup_plans"] = backup_plans
 
     logger.debug(plan)
-    base_scheduler.package_name = config.APPNAME  # 服务器
     base_scheduler.global_plan = plan
-    base_scheduler.drone_count_limit = conf.drone_count_limit
     base_scheduler.tasks = tasks
     base_scheduler.enable_party = conf.enable_party == 1  # 是否使用线索
     base_scheduler.leifeng_mode = conf.leifeng_mode == 1  # 是否有额外线索就送出
@@ -122,20 +119,11 @@ def initialize(tasks, scheduler=None):
     # logger.info("宿舍黑名单：" + str(plan_config.free_blacklist))
     # 估计没用了
     base_scheduler.MAA = None
-    base_scheduler.check_mail_enable = conf.check_mail_enable
-    base_scheduler.report_enable = conf.report_enable
-    base_scheduler.sign_in_enable = conf.sign_in.enable
-    base_scheduler.visit_friend_enable = conf.visit_friend
     base_scheduler.error = False
     base_scheduler.drone_room = None if conf.drone_room == "" else conf.drone_room
     base_scheduler.reload_room = list(
         filter(None, conf.reload_room.replace("，", ",").split(","))
     )
-    base_scheduler.drone_execution_gap = conf.drone_interval
-    base_scheduler.run_order_delay = conf.run_order_delay
-    base_scheduler.exit_game_when_idle = conf.exit_game_when_idle
-    base_scheduler.simulator = conf.simulator
-    base_scheduler.close_simulator_when_idle = conf.close_simulator_when_idle
 
     # 关闭游戏次数计数器
     base_scheduler.task_count = 0
@@ -159,10 +147,10 @@ def simulate():
             success = True
         except MowerExit:
             return
-        except Exception as E:
+        except Exception as e:
+            logger.exception(e)
             reconnect_tries += 1
             if reconnect_tries < 3:
-                logger.exception(E)
                 restart_simulator()
                 base_scheduler.device.client.check_server_alive()
                 Session().connect(config.conf.adb)
@@ -174,7 +162,7 @@ def simulate():
                     )
                 continue
             else:
-                raise E
+                raise e
     # base_scheduler.仓库扫描() #别删了 方便我找
     validation_msg = base_scheduler.initialize_operators()
     if validation_msg is not None:
@@ -256,7 +244,7 @@ def simulate():
                             ).date()
 
                     if (
-                        base_scheduler.check_mail_enable
+                        config.conf.check_mail_enable
                         and base_scheduler.daily_mail
                         < (datetime.now() - timedelta(hours=8)).date()
                     ):
@@ -321,9 +309,9 @@ def simulate():
                         logger.info(f"第{base_scheduler.task_count}次任务结束")
                         if remaining_time > 0:
                             if remaining_time > 300:
-                                if base_scheduler.close_simulator_when_idle:
+                                if config.conf.close_simulator_when_idle:
                                     restart_simulator(start=False)
-                                elif base_scheduler.exit_game_when_idle:
+                                elif config.conf.exit_game_when_idle:
                                     base_scheduler.device.exit()
                             body = task_template.render(
                                 tasks=[
@@ -355,7 +343,7 @@ def simulate():
                         rg_sleep = False
 
                     if not rg_sleep:
-                        if config.ra:
+                        if config.conf.RA:
                             base_scheduler.recog.update()
                             base_scheduler.back_to_index()
                             ra_solver = ReclamationAlgorithm(
@@ -365,7 +353,7 @@ def simulate():
                             remaining_time = (
                                 base_scheduler.tasks[0].time - datetime.now()
                             ).total_seconds()
-                        elif config.sf:
+                        elif config.conf.SF:
                             base_scheduler.recog.update()
                             base_scheduler.back_to_index()
                             sf_solver = SecretFront(
@@ -415,8 +403,8 @@ def simulate():
                         break
                     except MowerExit:
                         raise
-                    except Exception as ce:
-                        logger.error(ce)
+                    except Exception as e:
+                        logger.exception(e)
                         restart_simulator()
                         base_scheduler.device.client.check_server_alive()
                         Session().connect(config.conf.adb)
@@ -441,8 +429,8 @@ def simulate():
                 base_scheduler.device.control.scrcpy = Scrcpy(
                     base_scheduler.device.client
                 )
-        except Exception as E:
-            logger.exception(f"程序出错--->{E}")
+        except Exception as e:
+            logger.exception(f"程序出错--->{e}")
             base_scheduler.recog.update()
 
 

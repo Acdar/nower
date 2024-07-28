@@ -19,7 +19,6 @@ from werkzeug.exceptions import NotFound
 
 from arknights_mower import __system__
 from arknights_mower.utils import config
-from arknights_mower.utils.conf import load_plan, write_plan
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 
@@ -30,8 +29,6 @@ mimetypes.add_type("application/javascript", ".js")
 app = Flask(__name__, static_folder="dist", static_url_path="")
 sock = Sock(app)
 CORS(app)
-
-plan = {}
 
 mower_thread = None
 log_lines = []
@@ -83,30 +80,24 @@ def not_found(e):
 @require_token
 def load_config():
     if request.method == "GET":
-        config.load()
+        config.load_conf()
         return config.conf.model_dump()
     else:
         config.conf = config.Conf(**request.json)
-        config.save()
+        config.save_conf()
         return "New config saved!"
 
 
 @app.route("/plan", methods=["GET", "POST"])
 @require_token
 def load_plan_from_json():
-    global plan
-
     if request.method == "GET":
-        try:
-            plan = load_plan(config.conf.planFile)
-        except Exception as e:
-            logger.error(f"plan.json路径错误{e}，重置为plan.json")
-            plan = load_plan()
-        return plan
+        config.load_plan()
+        return config.plan.model_dump(exclude_none=True)
     else:
-        plan = request.json
-        write_plan(plan, config.conf.planFile)
-        return f"New plan saved at {config.conf.planFile}"
+        config.plan = config.PlanModel(**request.json)
+        config.save_plan()
+        return "New plan saved。"
 
 
 @app.route("/operator")
@@ -149,7 +140,6 @@ def start():
     tmp_dir.mkdir(exist_ok=True)
 
     config.stop_mower.clear()
-    config.plan = deepcopy(plan)
     config.operators = {}
 
     from arknights_mower.__main__ import main
@@ -234,10 +224,10 @@ def import_from_image():
     from arknights_mower.utils import qrcode
 
     img = Image.open(img_path)
-    global plan
-    plan = qrcode.decode(img)
-    if plan:
-        write_plan(plan, config.conf.planFile)
+    data = qrcode.decode(img)
+    if data:
+        config.plan = config.PlanModel(**data)
+        config.save_plan()
         return "排班已加载"
     return "排班表导入失败！"
 
@@ -255,8 +245,9 @@ def save_file_dialog():
 
     upper = Image.open(img)
 
-    global plan
-    img = qrcode.export(plan, upper, config.conf.theme)
+    img = qrcode.export(
+        config.plan.model_dump(exclude_none=True), upper, config.conf.theme
+    )
 
     img_path = conn_send("save")
     if img_path == "":
@@ -287,6 +278,7 @@ def get_maa_adb_version():
             maa_msg = "连接失败，请检查Maa日志！"
     except Exception as e:
         maa_msg = "Maa加载失败：" + str(e)
+        logger.exception(maa_msg)
     return maa_msg
 
 
@@ -300,7 +292,8 @@ def get_maa_conn_presets():
             encoding="utf-8",
         ) as f:
             presets = [i["configName"] for i in json.load(f)["connection"]]
-    except Exception:
+    except Exception as e:
+        logger.exception(e)
         presets = []
     return presets
 
@@ -486,7 +479,9 @@ def test_email():
         s.sendmail(config.conf.account, recipients, msg.as_string())
         s.close()
     except Exception as e:
-        return "邮件发送失败！\n" + str(e)
+        msg = "邮件发送失败！\n" + str(e)
+        logger.exception(msg)
+        return msg
     return "邮件发送成功！"
 
 
@@ -526,7 +521,7 @@ def test_serverJang_push():
 
     try:
         response = requests.get(
-            f"http://sft.acdar.dev/message/push?pushkey={config.conf['sendKey']} ",
+            f"https://sctapi.ftqq.com/{config.conf.sendKey}.send",
             params={
                 "text": "arknights-mower推送测试",
                 "desp": "arknights-mower推送测试",
@@ -538,7 +533,9 @@ def test_serverJang_push():
         else:
             return "发送失败 : " + response.json().get("message", "")
     except Exception as e:
-        return "发送失败 : " + str(e)
+        msg = "发送失败 : " + str(e)
+        logger.exception(e)
+        return msg
 
 
 @app.route("/test-pushplus-push")
@@ -561,8 +558,9 @@ def test_pushplus_push():
         else:
             return "发送失败 : " + response.json().get("message", "")
     except Exception as e:
-        print(type(e))
-        return "发送失败 : " + str(e)
+        msg = "发送失败 : " + str(e)
+        logger.exception(msg)
+        return msg
 
 
 @app.route("/check-skland")
@@ -638,7 +636,7 @@ def get_count():
                     return "添加任务成功！"
             raise Exception("添加任务失败！！")
         except Exception as e:
-            logger.error(f"添加任务失败：{str(e)}")
+            logger.exception(f"添加任务失败：{str(e)}")
             return str(e)
     else:
         if base_scheduler and mower_thread and mower_thread.is_alive():

@@ -53,8 +53,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     收集基建的产物：物资、赤金、信赖
     """
 
-    package_name = ""
-
     def __init__(self, device: Device = None, recog: Recognizer = None) -> None:
         super().__init__(device, recog)
         self.op_data = None
@@ -62,7 +60,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.drone_time = None
         self.reload_time = None
         self.reload_room = None
-        self.run_order_delay = 10
         self.clue_count_limit = 9
         self.enable_party = True
         self.leifeng_mode = False
@@ -73,9 +70,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.free_clue = None
         self.credit_fight = None
         self.task_count = 0
-        self.exit_game_when_idle = False
-        self.simulator = None
-        self.close_simulator_when_idle = False
         self.refresh_connecting = False
         self.recruit_time = None
         self.last_clue = None
@@ -91,11 +85,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.daily_skland = (datetime.now() - timedelta(days=1, hours=4)).date()
         self.daily_mail = (datetime.now() - timedelta(days=1, hours=8)).date()
         self.daily_visit_friend = (datetime.now() - timedelta(days=1, hours=4)).date()
-
-        self.sign_in_enable = True
-        self.check_mail_enable = True
-        self.report_enable = True
-        self.visit_friend_enable = True
 
     @property
     def party_time(self):
@@ -727,7 +716,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 and (
                     self.drone_time is None
                     or self.drone_time
-                    < datetime.now() - timedelta(hours=self.drone_execution_gap)
+                    < datetime.now() - timedelta(hours=config.conf.drone_interval)
                 )
                 and self.drone_room is not None
                 and self.no_pending_task(2)
@@ -813,9 +802,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 except MowerExit:
                     raise
                 except Exception as e:
+                    logger.exception(e)
                     if error_count > 3:
                         raise e
-                    logger.exception(e)
                     error_count += 1
                     self.back()
                     continue
@@ -1021,7 +1010,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.back()
             self.back()
         except Exception as e:
-            logger.error(e)
+            logger.exception(e)
 
     def skill_upgrade(self, skill):
         try:
@@ -1179,9 +1168,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     )
             self.back()
         except Exception as e:
-            logger.error(e)
+            logger.exception(e)
             send_message("专精任务失败" + str(e))
-            logger.error(e)
 
     def plan_run_order(self, room):
         plan = self.op_data.plan
@@ -1678,7 +1666,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             ),
             use_digit_reader=True,
         )
-        execute_time = execute_time - timedelta(seconds=(60 * self.run_order_delay))
+        execute_time = execute_time - timedelta(
+            seconds=(60 * config.conf.run_order_delay)
+        )
         logger.info("下一次进行插拔的时间为：" + execute_time.strftime("%H:%M:%S"))
         self.scene_graph_navigation(Scene.INFRA_MAIN)
         return execute_time
@@ -2088,7 +2078,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 ),
                 use_digit_reader=True,
             )
-            task_time = _time - timedelta(minutes=(self.run_order_delay))
+            task_time = _time - timedelta(minutes=config.conf.run_order_delay)
             task = find_next_task(
                 self.tasks, task_type=TaskTypes.RUN_ORDER, meta_data=room
             )
@@ -2134,15 +2124,17 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if accelerate:
             drone_count = self.digit_reader.get_drone(self.recog.gray)
             logger.info(f"当前无人机数量为：{drone_count}")
-            if drone_count < self.drone_count_limit or drone_count > 200:
-                logger.info(f"无人机数量小于{self.drone_count_limit}->停止")
+            if drone_count < config.conf.drone_count_limit or drone_count > 200:
+                logger.info(f"无人机数量小于{config.conf.drone_count_limit}->停止")
                 return
             logger.info("制造站加速")
             self.tap(accelerate)
             # self.tap_element('all_in')
             # 如果不是全部all in
             if all_in > 0:
-                tap_times = drone_count - self.drone_count_limit  # 修改为无人机阈值
+                tap_times = (
+                    drone_count - config.conf.drone_count_limit
+                )  # 修改为无人机阈值
                 for _count in range(tap_times):
                     self.tap((self.recog.w * 0.7, self.recog.h * 0.5), interval=0.1)
             else:
@@ -2171,8 +2163,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     drone_count = self.digit_reader.get_drone(self.recog.gray)
                     logger.info(f"当前无人机数量为：{drone_count}")
                     # 200 为识别错误
-                    if drone_count < self.drone_count_limit or drone_count == 201:
-                        logger.info(f"无人机数量小于{self.drone_count_limit}->停止")
+                    if (
+                        drone_count < config.conf.drone_count_limit
+                        or drone_count == 201
+                    ):
+                        logger.info(
+                            f"无人机数量小于{config.conf.drone_count_limit}->停止"
+                        )
                         break
                 st = accelerate[1]  # 起点
                 ed = accelerate[0]  # 终点
@@ -2308,7 +2305,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             wait_confirm = round(
                 (
                     (self.task.time - datetime.now()).total_seconds()
-                    + self.run_order_delay * 60
+                    + config.conf.run_order_delay * 60
                     - self.op_data.config.run_order_buffer_time
                 ),
                 1,
@@ -2883,12 +2880,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         and choose_error <= 0
                     ):
                         remaining_time = self.get_order_remaining_time()
-                        if 0 < remaining_time < (self.run_order_delay + 10) * 60:
+                        if 0 < remaining_time < (config.conf.run_order_delay + 10) * 60:
                             if self.op_data.config.run_order_buffer_time > 0:
                                 self.task.time = (
                                     datetime.now()
                                     + timedelta(seconds=remaining_time)
-                                    - timedelta(minutes=self.run_order_delay)
+                                    - timedelta(minutes=config.conf.run_order_delay)
                                 )
                                 logger.info(f"订单倒计时 {remaining_time}秒")
                                 self.back()
@@ -3002,7 +2999,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 )
                 wait_time = round((execute_time - datetime.now()).total_seconds(), 1)
                 logger.debug(f"停止{wait_time}秒等待订单完成")
-                if 0 < wait_time < self.run_order_delay * 60:
+                if 0 < wait_time < config.conf.run_order_delay * 60:
                     logger.info(f"停止{wait_time}秒等待订单完成")
                     self.sleep(wait_time)
                     # 等待服务器交互
@@ -3022,7 +3019,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     drone_count = self.digit_reader.get_drone(self.recog.gray)
                     logger.info(f"当前无人机数量为：{drone_count}")
                     # 200 为识别错误
-                    if drone_count >= self.drone_count_limit and drone_count != 201:
+                    if (
+                        drone_count >= config.conf.drone_count_limit
+                        and drone_count != 201
+                    ):
                         self.drone(
                             room, not_return=True, not_customize=True, skip_enter=True
                         )
@@ -3095,7 +3095,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             except MowerExit:
                 raise
             except Exception as e:
-                logger.error(e)
+                logger.exception(e)
                 error = True
                 self.recog.update()
                 back_count = 0
@@ -3126,7 +3126,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
             logger.info("Maa Python模块导入成功")
         except Exception as e:
-            logger.error(f"Maa Python模块导入失败：{str(e)}")
+            logger.exception(f"Maa Python模块导入失败：{str(e)}")
             raise Exception("Maa Python模块导入失败")
 
         Asst.load(path=path, incremental_path=path / "cache")
@@ -3191,6 +3191,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 else:
                     send_message("理智没有刷完")
 
+            conf = config.conf
             now_time = datetime.now().time()
             try:
                 min_time = datetime.strptime(conf.maa_rg_sleep_min, "%H:%M").time()
@@ -3201,13 +3202,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     rg_sleep = min_time < now_time < max_time
             except ValueError:
                 rg_sleep = False
-            if (config.rg or config.sss) and not rg_sleep:
+            if (conf.RG or conf.SSS) and not rg_sleep:
                 logger.info("准备开始：肉鸽/保全")
                 send_message("启动 肉鸽/保全")
                 while (self.tasks[0].time - datetime.now()).total_seconds() > 30:
                     self.MAA = None
                     self.initialize_maa()
-                    if config.rg:
+                    if conf.RG:
                         self.MAA.append_task(
                             "Roguelike",
                             {
@@ -3225,7 +3226,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                 "investments_count": 9999999,
                             },
                         )
-                    elif config.sss:
+                    elif conf.SSS:
                         if (
                             conf.sss.copilot == ""
                             or conf.sss.loop <= 0
@@ -3257,12 +3258,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.check_current_focus()
 
             elif not rg_sleep:
-                if config.ra:
+                if conf.RA:
                     self.recog.update()
                     self.back_to_index()
                     ra_solver = ReclamationAlgorithm(self.device, self.recog)
                     ra_solver.run(self.tasks[0].time - datetime.now())
-                elif config.sf:
+                elif conf.SF:
                     self.recog.update()
                     self.back_to_index()
                     sf_solver = SecretFront(self.device, self.recog)
@@ -3277,11 +3278,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.info(f"第{self.task_count}次任务结束")
             if remaining_time > 0:
                 if remaining_time > 300:
-                    if self.close_simulator_when_idle:
+                    if config.conf.close_simulator_when_idle:
                         from arknights_mower.utils.simulator import restart_simulator
 
                         restart_simulator(start=False)
-                    elif self.exit_game_when_idle:
+                    elif config.conf.exit_game_when_idle:
                         self.device.exit()
                 self.sleep(remaining_time)
                 self.check_current_focus()
@@ -3310,8 +3311,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         except MowerExit:
             raise
         except Exception as e:
+            logger.exception(f"森空岛签到失败:{e}")
             send_message(f"森空岛签到失败: {e}")
-            logger.warning(f"森空岛签到失败:{e}")
         # 仅尝试一次 不再尝试
         return (datetime.now() - timedelta(hours=4)).date()
 
@@ -3327,20 +3328,20 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.info(f"下一次公开招募执行时间在{config.conf.recruit_gap}小时之后")
 
     def mail_plan_solver(self):
-        if self.check_mail_enable:
+        if config.conf.check_mail_enable:
             MailSolver(self.device, self.recog).run()
         return True
 
     def report_plan_solver(self):
-        if self.report_enable:
+        if config.conf.report_enable:
             return ReportSolver(self.device, self.recog).run()
 
     def visit_friend_plan_solver(self):
-        if self.visit_friend_enable:
+        if config.conf.visit_friend:
             return CreditSolver(self.device, self.recog).run()
 
     def sign_in_plan_solver(self):
-        if not self.sign_in_enable:
+        if not config.conf.sign_in.enable:
             return
         hot_update.update()
         try:
@@ -3350,7 +3351,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             return sign_in_solver.run()
         except MowerExit:
             raise
-        except Exception:
+        except Exception as e:
+            logger.exception(e)
             return True
 
     def 仓库扫描(self):
@@ -3358,6 +3360,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             cultivateDepotSolver().start()
             DepotSolver(self.device, self.recog).run()
         except Exception as e:
-            logger.info(f"先不运行 出bug了 : {e}")
+            logger.exception(f"先不运行 出bug了 : {e}")
             return False
         return True

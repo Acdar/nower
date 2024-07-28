@@ -114,12 +114,12 @@ class Device(object):
         if tap:
             self.run(f"input tap {x} {y}")
         else:
-            self.run(f"am start -n {config.APPNAME}/{config.APP_ACTIVITY_NAME}")
+            self.run(f"am start -n {config.conf.APPNAME}/{config.APP_ACTIVITY_NAME}")
 
     def exit(self) -> None:
         """exit the application"""
         logger.info("退出游戏")
-        self.run(f"am force-stop {config.APPNAME}")
+        self.run(f"am force-stop {config.conf.APPNAME}")
 
     def send_keyevent(self, keycode: int) -> None:
         """send a key event"""
@@ -139,7 +139,7 @@ class Device(object):
         try:
             out = self.client.cmd_shell("pm path com.rayworks.droidcast", decode=True)
         except Exception:
-            logger.error("无法获取CLASSPATH")
+            logger.exception("无法获取CLASSPATH")
             return None
         prefix = "package:"
         postfix = ".apk"
@@ -165,7 +165,7 @@ class Device(object):
             if not class_path:
                 logger.error(f"无法获取CLASSPATH：{out}")
                 return False
-        port = config.droidcast["port"]
+        port = config.droidcast.port
         if port != 0 and is_port_in_use(port):
             try:
                 occupied_by_adb_forward = False
@@ -180,18 +180,18 @@ class Device(object):
                         break
                 if not occupied_by_adb_forward:
                     port = 0
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception(e)
         if port == 0:
             port = get_new_port()
-            config.droidcast["port"] = port
+            config.droidcast.port = port
             logger.info(f"更新DroidCast端口为{port}")
         else:
             logger.info(f"保持DroidCast端口为{port}")
         self.client.cmd(f"forward tcp:{port} tcp:{port}")
         logger.info("ADB端口转发成功，启动DroidCast")
-        if config.droidcast["process"] is not None:
-            config.droidcast["process"].terminate()
+        if config.droidcast.process is not None:
+            config.droidcast.process.terminate()
         process = self.client.process(
             class_path,
             [
@@ -201,16 +201,16 @@ class Device(object):
                 f"--port={port}",
             ],
         )
-        config.droidcast["process"] = process
+        config.droidcast.process = process
         return True
 
     def screencap(self, save: bool = False) -> bytes:
         """get a screencap"""
         if config.conf.droidcast.enable:
-            session = config.droidcast["session"]
+            session = config.droidcast.session
             while True:
                 try:
-                    port = config.droidcast["port"]
+                    port = config.droidcast.port
                     url = f"http://127.0.0.1:{port}/screenshot"
                     logger.debug(f"GET {url}")
                     r = session.get(url)
@@ -318,7 +318,7 @@ class Device(object):
             try:
                 focus = self.current_focus()
                 if focus not in [
-                    f"{config.APPNAME}/{config.APP_ACTIVITY_NAME}",
+                    f"{config.conf.APPNAME}/{config.APP_ACTIVITY_NAME}",
                     "com.hypergryph.arknights.bilibili/com.gsc.welcome.WelcomeActivity",
                 ]:
                     self.exit()  # 防止应用卡死
