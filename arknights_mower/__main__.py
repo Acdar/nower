@@ -216,13 +216,6 @@ def simulate():
                 ).total_seconds()
 
                 if remaining_time > 540:
-                    logger.info("检查版本更新")
-                    listing = get_listing()
-                    version = __version__.replace("+", "-")
-                    if not any(i.name.startswith(version) for i in listing):
-                        msg = "Mower版本过旧，请更新至受支持的版本"
-                        logger.error(msg)
-                        send_message(msg)
 
                     # 刷新时间以鹰历为准
                     if (
