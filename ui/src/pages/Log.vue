@@ -83,6 +83,17 @@ const stop_options = [
     key: 'maa'
   }
 ]
+
+function stop_maa() {
+  axios.get(`${import.meta.env.VITE_HTTP_URL}/stop-maa`)
+}
+
+const stop_options = [
+  {
+    label: '停止Maa',
+    key: 'maa'
+  }
+]
 </script>
 
 <template>
@@ -119,6 +130,16 @@ const stop_options = [
     </n-table>
     <n-log class="log" :log="log" language="mower" style="user-select: text" />
     <div class="action-container">
+      <drop-down v-if="running" :select="stop_maa" :options="stop_options" type="error" :up="true">
+        <n-button type="error" @click="stop" :loading="waiting" :disabled="waiting">
+          <template #icon>
+            <n-icon>
+              <stop-icon />
+            </n-icon>
+          </template>
+          <template v-if="!mobile">立即停止</template>
+        </n-button>
+      </drop-down>
       <drop-down v-if="running" :select="stop_maa" :options="stop_options" type="error" :up="true">
         <n-button type="error" @click="stop" :loading="waiting" :disabled="waiting">
           <template #icon>
