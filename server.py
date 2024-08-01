@@ -8,10 +8,11 @@ import sys
 import time
 from copy import deepcopy
 from functools import wraps
+from io import BytesIO
 from threading import Thread
 
 import pytz
-from flask import Flask, abort, request, send_from_directory
+from flask import Flask, abort, request, send_file, send_from_directory
 from flask_cors import CORS
 from flask_sock import Sock
 from tzlocal import get_localzone
@@ -80,7 +81,6 @@ def not_found(e):
 @require_token
 def load_config():
     if request.method == "GET":
-        config.load_conf()
         return config.conf.model_dump()
     else:
         config.conf = config.Conf(**request.json)
@@ -92,7 +92,6 @@ def load_config():
 @require_token
 def load_plan_from_json():
     if request.method == "GET":
-        config.load_plan()
         return config.plan.model_dump(exclude_none=True)
     else:
         config.plan = config.PlanModel(**request.json)
@@ -172,6 +171,18 @@ def stop():
         return "true"
 
 
+@app.route("/stop-maa")
+@require_token
+def stop_maa():
+    global mower_thread
+
+    if mower_thread is None:
+        return "true"
+
+    config.stop_maa.set()
+    return "OK"
+
+
 @sock.route("/log")
 def log(ws):
     global ws_connections
@@ -211,33 +222,60 @@ def open_folder_dialog():
     return conn_send("folder")
 
 
-@app.route("/import")
+@app.route("/import", methods=["POST"])
 @require_token
 def import_from_image():
-    img_path = conn_send("file")
+    img = request.files["img"]
+    if img.mimetype == "application/json":
+        data = json.load(img)
+    else:
+        try:
+            from PIL import Image
 
-    if not img_path:
-        return "No file selected."
+            from arknights_mower.utils import qrcode
 
-    from PIL import Image
-
-    from arknights_mower.utils import qrcode
-
-    img = Image.open(img_path)
-    data = qrcode.decode(img)
+            img = Image.open(img)
+            data = qrcode.decode(img)
+        except Exception as e:
+            msg = f"排班表导入失败：{e}"
+            logger.exception(msg)
+            return msg
     if data:
         config.plan = config.PlanModel(**data)
         config.save_plan()
         return "排班已加载"
-    return "排班表导入失败！"
+    else:
+        return "排班表导入失败！"
+
+
+@app.route("/sss-copilot", methods=["GET", "POST"])
+@require_token
+def upload_sss_copilot():
+    copilot = get_path("@app/sss.json")
+    if request.method == "GET":
+        if copilot.is_file():
+            with copilot.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            return {"exists": False}
+    else:
+        print(request.files)
+        data = request.files["copilot"]
+        data.save(copilot)
+        data.seek(0)
+        data = json.load(data)
+    return {
+        "exists": True,
+        "title": data["doc"]["title"],
+        "details": data["doc"]["details"],
+        "operators": data["opers"],
+    }
 
 
 @app.route("/dialog/save/img", methods=["POST"])
 @require_token
 def save_file_dialog():
     img = request.files["img"]
-    if not img:
-        return "图片未上传"
 
     from PIL import Image
 
@@ -248,13 +286,16 @@ def save_file_dialog():
     img = qrcode.export(
         config.plan.model_dump(exclude_none=True), upper, config.conf.theme
     )
+    buffer = BytesIO()
+    img.save(buffer, format="JPEG")
+    buffer.seek(0)
+    return send_file(buffer, "image/jpeg")
 
-    img_path = conn_send("save")
-    if img_path == "":
-        return "保存已取消"
-    else:
-        img.save(img_path)
-        return f"图片已导出至{img_path}"
+
+@app.route("/export-json")
+@require_token
+def export_json():
+    return send_file(config.plan_path)
 
 
 @app.route("/check-maa")
@@ -446,38 +487,11 @@ def get_orundum_data():
 @app.route("/test-email")
 @require_token
 def test_email():
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
+    from arknights_mower.utils.email import Email
 
-    msg = MIMEMultipart()
-    msg.attach(MIMEText("arknights-mower测试邮件", "plain"))
-    msg["Subject"] = config.conf.mail_subject + "测试邮件"
-    recipients = config.conf.recipient or [config.conf.account]
-    msg["To"] = ", ".join(recipients)
-    msg["From"] = config.conf.account
-    # 根据conf字典中的custom_smtp_server设置SMTP服务器和端口
-    smtp_server = config.conf.custom_smtp_server.server
-    ssl_port = config.conf.custom_smtp_server.ssl_port
-    use_qq_mail = not config.conf.custom_smtp_server.enable
-    # 根据encryption键的值选择加密方法
-    encryption = config.conf.custom_smtp_server.encryption
+    email = Email("mower测试邮件", config.conf.mail_subject + "测试邮件", None)
     try:
-        if use_qq_mail:
-            # 如果不用自定义用qq邮箱就使用TLS加密
-            s = smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=10.0)
-        elif encryption == "starttls":
-            # 使用STARTTLS加密
-            s = smtplib.SMTP(smtp_server, ssl_port, timeout=10.0)
-            s.starttls()
-        else:
-            # 如果encryption键的值不是starttls，则使用默认的TLS加密
-            s = smtplib.SMTP_SSL(smtp_server, ssl_port, timeout=10.0)
-        # 登录SMTP服务器
-        s.login(config.conf.account, config.conf.pass_code)
-        # 发送邮件
-        s.sendmail(config.conf.account, recipients, msg.as_string())
-        s.close()
+        email.send()
     except Exception as e:
         msg = "邮件发送失败！\n" + str(e)
         logger.exception(msg)
@@ -576,11 +590,7 @@ def get_count():
     from arknights_mower.__main__ import base_scheduler
     from arknights_mower.data import agent_list
     from arknights_mower.utils.operators import SkillUpgradeSupport
-    from arknights_mower.utils.scheduler_task import (
-        SchedulerTask,
-        TaskTypes,
-        find_next_task,
-    )
+    from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
 
     if request.method == "POST":
         try:
@@ -605,10 +615,9 @@ def get_count():
                         task_type=task["task_type"],
                         meta_data=task["meta_data"],
                     )
-                    next_task = find_next_task(
-                        base_scheduler.tasks, compare_time=task_time, compare_type="="
-                    )
-                    if next_task is not None:
+                    if base_scheduler.find_next_task(
+                        compare_time=task_time, compare_type="="
+                    ):
                         raise Exception("找到同时间任务请勿重复添加")
                     if new_task.type == TaskTypes.SKILL_UPGRADE:
                         supports = []

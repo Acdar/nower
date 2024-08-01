@@ -38,7 +38,8 @@ const {
   droidcast,
   maa_adb_path,
   maa_gap,
-  custom_screenshot
+  custom_screenshot,
+  check_for_updates
 } = storeToRefs(config_store)
 
 const { operators } = storeToRefs(plan_store)
@@ -243,7 +244,7 @@ async function test_screenshot() {
             <n-form-item :show-label="false">
               <n-checkbox
                 v-model:checked="exit_game_when_idle"
-                :disabled="close_simulator_when_idle"
+                :disabled="simulator.name != '' && close_simulator_when_idle"
               >
                 任务结束后退出游戏
                 <help-text>降低功耗</help-text>
@@ -269,6 +270,9 @@ async function test_screenshot() {
             </n-form-item>
             <n-form-item :show-label="false">
               <n-checkbox v-model:checked="start_automatically">启动后自动开始任务</n-checkbox>
+            </n-form-item>
+            <n-form-item :show-label="false">
+              <n-checkbox v-model:checked="check_for_updates">检查版本更新</n-checkbox>
             </n-form-item>
             <n-form-item label="截图方案">
               <n-radio-group v-model:value="screenshot_method">

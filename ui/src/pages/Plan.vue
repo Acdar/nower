@@ -6,7 +6,6 @@ import { storeToRefs } from 'pinia'
 
 const config_store = useConfigStore()
 const { free_blacklist, theme } = storeToRefs(config_store)
-const { build_config } = config_store
 
 const plan_store = usePlanStore()
 const {
@@ -65,8 +64,17 @@ async function save() {
   loading_bar.finish()
   const form_data = new FormData()
   form_data.append('img', blob)
-  const { data } = await axios.post(`${import.meta.env.VITE_HTTP_URL}/dialog/save/img`, form_data)
-  message.info(data)
+  const { data } = await axios.post(`${import.meta.env.VITE_HTTP_URL}/dialog/save/img`, form_data, {
+    responseType: 'blob'
+  })
+  const url = window.URL.createObjectURL(data)
+  const link = document.createElement('a')
+  link.href = url
+  link.setAttribute('download', 'plan.jpg')
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  window.URL.revokeObjectURL(url)
 }
 
 const mobile = inject('mobile')
@@ -173,15 +181,41 @@ import TrashOutline from '@vicons/ionicons5/TrashOutline'
 import AddTaskRound from '@vicons/material/AddTaskRound'
 import PlusRound from '@vicons/material/PlusRound'
 
-async function import_plan() {
-  const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/import`)
-  if (response.data == '排班已加载') {
-    await load_plan()
+function import_plan({ event }) {
+  const msg = event.target.response
+  if (msg == '排班已加载') {
     sub_plan.value = 'main'
+    load_plan()
     message.success('成功导入排班表！')
   } else {
-    message.error('排班表导入失败！')
+    message.error(msg)
   }
+}
+
+const import_url = `${import.meta.env.VITE_HTTP_URL}/import`
+
+const token = inject('token')
+
+const export_options = [
+  {
+    label: '导出JSON文件',
+    key: 'json'
+  }
+]
+
+async function export_json() {
+  const { data } = await axios.get(`${import.meta.env.VITE_HTTP_URL}/export-json`, {
+    responseType: 'blob'
+  })
+  console.log(data)
+  const url = window.URL.createObjectURL(data)
+  const link = document.createElement('a')
+  link.href = url
+  link.setAttribute('download', 'plan.json')
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  window.URL.revokeObjectURL(url)
 }
 </script>
 
@@ -189,60 +223,74 @@ async function import_plan() {
   <trigger-dialog />
   <task-dialog />
   <div class="plan-bar w-980 mx-auto mt-12 mw-980">
-    <n-button
-      :disabled="sub_plan == 'main'"
-      @click="sub_plan = sub_plan == 0 ? 'main' : sub_plan - 1"
-    >
-      <template #icon>
-        <n-icon><ios-arrow-back /></n-icon>
-      </template>
-    </n-button>
-    <n-button
-      :disabled="sub_plan == backup_plans.length - 1 || backup_plans.length == 0"
-      @click="sub_plan = sub_plan == 'main' ? 0 : sub_plan + 1"
-    >
-      <template #icon>
-        <n-icon><ios-arrow-forward /></n-icon>
-      </template>
-    </n-button>
+    <n-button-group>
+      <n-button
+        :disabled="sub_plan == 'main'"
+        @click="sub_plan = sub_plan == 0 ? 'main' : sub_plan - 1"
+      >
+        <template #icon>
+          <n-icon><ios-arrow-back /></n-icon>
+        </template>
+      </n-button>
+      <n-button
+        :disabled="sub_plan == backup_plans.length - 1 || backup_plans.length == 0"
+        @click="sub_plan = sub_plan == 'main' ? 0 : sub_plan + 1"
+      >
+        <template #icon>
+          <n-icon><ios-arrow-forward /></n-icon>
+        </template>
+      </n-button>
+    </n-button-group>
     <n-select v-model:value="sub_plan" :options="sub_plan_options" />
-    <n-button @click="create_sub_plan">
-      <template #icon>
-        <n-icon :size="22"><plus-round /></n-icon>
-      </template>
-      新建副表
-    </n-button>
-    <n-button :disabled="sub_plan == 'main'" @click="show_trigger_editor = true">
-      <template #icon>
-        <n-icon><code-slash /></n-icon>
-      </template>
-      编辑触发条件
-    </n-button>
-    <n-button :disabled="sub_plan == 'main'" @click="show_task = true">
-      <template #icon>
-        <n-icon><add-task-round /></n-icon>
-      </template>
-      编辑任务
-    </n-button>
-    <n-button :disabled="sub_plan == 'main'" @click="delete_sub_plan">
-      <template #icon>
-        <n-icon><trash-outline /></n-icon>
-      </template>
-      删除此副表
-    </n-button>
-    <n-divider vertical />
-    <n-button @click="import_plan">
-      <template #icon>
-        <n-icon><document-import /></n-icon>
-      </template>
-      导入排班
-    </n-button>
-    <n-button @click="save" :loading="generating_image" :disabled="generating_image">
-      <template #icon>
-        <n-icon><document-export /></n-icon>
-      </template>
-      导出排班
-    </n-button>
+    <n-button-group>
+      <n-button @click="create_sub_plan">
+        <template #icon>
+          <n-icon :size="22"><plus-round /></n-icon>
+        </template>
+        新建副表
+      </n-button>
+      <n-button :disabled="sub_plan == 'main'" @click="show_trigger_editor = true">
+        <template #icon>
+          <n-icon><code-slash /></n-icon>
+        </template>
+        编辑触发条件
+      </n-button>
+      <n-button :disabled="sub_plan == 'main'" @click="show_task = true">
+        <template #icon>
+          <n-icon><add-task-round /></n-icon>
+        </template>
+        编辑任务
+      </n-button>
+      <n-button :disabled="sub_plan == 'main'" @click="delete_sub_plan">
+        <template #icon>
+          <n-icon><trash-outline /></n-icon>
+        </template>
+        删除此副表
+      </n-button>
+    </n-button-group>
+    <n-upload
+      style="width: auto; margin-left: 8px"
+      :action="import_url"
+      :headers="{ token: token }"
+      :show-file-list="false"
+      name="img"
+      @finish="import_plan"
+    >
+      <n-button>
+        <template #icon>
+          <n-icon><document-import /></n-icon>
+        </template>
+        导入排班
+      </n-button>
+    </n-upload>
+    <drop-down :select="export_json" :options="export_options">
+      <n-button @click="save" :loading="generating_image" :disabled="generating_image">
+        <template #icon>
+          <n-icon><document-export /></n-icon>
+        </template>
+        导出图片
+      </n-button>
+    </drop-down>
   </div>
   <plan-editor ref="plan_editor" class="w-980 mx-auto mw-980 px-12" />
   <n-form

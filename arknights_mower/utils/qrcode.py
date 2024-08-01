@@ -75,10 +75,6 @@ def decode(img: Image.Image) -> Optional[Dict]:
             scope = ((left, top), (right, bottom))
             img1.rectangle(scope, fill=WHITE)
             result.append(d)
-    try:
-        result.sort(key=lambda i: (i.rect.top * 2 > img.size[1], i.rect.left))
-        result = b45decode(b"".join([i.data for i in result]))
-        return json.loads(decompress(result).decode("utf-8"))
-    except Exception as e:
-        logger.exception(e)
-        return None
+    result.sort(key=lambda i: (i.rect.top * 2 > img.size[1], i.rect.left))
+    result = b45decode(b"".join([i.data for i in result]))
+    return json.loads(decompress(result).decode("utf-8"))

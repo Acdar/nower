@@ -1,7 +1,6 @@
 import random
 import sys
 import time
-import traceback
 from abc import abstractmethod
 from datetime import datetime, timedelta
 from inspect import getframeinfo, stack
@@ -86,15 +85,11 @@ class BaseSolver:
             except MowerExit:
                 raise
             except RecognizeError as e:
-                logger.warning(f"识别出了点小差错 qwq: {e}")
+                logger.exception(f"识别出了点小差错 qwq: {e}")
                 self.recog.save_screencap("failure")
                 retry_times -= 1
                 self.sleep(3)
                 continue
-            except StrategyError as e:
-                logger.error(e)
-                logger.debug(traceback.format_exc())
-                return
             except Exception as e:
                 logger.exception(e)
                 raise e
@@ -156,7 +151,7 @@ class BaseSolver:
 
     def find(
         self,
-        res: str,
+        res: tp.Res,
         draw: bool = False,
         scope: tp.Scope = None,
         thres: int = None,
@@ -198,7 +193,7 @@ class BaseSolver:
 
     def tap_element(
         self,
-        element_name: str,
+        element_name: tp.Res,
         x_rate: float = 0.5,
         y_rate: float = 0.5,
         interval: float = 1,
@@ -267,6 +262,32 @@ class BaseSolver:
             "shop": (1804, 362),  # 采购中心
             "mission": (1631, 53),  # 任务
             "friend": (1801, 53),  # 好友
+        }
+        self.ctap(pos[name])
+
+    def tap_terminal_button(
+        self,
+        name: Literal[
+            "main",
+            "main_theme",
+            "intermezzi",
+            "biography",
+            "collection",
+            "regular",
+            "longterm",
+            "contract",
+        ],
+    ):
+        y = 1005
+        pos = {
+            "main": (115, y),  # 首页
+            "main_theme": (356, y),  # 主题曲
+            "intermezzi": (596, y),  # 插曲
+            "biography": (836, y),  # 别传
+            "collection": (1077, y),  # 资源收集
+            "regular": (1317, y),  # 常态事务
+            "longterm": (1556, y),  # 长期探索
+            "contract": (1796, y),  # 危机合约
         }
         self.ctap(pos[name])
 
@@ -518,7 +539,9 @@ class BaseSolver:
                         else:
                             break
                     if captcha_times <= 0:
-                        send_message("验证码自动滑动失败，退出游戏，停止运行mower")
+                        send_message(
+                            "验证码自动滑动失败，退出游戏，停止运行mower", level="ERROR"
+                        )
                         self.device.exit()
                         sys.exit()
                 elif scene == Scene.LOGIN_INPUT:
@@ -544,7 +567,7 @@ class BaseSolver:
             except MowerExit:
                 raise
             except RecognizeError as e:
-                logger.warning(f"识别出了点小差错 qwq: {e}")
+                logger.exception(f"识别出了点小差错 qwq: {e}")
                 self.recog.save_screencap("failure")
                 retry_times -= 1
                 self.sleep(3)
@@ -629,7 +652,7 @@ class BaseSolver:
             except MowerExit:
                 raise
             except RecognizeError as e:
-                logger.warning(f"识别出了点小差错 qwq: {e}")
+                logger.exception(f"识别出了点小差错 qwq: {e}")
                 self.recog.save_screencap("failure")
                 retry_times -= 1
                 self.sleep(3)
@@ -642,41 +665,46 @@ class BaseSolver:
         if self.scene() != Scene.INDEX:
             raise StrategyError
 
-    def to_sss(self, sss_type, ec_type=3):
+    def to_sss(self):
         """保全导航"""
         logger.info("保全导航")
         start_time = datetime.now()
 
-        while (scene := self.sss_scene()) not in [Scene.SSS_DEPLOY]:
-            if scene == Scene.INDEX:
-                self.tap_index_element("terminal")
-            elif scene == Scene.TERMINAL_MAIN:
-                self.tap((1317, 1005))
-            elif scene == Scene.TERMINAL_REGULAR:
-                self.tap((1548, 870))
-            elif scene == Scene.SSS_MAIN:
-                self.tap((384, 324) if sss_type == 1 else (768, 648))
-            elif scene == Scene.SSS_START:
-                self.tap_element("sss/start_button")
-            elif scene == Scene.SSS_EC:
-                if ec_type == 1:
-                    ec_x = 576
-                elif ec_type == 2:
-                    ec_x = 960
+        while (scene := self.sss_scene()) not in [Scene.SSS_DEPLOY, Scene.SSS_REDEPLOY]:
+            if datetime.now() - start_time > timedelta(minutes=1):
+                return "保全导航超时"
+            try:
+                if scene == Scene.INDEX:
+                    self.tap_index_element("terminal")
+                elif scene == Scene.TERMINAL_MAIN:
+                    self.tap_terminal_button("regular")
+                elif scene == Scene.TERMINAL_REGULAR:
+                    self.tap((1548, 870))
+                elif scene == Scene.SSS_MAIN:
+                    self.tap((384, 324) if config.conf.sss.type == 1 else (768, 648))
+                elif scene == Scene.SSS_START:
+                    self.tap_element("sss/start_button")
+                elif scene == Scene.SSS_EC:
+                    if config.conf.sss.ec == 1:
+                        ec_x = 576
+                    elif config.conf.sss.ec == 2:
+                        ec_x = 960
+                    else:
+                        ec_x = 1344
+                    self.tap((ec_x, 540))
+                    self.tap_element("sss/ec_button")
+                elif scene == Scene.SSS_DEVICE:
+                    self.tap_element("sss/device_button")
+                elif scene == Scene.SSS_SQUAD:
+                    self.tap_element("sss/squad_button")
+                elif scene == Scene.SSS_GUIDE:
+                    self.tap_element("sss/close_button")
                 else:
-                    ec_x = 1344
-                self.tap((ec_x, 540))
-                self.tap_element("sss/ec_button")
-            elif scene == Scene.SSS_DEVICE:
-                self.tap_element("sss/device_button")
-            elif scene == Scene.SSS_SQUAD:
-                self.tap((1875, 1000))
-            elif scene == Scene.SSS_GUIDE:
-                self.tap_element("sss/close_button")
-            now = datetime.now()
-            if now - start_time > timedelta(minutes=1):
-                return "保全导航失败"
-            self.sleep()
+                    self.sleep()
+            except MowerExit:
+                raise
+            except Exception as e:
+                logger.exception(f"保全导航出错：{e}")
         logger.info(
             f"保全导航成功，用时{(datetime.now() - start_time).total_seconds():.0f}秒"
         )

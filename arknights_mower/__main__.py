@@ -1,9 +1,12 @@
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 from evalidate import Expr
 
+from arknights_mower import __version__
+from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
 from arknights_mower.solvers.reclamation_algorithm import ReclamationAlgorithm
 from arknights_mower.solvers.secret_front import SecretFront
 from arknights_mower.utils import config, path, rapidocr
@@ -12,7 +15,7 @@ from arknights_mower.utils.datetime import format_time
 from arknights_mower.utils.depot import 创建csv, 创建json
 from arknights_mower.utils.device.adb_client.session import Session
 from arknights_mower.utils.device.scrcpy import Scrcpy
-from arknights_mower.utils.email import send_message, task_template
+from arknights_mower.utils.email import send_message, task_template, version_template
 from arknights_mower.utils.hot_update import get_listing
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.logic_expression import LogicExpression
@@ -38,11 +41,12 @@ def get_logic_exp(trigger):
     return LogicExpression(trigger["left"], trigger["operator"], trigger["right"])
 
 
-def initialize(tasks, scheduler=None):
-    if scheduler is not None:
+def initialize(
+    tasks: list, scheduler: BaseSchedulerSolver | None = None
+) -> BaseSchedulerSolver:
+    if scheduler:
         scheduler.handle_error(True)
         return scheduler
-    from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
 
     base_scheduler = BaseSchedulerSolver()
     base_scheduler.operators = {}
@@ -50,18 +54,18 @@ def initialize(tasks, scheduler=None):
     plan = config.plan.model_dump(exclude_none=True)
     conf = config.conf
     plan_config = PlanConfig(
-        plan["conf"]["rest_in_full"],
-        plan["conf"]["exhaust_require"],
-        plan["conf"]["resting_priority"],
-        ling_xi=plan["conf"]["ling_xi"],
-        workaholic=plan["conf"]["workaholic"],
-        max_resting_count=plan["conf"]["max_resting_count"],
+        rest_in_full=config.plan.conf.rest_in_full,
+        exhaust_require=config.plan.conf.exhaust_require,
+        resting_priority=config.plan.conf.resting_priority,
+        ling_xi=config.plan.conf.ling_xi,
+        workaholic=config.plan.conf.workaholic,
+        max_resting_count=config.plan.conf.max_resting_count,
         free_blacklist=conf.free_blacklist,
         resting_threshold=conf.resting_threshold,
         run_order_buffer_time=conf.run_order_grandet_mode.buffer_time
         if conf.run_order_grandet_mode.enable
         else -1,
-        refresh_trading_config=plan["conf"]["refresh_trading"],
+        refresh_trading_config=config.plan.conf.refresh_trading,
         free_room=conf.free_room,
     )
     for room, obj in plan[plan["default"]].items():
@@ -418,8 +422,8 @@ def simulate():
                 continue
             else:
                 raise e
-        except RuntimeError as re:
-            logger.exception(f"程序出错-尝试重启模拟器->{re}")
+        except RuntimeError as e:
+            logger.exception(f"程序出错-尝试重启模拟器->{e}")
             restart_simulator()
             base_scheduler.device.client.check_server_alive()
             Session().connect(config.conf.adb)

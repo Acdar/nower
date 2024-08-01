@@ -254,7 +254,7 @@ class SecretFront(BaseSolver):
         if scene == Scene.INDEX:
             self.tap_index_element("terminal")
         elif scene == Scene.TERMINAL_MAIN:
-            self.tap_element("main_theme_small")
+            self.tap_terminal_button("main_theme")
         elif scene == Scene.TERMINAL_MAIN_THEME:
             self.tap_element("navigation/main/14")
         elif scene == Scene.SF_ENTRANCE:
@@ -383,7 +383,9 @@ class SecretFront(BaseSolver):
             self.tap((960, 980), interval=2)
 
             if scene == Scene.SF_END:
-                send_message(f"隐秘战线成功完成{config.conf.secret_front.target}")
+                send_message(
+                    f"隐秘战线成功完成{config.conf.secret_front.target}", level="INFO"
+                )
 
         # 关闭说明
         elif scene == Scene.SF_INFO:

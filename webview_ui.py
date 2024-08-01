@@ -107,11 +107,13 @@ def start_tray(queue: mp.Queue, global_space, port, url):
     icon.run()
 
 
-def webview_window(child_conn, global_space, host, port, token, url, tray):
+def webview_window(child_conn, global_space, host, port, url, tray):
     import sys
     from threading import Thread
 
     import webview
+
+    webview.settings["ALLOW_DOWNLOADS"] = True
 
     from arknights_mower.__init__ import __version__
     from arknights_mower.utils import config, path
@@ -155,12 +157,6 @@ def webview_window(child_conn, global_space, host, port, token, url, tray):
             elif msg == "folder":
                 result = window.create_file_dialog(
                     dialog_type=webview.FOLDER_DIALOG,
-                )
-            elif msg == "save":
-                result = window.create_file_dialog(
-                    dialog_type=webview.SAVE_DIALOG,
-                    save_filename="plan.jpg",
-                    file_types=("JPG图片 (*.jpg)",),
                 )
             if result is None:
                 result = ""
@@ -232,7 +228,8 @@ if __name__ == "__main__":
     from threading import Thread
     from time import sleep
 
-    app.token = token
+    if token:
+        app.token = token
     flask_thread = Thread(
         target=app.run,
         kwargs={"host": host, "port": port},
@@ -262,7 +259,7 @@ if __name__ == "__main__":
     parent_conn, child_conn = mp.Pipe()
     webview_process = mp.Process(
         target=webview_window,
-        args=(child_conn, path.global_space, host, port, token, url, tray),
+        args=(child_conn, path.global_space, host, port, url, tray),
         daemon=True,
     )
     webview_process.start()
@@ -288,7 +285,6 @@ if __name__ == "__main__":
                             path.global_space,
                             host,
                             port,
-                            token,
                             url,
                             tray,
                         ),

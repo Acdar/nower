@@ -55,12 +55,6 @@ class EmailPart(ConfModel):
         ssl_port: int = 587
         "端口号"
 
-    class PushPlusConf(ConfModel):
-        enable: bool = False
-        "启用PushPlus"
-        token: str = ""
-        "PushPlus的token"
-
     mail_enable: int = 0
     "邮件提醒"
     account: str = ""
@@ -73,21 +67,17 @@ class EmailPart(ConfModel):
     "自定义邮箱"
     mail_subject: str = "[Mower通知]"
     "标题前缀"
-    server_push_enable: bool = False
-    "Server酱推送通知"
-    sendKey: str = ""
-    "Server酱的SENDKEY"
-    pushplus: PushPlusConf
-    "PushPlus通知设置"
+    notification_level: str = "INFO"
+    "邮件通知等级"
 
 
 class ExtraPart(ConfModel):
     class WebViewConf(ConfModel):
         port: int = 58000
         "端口号"
-        width: int = 2000
+        width: int = 1450
         "窗口宽度"
-        height: int = 1000
+        height: int = 850
         "窗口高度"
         token: str = ""
         "远程连接密钥"
@@ -104,6 +94,8 @@ class ExtraPart(ConfModel):
     "界面主题"
     screenshot: int = 200
     "截图数量"
+    check_for_updates: bool = True
+    "检查更新"
 
 
 class LongTaskPart(ConfModel):
@@ -120,22 +112,21 @@ class LongTaskPart(ConfModel):
         "开局干员使用非好友助战"
         mode: int = 1
         "策略"
-        investment_enabled: bool = True
-        "投资源石锭"
-        stop_when_investment_full: bool = True
-        "储备源石锭达到上限时停止"
         refresh_trader_with_dice: bool = False
         "刷新商店（指路鳞）"
+        expected_collapsal_paradigms: list[str] = [
+            "目空一些",
+            "睁眼瞎",
+            "图像损坏",
+            "一抹黑",
+        ]
+        "需要刷的坍缩范式"
 
     class SSSConf(ConfModel):
         type: int = 1
         "关卡"
         ec: int = 1
         "导能单元"
-        loop: int = 1
-        "循环次数"
-        copilot: str = ""
-        "作业路径"
 
     class ReclamationAlgorithmConf(ConfModel):
         timeout: int = 30
@@ -190,8 +181,6 @@ class RecruitPart(ConfModel):
     "五星招募策略，1自动，2手动"
     recruit_auto_only5: bool = False
     "五星词条组合唯一时自动选择"
-    recruit_email_enable: bool = True
-    "邮件通知"
 
 
 class RegularTaskPart(ConfModel):
@@ -417,13 +406,8 @@ class RegularTaskPart(ConfModel):
     "仓库物品混合读取"
     visit_friend: bool = True
     "访问好友"
-
-
-class ReportPart(ConfModel):
     report_enable: bool = True
     "读取基报"
-    send_report: bool = True
-    "发送邮件"
 
 
 class RIICPart(ConfModel):
@@ -543,7 +527,6 @@ class Conf(
     MaaPart,
     RecruitPart,
     RegularTaskPart,
-    ReportPart,
     RIICPart,
     SimulatorPart,
     SKLandPart,

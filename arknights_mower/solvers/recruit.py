@@ -85,16 +85,16 @@ class RecruitSolver(SceneGraphSolver):
                 )
         if self.agent_choose or self.result_agent:
             logger.info("招募汇总如下")
-            if config.conf.recruit_email_enable:
-                send_message(
-                    recruit_template.render(
-                        recruit_results=self.agent_choose,
-                        recruit_get_agent=self.result_agent,
-                        permit_count=config.conf.recruitment_permit,
-                        title_text="公招汇总",
-                    ),
-                    "公招汇总通知",
-                )
+            send_message(
+                recruit_template.render(
+                    recruit_results=self.agent_choose,
+                    recruit_get_agent=self.result_agent,
+                    permit_count=config.conf.recruitment_permit,
+                    title_text="公招汇总",
+                ),
+                "公招汇总通知",
+                "INFO",
+            )
         return self.agent_choose, self.result_agent
 
     def transition(self) -> bool:
@@ -235,15 +235,15 @@ class RecruitSolver(SceneGraphSolver):
                 return
 
         if self.recruit_order.index(recruit_result_level) <= self.recruit_order_index:
-            if config.conf.recruit_email_enable:
-                send_message(
-                    recruit_rarity.render(
-                        recruit_results=recruit_cal_result,
-                        title_text="稀有tag通知",
-                    ),
-                    "出稀有标签辣",
-                )
-                logger.info("稀有tag,发送邮件")
+            logger.info("稀有tag,发送邮件")
+            send_message(
+                recruit_rarity.render(
+                    recruit_results=recruit_cal_result,
+                    title_text="稀有tag通知",
+                ),
+                "出稀有标签辣",
+                "WARNING",
+            )
             if recruit_result_level == 6 or recruit_result_level == 1:
                 logger.debug(f"{recruit_result_level}星稀有tag  ,不选")
                 self.recruit_index = self.recruit_index + 1
@@ -295,12 +295,12 @@ class RecruitSolver(SceneGraphSolver):
         if recruit_time_choose == 540:
             # 09:00
             logger.debug("时间9h")
-            self.tap_element("one_hour", 0.2, 0.8, 0)
+            self.tap_element("one_hour", 0.2, 0.8, 0.5)
         elif recruit_time_choose == 230:
             # 03:50
             logger.debug("时间3h50min")
-            [self.tap_element("one_hour", 0.2, 0.2, 0) for _ in range(2)]
-            [self.tap_element("one_hour", 0.5, 0.2, 0) for _ in range(5)]
+            [self.tap_element("one_hour", 0.2, 0.2, 0.5) for _ in range(2)]
+            [self.tap_element("one_hour", 0.5, 0.2, 0.5) for _ in range(5)]
         # elif recruit_time_choose == 460:
         #     # 07:40
         #     logger.debug("时间7h40min")

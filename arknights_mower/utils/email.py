@@ -5,10 +5,10 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from threading import Thread
-from typing import Optional
+from time import sleep
+from typing import Literal, Optional
 
 import cv2
-import requests
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from arknights_mower.utils import config
@@ -21,14 +21,12 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         "arknights_mower",
         "__init__",
         "templates",
-        "email",
     )
 else:
     template_dir = os.path.join(
         os.getcwd(),
         "arknights_mower",
         "templates",
-        "email",
     )
 
 env = Environment(loader=FileSystemLoader(template_dir), autoescape=select_autoescape())
@@ -38,6 +36,7 @@ maa_template = env.get_template("maa.html")
 recruit_template = env.get_template("recruit_template.html")
 recruit_rarity = env.get_template("recruit_rarity.html")
 report_template = env.get_template("report_template.html")
+version_template = env.get_template("version.html")
 
 
 class Email:
@@ -83,44 +82,39 @@ class Email:
         s.quit()
 
 
-def send_message_sync(body="", subject="", attach_image=None):
-    conf = config.conf
-    if subject == "":
-        subject = body.split("\n")[0].strip()
-    subject = conf.mail_subject + subject
-
-    if conf.mail_enable:
-        email = Email(body, subject, attach_image)
-        try:
-            email.send()
-        except Exception as e:
-            logger.exception("邮件发送失败：" + str(e))
-
-    if conf.pushplus.enable:
-        url = "http://www.pushplus.plus/send"
-
-        try:
-            response = requests.post(
-                url,
-                json={
-                    "token": conf.pushplus.token,
-                    "title": subject,
-                    "content": body,
-                    "template": "html",
-                },
-            ).json()
-            if response["code"] != 200:
-                logger.error(f"PushPlus通知发送失败：{response['msg']}")
-        except Exception as e:
-            logger.exception("PushPlus通知发送失败：" + str(e))
-
-
-def send_message(body="", subject="", attach_image: Optional[tp.Image] = None):
+def send_message(
+    body="",
+    subject="",
+    level: Literal["INFO", "WARNING", "ERROR"] = "INFO",
+    attach_image: Optional[tp.Image] = None,
+):
     """异步发送邮件
 
     Args:
         body: 邮件内容
         subject: 邮件标题
+        level: 通知等级
         attach_image: 图片附件
     """
-    Thread(target=send_message_sync, args=(body, subject, attach_image)).start()
+    conf = config.conf
+    if not conf.mail_enable:
+        return
+    if conf.notification_level == "WARNING" and level == "INFO":
+        return
+    if conf.notification_level == "ERROR" and level != "ERROR":
+        return
+    if subject == "":
+        subject = body.split("\n")[0].strip()
+    subject = conf.mail_subject + subject
+    email = Email(body, subject, attach_image)
+
+    def send_message_sync(email):
+        for i in range(3):
+            try:
+                email.send()
+                break
+            except Exception as e:
+                logger.exception("邮件发送失败：" + str(e))
+                sleep(2**i)
+
+    Thread(target=send_message_sync, args=(email,)).start()

@@ -3,7 +3,7 @@
     v-model:list="operatorValue"
     axis="xy"
     appendTo=".n-select"
-    distance="5"
+    :distance="5"
     class="width100"
     group="operator"
     :accept="!props.disabled"
@@ -53,7 +53,7 @@ const render_op_slick_tag = ({ option, handleClose }) => {
       disabled: props.disabled,
       style: 'z-index: 999;display: inline;'
     },
-    render_op_tag({ option, handleClose })
+    () => render_op_tag({ option, handleClose })
   )
 }
 
