@@ -21,6 +21,10 @@ const mobile = inject('mobile')
       <n-checkbox v-model:checked="recruit_enable">
         <div class="card-title">公开招募</div>
       </n-checkbox>
+      <help-text>
+        <div>暂时无法关闭，且下列设置无效。</div>
+        <div>将在每次调用MAA时进行公招，并且只招四星。</div>
+      </help-text>
     </template>
     <n-form
       :label-placement="mobile ? 'top' : 'left'"

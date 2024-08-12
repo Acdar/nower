@@ -282,9 +282,6 @@ const scene_name = {
             <n-form-item :show-label="false">
               <n-checkbox v-model:checked="start_automatically">启动后自动开始任务</n-checkbox>
             </n-form-item>
-            <n-form-item :show-label="false">
-              <n-checkbox v-model:checked="check_for_updates">检查版本更新</n-checkbox>
-            </n-form-item>
             <n-form-item label="截图方案">
               <n-radio-group v-model:value="screenshot_method">
                 <n-flex>

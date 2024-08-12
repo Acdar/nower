@@ -155,7 +155,10 @@ class Plan:
     def set_timing_enum(value: str) -> PlanTriggerTiming:
         "将字符串转换为副表触发时机"
         try:
-            return PlanTriggerTiming[value.upper()]
+            if value is not None:
+                return PlanTriggerTiming[value.upper()]
+            else:
+                return PlanTriggerTiming.AFTER_PLANNING
         except Exception as e:
             logger.exception(e)
             return PlanTriggerTiming.AFTER_PLANNING

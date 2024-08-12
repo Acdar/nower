@@ -194,7 +194,7 @@ def simulate():
                 ).total_seconds()
 
                 if remaining_time > 540:
-                    if config.conf.check_for_updates:
+                    '''if config.conf.check_for_updates:
                         logger.info("检查版本更新")
                         listing = get_listing()
                         version = __version__.replace("+", "-")
@@ -233,7 +233,7 @@ def simulate():
                         if base_scheduler.visit_friend_plan_solver():
                             base_scheduler.daily_visit_friend = (
                                 datetime.now() - timedelta(hours=4)
-                            ).date()
+                            ).date()'''
 
                     if (
                         base_scheduler.daily_report
@@ -264,8 +264,8 @@ def simulate():
                                 datetime.now() - timedelta(hours=8)
                             ).date()
 
-                    if config.conf.recruit_enable:
-                        base_scheduler.recruit_plan_solver()
+                    '''if config.conf.recruit_enable:
+                        base_scheduler.recruit_plan_solver()'''
 
                     # 应该在maa任务之后
                     def _is_depotscan():
