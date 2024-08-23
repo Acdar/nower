@@ -542,6 +542,7 @@ const scene_name = {
       <div><Depotswitch /></div>
       <div><DailyMission /></div>
       <div><email /></div>
+      <div><ServerJang /></div>
     </div>
 
     <div class="grid-right">

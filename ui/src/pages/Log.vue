@@ -241,8 +241,8 @@ const stop_options = [
   opacity: v-bind(bg_opacity);
   background-image: url(/bg.webp);
   background-repeat: no-repeat;
-  background-size: cover;
-  background-position: 30% 75%;
+  background-size: contain;
+  background-position: 100% 100%;
   pointer-events: none;
 }
 </style>

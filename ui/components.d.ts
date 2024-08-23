@@ -88,6 +88,7 @@ declare module 'vue' {
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SecretFront: typeof import('./src/components/SecretFront.vue')['default']
+    ServerJang: typeof import('./src/components/ServerJang.vue')['default']
     SKLand: typeof import('./src/components/SKLand.vue')['default']
     SlickOperatorSelect: typeof import('./src/components/SlickOperatorSelect.vue')['default']
     TaskDialog: typeof import('./src/components/TaskDialog.vue')['default']

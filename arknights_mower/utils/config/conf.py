@@ -69,6 +69,10 @@ class EmailPart(ConfModel):
     "标题前缀"
     notification_level: str = "INFO"
     "邮件通知等级"
+    server_push_enable: bool = False
+    "Server酱推送通知"
+    sendKey: str = ""
+    "Server酱的SENDKEY"
 
 
 class ExtraPart(ConfModel):

@@ -19,6 +19,9 @@ export const useConfigStore = defineStore('config', () => {
   const maa_rg_enable = ref(0)
   const maa_long_task_type = ref('rogue')
   const mail_enable = ref(false)
+  const server_push_enable = ref(false) // Server酱通知开关
+  const sendKey = ref('') // Server酱Key值
+  const pushplus = ref({})
   const account = ref('')
   const pass_code = ref('')
   const recipient = ref('')
@@ -142,6 +145,9 @@ export const useConfigStore = defineStore('config', () => {
     sss.value = response.data.sss
     screenshot.value = response.data.screenshot
     screenshot_interval.value = response.data.screenshot_interval
+    // 新增：加载Server酱的配置
+    server_push_enable.value = response.data.server_push_enable != 0
+    sendKey.value = response.data.sendKey
     mail_subject.value = response.data.mail_subject
     skland_enable.value = response.data.skland_enable != 0
     skland_info.value = response.data.skland_info
@@ -191,6 +197,9 @@ export const useConfigStore = defineStore('config', () => {
       maa_expiring_medicine: maa_expiring_medicine.value,
       maa_weekly_plan: maa_weekly_plan.value,
       maa_weekly_plan1: maa_weekly_plan1.value,
+      // 新增：Server酱的配置
+      server_push_enable: server_push_enable.value ? 1 : 0,
+      sendKey: sendKey.value,
       mail_enable: mail_enable.value ? 1 : 0,
       package_type: package_type.value == 'official' ? 1 : 0,
       pass_code: pass_code.value,
@@ -284,6 +293,8 @@ export const useConfigStore = defineStore('config', () => {
     maa_expiring_medicine,
     maa_weekly_plan,
     maa_weekly_plan1,
+    server_push_enable,
+    sendKey,
     mail_enable,
     account,
     pass_code,
