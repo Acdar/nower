@@ -1,6 +1,6 @@
-import { defineStore } from 'pinia'
-import { ref, watchEffect, inject } from 'vue'
 import axios from 'axios'
+import { defineStore } from 'pinia'
+import { inject, ref, watchEffect } from 'vue'
 
 export const useConfigStore = defineStore('config', () => {
   const adb = ref('')
@@ -48,6 +48,7 @@ export const useConfigStore = defineStore('config', () => {
   const rogue = ref({})
   const sss = ref({})
   const screenshot = ref(0)
+  const screenshot_interval = ref(500)
   const mail_subject = ref('')
   const skland_enable = ref(false)
   const skland_info = ref([])
@@ -75,6 +76,8 @@ export const useConfigStore = defineStore('config', () => {
   const custom_screenshot = ref({})
   const check_for_updates = ref(true)
   const notification_level = ref('INFO')
+  const waiting_scene = ref({})
+  const exipring_medicine_on_weekend = ref(false)
 
   async function load_shop() {
     const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/shop`)
@@ -138,6 +141,7 @@ export const useConfigStore = defineStore('config', () => {
     rogue.value = response.data.rogue
     sss.value = response.data.sss
     screenshot.value = response.data.screenshot
+    screenshot_interval.value = response.data.screenshot_interval
     mail_subject.value = response.data.mail_subject
     skland_enable.value = response.data.skland_enable != 0
     skland_info.value = response.data.skland_info
@@ -165,6 +169,8 @@ export const useConfigStore = defineStore('config', () => {
     custom_screenshot.value = response.data.custom_screenshot
     check_for_updates.value = response.data.check_for_updates
     notification_level.value = response.data.notification_level
+    waiting_scene.value = response.data.waiting_scene
+    exipring_medicine_on_weekend.value = response.data.exipring_medicine_on_weekend
   }
 
   function build_config() {
@@ -217,6 +223,7 @@ export const useConfigStore = defineStore('config', () => {
       rogue: rogue.value,
       sss: sss.value,
       screenshot: screenshot.value,
+      screenshot_interval: screenshot_interval.value,
       mail_subject: mail_subject.value,
       skland_enable: skland_enable.value,
       skland_info: skland_info.value,
@@ -247,7 +254,9 @@ export const useConfigStore = defineStore('config', () => {
       credit_fight: credit_fight.value,
       custom_screenshot: custom_screenshot.value,
       check_for_updates: check_for_updates.value,
-      notification_level: notification_level.value
+      notification_level: notification_level.value,
+      waiting_scene: waiting_scene.value,
+      exipring_medicine_on_weekend: exipring_medicine_on_weekend.value
     }
   }
 
@@ -307,6 +316,7 @@ export const useConfigStore = defineStore('config', () => {
     rogue,
     sss,
     screenshot,
+    screenshot_interval,
     mail_subject,
     recruit_enable,
     recruitment_permit,
@@ -333,6 +343,8 @@ export const useConfigStore = defineStore('config', () => {
     credit_fight,
     custom_screenshot,
     check_for_updates,
-    notification_level
+    notification_level,
+    waiting_scene,
+    exipring_medicine_on_weekend
   }
 })

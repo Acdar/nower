@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 import cv2
+import urllib.request
 
 from arknights_mower.data import agent_list, base_room_list
 from arknights_mower.solvers.base_mixin import BaseMixin
@@ -31,7 +32,7 @@ from arknights_mower.utils.csleep import MowerExit, csleep
 from arknights_mower.utils.datetime import format_time, get_server_weekday
 from arknights_mower.utils.device.device import Device
 from arknights_mower.utils.digit_reader import DigitReader
-from arknights_mower.utils.email import send_message
+from arknights_mower.utils.email import send_message, maa_template
 from arknights_mower.utils.graph import SceneGraphSolver
 from arknights_mower.utils.image import cropimg, loadres, thres2
 from arknights_mower.utils.log import logger
@@ -76,6 +77,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.recruit_time = None
         self.last_clue = None
         self.sleeping = False
+        self.operators = {}
 
         self.last_execution = {
             "maa": None,
@@ -143,7 +145,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             self.free_clue = None
         if self.credit_fight is not None and self.credit_fight != get_server_weekday():
             self.credit_fight = None
-        logger.debug(self.credit_fight)
+        #logger.debug(self.credit_fight)
         self.todo_task = False
         self.collect_notification = False
         self.planned = False
@@ -327,7 +329,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             return
         # 肥鸭充能新模式：https://github.com/ArkMowers/arknights-mower/issues/551
         target = None
-        fia_threshold = 0.9
+        fia_threshold = 0.8
         for operator in fia_plan:
             data = self.op_data.operators[operator]
             operator_morale = data.current_mood()
@@ -361,6 +363,16 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     continue
             target = operator
             break
+        # 若全部跳过则令目标干员为心情最低干员
+        if target is None:
+            target = fia_plan[0]
+            op_mood = 24
+            for op in fia_plan:
+                data = self.op_data.operators[op]
+                op_mood_t = data.current_mood()
+                if op_mood_t < op_mood:
+                    target = op
+                    op_mood = op_mood_t
         if target:
             self.tasks.append(
                 SchedulerTask(
@@ -622,7 +634,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         config.conf.run_order_grandet_mode.back_to_index
                         and TaskTypes.RUN_ORDER == self.task.type
                         and not self.refresh_connecting
-                        and self.op_data.config.run_order_buffer_time > 0
+                        and config.conf.run_order_buffer_time > 0
                     ):
                         logger.info("跑单前返回主界面以保持登录状态")
                         self.back_to_index()
@@ -2147,7 +2159,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     if not self.waiting_solver():
                         return
                 self.recog.update()
-                self.recog.save_screencap("run_order")
                 if not (
                     self.drone_room is None
                     or (
@@ -2296,13 +2307,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if (
             room in self.op_data.run_order_rooms
             and len(new_plan) == 1
-            and self.op_data.config.run_order_buffer_time > 0
+            and config.conf.run_order_buffer_time > 0
         ):
             wait_confirm = round(
                 (
                     (self.task.time - datetime.now()).total_seconds()
                     + config.conf.run_order_delay * 60
-                    - self.op_data.config.run_order_buffer_time
+                    - config.conf.run_order_buffer_time
                 ),
                 1,
             )
@@ -2652,7 +2663,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         mood_p = [tuple(zip(mood_x, y)) for y in mood_y]
         result = []
         swiped = False
-        self.recog.save_screencap("get_agent_from_room")
         for i in range(0, length):
             if i >= 3 and not swiped:
                 while self.get_color((1800, 930))[0] > 51:
@@ -2663,7 +2673,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         interval=1,
                     )
                 swiped = True
-                self.recog.save_screencap("get_agent_from_room")
             data = {}
             if self.find("infra_no_operator", scope=name_p[i]):
                 _name = ""
@@ -2867,12 +2876,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     # choose_error <= 0 选人如果失败则马上重新选过
                     if (
                         len(new_plan) == 1
-                        and self.op_data.config.run_order_buffer_time > 0
+                        and config.conf.run_order_buffer_time > 0
                         and choose_error <= 0
                     ):
                         remaining_time = self.get_order_remaining_time()
                         if 0 < remaining_time < (config.conf.run_order_delay + 10) * 60:
-                            if self.op_data.config.run_order_buffer_time > 0:
+                            if config.conf.run_order_buffer_time > 0:
                                 self.task.time = (
                                     datetime.now()
                                     + timedelta(seconds=remaining_time)
@@ -2883,7 +2892,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                 self.turn_on_room_detail(room)
                         else:
                             logger.info("检测到漏单")
-                            self.recog.save_screencap("run_order_failure")
                             send_message("检测到漏单！", level="WARNING")
                             self.reset_room_time(room)
                             raise Exception("检测到漏单！")
@@ -2929,7 +2937,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 logger.exception(e)
                 choose_error += 1
                 self.recog.update()
-                self.recog.save_screencap("choose_agent_failure")
                 if "检测到漏单！" in str(e):
                     return {}
                 if choose_error > 3:
@@ -2947,7 +2954,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if len(new_plan) != 1:
             self.back(0.5)
         else:
-            if self.op_data.config.run_order_buffer_time <= 0:
+            if config.conf.run_order_buffer_time <= 0:
                 self.back(0.5)
         return new_plan
 
@@ -2960,7 +2967,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         for room in rooms:
             new_plan = self.agent_arrange_room(new_plan, room, plan, get_time=get_time)
         if len(new_plan) == 1:
-            if self.op_data.config.run_order_buffer_time <= 0:
+            if config.conf.run_order_buffer_time <= 0:
                 logger.info("开始插拔")
                 self.drone(room, not_customize=True)
             else:
@@ -2998,7 +3005,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         if not self.waiting_solver():
                             return
                 self.recog.update()
-                self.recog.save_screencap("run_order")
                 # 接受当前订单
                 while (
                     self.find("order_ready", scope=((450, 675), (600, 750))) is not None
@@ -3017,7 +3023,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         self.drone(
                             room, not_return=True, not_customize=True, skip_enter=True
                         )
-                if self.op_data.config.run_order_buffer_time > 0:
+                if config.conf.run_order_buffer_time > 0:
                     while self.find("bill_accelerate") is not None:
                         self.back(interval=0.5)
                 else:
@@ -3032,7 +3038,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 new_plan[run_order_room] = [
                     data.agent for data in self.op_data.plan[room]
                 ]
-            if self.op_data.config.run_order_buffer_time > 0:
+            if config.conf.run_order_buffer_time > 0:
                 self.agent_arrange_room({}, run_order_room, new_plan, skip_enter=True)
             else:
                 self.tasks.append(
@@ -3097,8 +3103,36 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
     @CFUNCTYPE(None, c_int, c_char_p, c_void_p)
     def log_maa(msg, details, arg):
-        logger.debug(json.loads(details.decode("utf-8")))
-        logger.debug(Message(msg))
+        m = Message(msg)
+        d = json.loads(details.decode("utf-8"))
+        logger.debug(d)
+        logger.debug(m)
+        logger.debug(arg)
+        if "what" in d and d["what"] == "StageDrops":
+            global stage_drop
+            stage_drop["details"].append(d["details"]["drops"])
+            stage_drop["summary"] = d["details"]["stats"]
+
+        elif "what" in d and d["what"] == "RecruitTagsSelected":
+            global recruit_tags_selected
+            recruit_tags_selected["tags"].append(d["details"]["tags"])
+
+        elif "what" in d and d["what"] == "RecruitResult":
+            global recruit_results
+            temp_dict = {
+                "tags": d["details"]["tags"],
+                "level": d["details"]["level"],
+                "result": d["details"]["result"],
+            }
+            recruit_results["results"].append(temp_dict)
+
+        elif "what" in d and d["what"] == "RecruitSpecialTag":
+            global recruit_special_tags
+            recruit_special_tags["tags"].append(d["details"]["tags"])
+        # elif d.get("what") == "DepotInfo" and d["details"].get("done") is True:
+        #     logger.info(f"开始扫描仓库（MAA）")
+        #     process_itemlist(d)
+
 
     def initialize_maa(self):
         config.stop_maa.clear()
@@ -3118,9 +3152,25 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.exception(f"Maa Python模块导入失败：{str(e)}")
             raise Exception("Maa Python模块导入失败")
 
+        try:
+            logger.debug(f"开始更新Maa活动关卡导航……")
+            ota_tasks_url = (
+                "https://ota.maa.plus/MaaAssistantArknights/api/resource/tasks.json"
+            )
+            ota_tasks_path = path / "cache" / "resource" / "tasks.json"
+            ota_tasks_path.parent.mkdir(parents=True, exist_ok=True)
+            with urllib.request.urlopen(ota_tasks_url) as u:
+                res = u.read().decode("utf-8")
+            with open(ota_tasks_path, "w", encoding="utf-8") as f:
+                f.write(res)
+            logger.info(f"Maa活动关卡导航更新成功")
+        except Exception as e:
+            logger.error(f"Maa活动关卡导航更新失败：{str(e)}")
+
         Asst.load(path=path, incremental_path=path / "cache")
 
         self.MAA = Asst(callback=self.log_maa)
+        self.stages = []
         self.MAA.set_instance_option(
             InstanceOptionType.touch_type, conf.maa_touch_option
         )
@@ -3132,12 +3182,71 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.info("MAA 连接失败")
             raise Exception("MAA 连接失败")
 
-    def maa_plan_solver(self):
+    def append_maa_task(self, type):
+        if type in ["StartUp", "Visit", "Award"]:
+            self.MAA.append_task(type)
+        elif type == "Fight":
+            conf = config.conf
+            _plan = conf.maa_weekly_plan[get_server_weekday()]
+            logger.info(f"现在服务器是{_plan.weekday}")
+            for stage in _plan.stage:
+                logger.info(f"添加关卡:{stage}")
+                self.MAA.append_task(
+                    "Fight",
+                    {
+                        # 空值表示上一次
+                        # 'stage': '',
+                        "stage": stage,
+                        "medicine": _plan.medicine,
+                        "stone": 999 if conf.maa_eat_stone else 0,
+                        "times": 999,
+                        "report_to_penguin": True,
+                        "client_type": "",
+                        "penguin_id": "",
+                        "DrGrandet": False,
+                        "server": "CN",
+                        "expiring_medicine": 999
+                        if conf.exipring_medicine_on_weekend
+                        else 0,
+                    },
+                )
+                self.stages.append(stage)
+        elif type == "Mall":
+            conf=config.conf
+            self.MAA.append_task(
+                "Mall",
+                {
+                    "shopping": True,
+                    "buy_first": conf.maa_mall_buy.split(","),
+                    "blacklist": conf.maa_mall_blacklist.split(","),
+                    "credit_fight": conf.maa_credit_fight
+                                    and "" not in self.stages
+                                    and self.credit_fight is None,
+                    "force_shopping_if_credit_full": conf.maa_mall_ignore_blacklist_when_full,
+                },
+            )
+        # elif type == 'Depot':
+        #     self.MAA.append_task('Depot', {
+        #         "enable": self.maa_config['maa_depot_enable']
+        #     })
+        elif type == "Recruit":
+            self.MAA.append_task(
+                "Recruit",
+                {
+                    "refresh": True,
+                    "select": [3, 4],
+                    "confirm": [4],
+                    "times": 4
+                }
+            )
+
+    def maa_plan_solver(self, tasks="All", one_time=False):
         """清日常"""
         try:
             conf = config.conf
             if (
-                self.last_execution["maa"] is not None
+                not one_time
+                and self.last_execution["maa"] is not None
                 and (
                     delta := (
                         timedelta(hours=conf.maa_gap)
@@ -3149,8 +3258,21 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             ):
                 logger.info(f"{format_time(delta.total_seconds())}后开始做日常任务")
             else:
-                send_message("开始刷理智")
-                plan_today = conf.maa_weekly_plan[get_server_weekday()]
+                send_message("启动MAA")
+                self.back_to_index()
+                # 任务及参数请参考 docs/集成文档.md
+                self.initialize_maa()
+                if tasks == "All":
+                    tasks = ["StartUp", "Fight", "Recruit", "Visit", "Mall", "Award"]
+                    # tasks = ['StartUp', 'Fight', 'Visit', 'Mall', 'Award', 'Depot']
+                    # tasks = ['StartUp', 'Fight', 'Recruit', 'Visit', 'Mall', 'Award']
+                for maa_task in tasks:
+                    # if maa_task == "Recruit":
+                    # continue
+                    self.append_maa_task(maa_task)
+                self.MAA.start()
+                stop_time = None
+                '''plan_today = conf.maa_weekly_plan[get_server_weekday()]
                 stage_today = plan_today.stage
                 nav_solver = NavigationSolver(self.device, self.recog)
                 ope_solver = OperationSolver(self.device, self.recog)
@@ -3178,7 +3300,55 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.last_execution["maa"] = datetime.now()
                     send_message("刷理智结束")
                 else:
-                    send_message("理智没有刷完")
+                    send_message("理智没有刷完")'''
+
+                if one_time:
+                    stop_time = datetime.now() + timedelta(minutes=5)
+                else:
+                    global stage_drop
+                    stage_drop = {"details": [], "summary": {}}
+
+                logger.info(f"MAA 启动")
+                hard_stop = False
+                while self.MAA.running():
+                    # 单次任务默认5分钟
+                    if one_time and stop_time < datetime.now():
+                        self.MAA.stop()
+                        hard_stop = True
+                    # 5分钟之前就停止
+                    elif (
+                            not one_time
+                            and (self.tasks[0].time - datetime.now()).total_seconds() < 300
+                    ):
+                        self.MAA.stop()
+                        hard_stop = True
+                    else:
+                        self.sleep(5)
+                if hard_stop:
+                    hard_stop_msg = "Maa任务未完成，等待3分钟关闭游戏"
+                    logger.info(hard_stop_msg)
+                    send_message(hard_stop_msg)
+                    self.sleep(180)
+                    self.device.exit()
+                    if self.device.check_current_focus():
+                        self.recog.update()
+                elif not one_time:
+                    logger.info(f"记录MAA 本次执行时间")
+                    self.last_execution["maa"] = datetime.now()
+                    logger.info(self.last_execution["maa"])
+                    if "Mall" in tasks and self.credit_fight is None:
+                        self.credit_fight = get_server_weekday()
+                        logger.info("记录首次信用作战")
+                    logger.debug(stage_drop)
+                    # 有掉落东西再发
+                    if stage_drop["details"]:
+                        send_message(
+                            maa_template.render(stage_drop=stage_drop),
+                            "Maa停止",
+                        )
+
+                else:
+                    send_message("Maa单次任务停止")
 
             conf = config.conf
             now_time = datetime.now().time()

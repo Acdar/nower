@@ -3,12 +3,12 @@ import sys
 import time
 from abc import abstractmethod
 from datetime import datetime, timedelta
-from inspect import getframeinfo, stack
 from typing import Literal, Optional, Tuple
 
 import cv2
 import numpy as np
 
+from arknights_mower.data import scene_list
 from arknights_mower.utils import config
 from arknights_mower.utils import typealias as tp
 from arknights_mower.utils.csleep import MowerExit, csleep
@@ -21,6 +21,7 @@ from arknights_mower.utils.image import cropimg, thres2
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.recognize import RecognizeError, Recognizer, Scene
 from arknights_mower.utils.simulator import restart_simulator
+from arknights_mower.utils.traceback import caller_info
 
 
 class StrategyError(Exception):
@@ -33,14 +34,14 @@ class BaseSolver:
     """Base class, provide basic operation"""
 
     tap_info = None, None
-    waiting_scene = {
-        Scene.CONNECTING: (1, 10),
-        Scene.UNKNOWN: (1, 10),
-        Scene.LOADING: (2, 15),
-        Scene.LOGIN_LOADING: (3, 10),
-        Scene.LOGIN_MAIN_NOENTRY: (3, 10),
-        Scene.OPERATOR_ONGOING: (10, 30),
-    }
+    waiting_scene = [
+        Scene.CONNECTING,
+        Scene.UNKNOWN,
+        Scene.LOADING,
+        Scene.LOGIN_LOADING,
+        Scene.LOGIN_MAIN_NOENTRY,
+        Scene.OPERATOR_ONGOING,
+    ]
 
     def __init__(
         self,
@@ -86,7 +87,6 @@ class BaseSolver:
                 raise
             except RecognizeError as e:
                 logger.exception(f"识别出了点小差错 qwq: {e}")
-                self.recog.save_screencap("failure")
                 retry_times -= 1
                 self.sleep(3)
                 continue
@@ -177,8 +177,7 @@ class BaseSolver:
             self.sleep(interval)
 
     def ctap(self, pos: tp.Location, max_seconds: int = 10):
-        caller = getframeinfo(stack()[1][0])
-        id = f"{caller.filename}:{caller.lineno}"
+        id = caller_info()
         logger.debug(id)
         now = datetime.now()
         lid, ltime = self.tap_info
@@ -190,6 +189,11 @@ class BaseSolver:
 
     def check_current_focus(self):
         self.recog.check_current_focus()
+
+    def restart_game(self):
+        self.device.exit()
+        self.device.launch()
+        self.recog.update()
 
     def tap_element(
         self,
@@ -568,7 +572,6 @@ class BaseSolver:
                 raise
             except RecognizeError as e:
                 logger.exception(f"识别出了点小差错 qwq: {e}")
-                self.recog.save_screencap("failure")
                 retry_times -= 1
                 self.sleep(3)
                 continue
@@ -653,7 +656,6 @@ class BaseSolver:
                 raise
             except RecognizeError as e:
                 logger.exception(f"识别出了点小差错 qwq: {e}")
-                self.recog.save_screencap("failure")
                 retry_times -= 1
                 self.sleep(3)
                 continue
@@ -712,7 +714,9 @@ class BaseSolver:
     def waiting_solver(self):
         """需要等待的页面解决方法。触发超时重启会返回False"""
         scene = self.scene()
-        sleep_time, wait_count = self.waiting_scene[scene]
+        sleep_time, wait_count = getattr(
+            config.conf.waiting_scene, scene_list[str(scene)]["label"]
+        )
         for _ in range(wait_count):
             self.sleep(sleep_time)
             if self.scene() != scene:

@@ -18,7 +18,7 @@ from arknights_mower.utils.device.scrcpy import Scrcpy
 from arknights_mower.utils.email import send_message, task_template, version_template
 from arknights_mower.utils.hot_update import get_listing
 from arknights_mower.utils.log import logger
-from arknights_mower.utils.logic_expression import LogicExpression
+from arknights_mower.utils.logic_expression import get_logic_exp
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.plan import Plan, PlanConfig, Room
 from arknights_mower.utils.simulator import restart_simulator
@@ -34,13 +34,6 @@ def main():
     simulate()
 
 
-def get_logic_exp(trigger):
-    for k in ["left", "operator", "right"]:
-        if not isinstance(trigger[k], str):
-            trigger[k] = get_logic_exp(trigger[k])
-    return LogicExpression(trigger["left"], trigger["operator"], trigger["right"])
-
-
 def initialize(
     tasks: list, scheduler: BaseSchedulerSolver | None = None
 ) -> BaseSchedulerSolver:
@@ -49,7 +42,6 @@ def initialize(
         return scheduler
 
     base_scheduler = BaseSchedulerSolver()
-    base_scheduler.operators = {}
     plan1 = {}
     plan = config.plan.model_dump(exclude_none=True)
     conf = config.conf
@@ -62,9 +54,6 @@ def initialize(
         max_resting_count=config.plan.conf.max_resting_count,
         free_blacklist=conf.free_blacklist,
         resting_threshold=conf.resting_threshold,
-        run_order_buffer_time=conf.run_order_grandet_mode.buffer_time
-        if conf.run_order_grandet_mode.enable
-        else -1,
         refresh_trading_config=config.plan.conf.refresh_trading,
         free_room=conf.free_room,
     )
@@ -75,10 +64,10 @@ def initialize(
     # 默认任务
     plan["default_plan"] = Plan(plan1, plan_config)
     # 备用自定义任务
-    backup_plans = []
+    backup_plans: list[Plan] = []
 
     for i in plan["backup_plans"]:
-        backup_plan = {}
+        backup_plan: dict[str, Room] = {}
         for room, obj in i["plan"].items():
             backup_plan[room] = [
                 Room(op["agent"], op["group"], op["replacement"]) for op in obj["plans"]
@@ -92,15 +81,12 @@ def initialize(
             max_resting_count=i["conf"]["max_resting_count"],
             free_blacklist=i["conf"]["free_blacklist"],
             resting_threshold=conf.resting_threshold,
-            run_order_buffer_time=conf.run_order_grandet_mode.buffer_time
-            if conf.run_order_grandet_mode.enable
-            else -1,
             refresh_trading_config=i["conf"]["refresh_trading"],
             free_room=conf.free_room,
         )
         backup_trigger = get_logic_exp(i["trigger"]) if "trigger" in i else None
-        backup_task = i["task"] if "task" in i else None
-        backup_trigger_timing = i["trigger_timing"] if "trigger_timing" in i else None
+        backup_task = i.get("task")
+        backup_trigger_timing = i.get("trigger_timing")
         backup_plans.append(
             Plan(
                 backup_plan,
@@ -208,7 +194,7 @@ def simulate():
                 ).total_seconds()
 
                 if remaining_time > 540:
-                    if config.conf.check_for_updates:
+                    '''if config.conf.check_for_updates:
                         logger.info("检查版本更新")
                         listing = get_listing()
                         version = __version__.replace("+", "-")
@@ -247,7 +233,7 @@ def simulate():
                         if base_scheduler.visit_friend_plan_solver():
                             base_scheduler.daily_visit_friend = (
                                 datetime.now() - timedelta(hours=4)
-                            ).date()
+                            ).date()'''
 
                     if (
                         base_scheduler.daily_report
@@ -278,8 +264,8 @@ def simulate():
                                 datetime.now() - timedelta(hours=8)
                             ).date()
 
-                    if config.conf.recruit_enable:
-                        base_scheduler.recruit_plan_solver()
+                    '''if config.conf.recruit_enable:
+                        base_scheduler.recruit_plan_solver()'''
 
                     # 应该在maa任务之后
                     def _is_depotscan():

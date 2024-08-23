@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import gzip
 import subprocess
+import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 import cv2
@@ -14,16 +16,16 @@ from arknights_mower.utils.device.adb_client.core import Client as ADBClient
 from arknights_mower.utils.device.adb_client.session import Session
 from arknights_mower.utils.device.maatouch import MaaTouch
 from arknights_mower.utils.device.scrcpy import Scrcpy
-from arknights_mower.utils.image import bytes2img
+from arknights_mower.utils.image import bytes2img, img2bytes
 from arknights_mower.utils.log import logger, save_screenshot
 from arknights_mower.utils.network import get_new_port, is_port_in_use
 from arknights_mower.utils.simulator import restart_simulator
 
 
-class Device(object):
+class Device:
     """Android Device"""
 
-    class Control(object):
+    class Control:
         """Android Device Control"""
 
         def __init__(
@@ -204,8 +206,16 @@ class Device(object):
         config.droidcast.process = process
         return True
 
-    def screencap(self, save: bool = False) -> bytes:
-        """get a screencap"""
+    def screencap(self) -> bytes:
+        start_time = datetime.now()
+        min_time = config.screenshot_time + timedelta(
+            milliseconds=config.conf.screenshot_interval
+        )
+        delta = (min_time - start_time).total_seconds()
+        if delta > 0:
+            time.sleep(delta)
+            start_time = min_time
+
         if config.conf.droidcast.enable:
             session = config.droidcast.session
             while True:
@@ -268,9 +278,24 @@ class Device(object):
             img = cv2.cvtColor(array, cv2.COLOR_RGBA2RGB)
             gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-        screencap = cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))[1]
-        if save:
-            save_screenshot(screencap)
+        screencap = img2bytes(img)
+        save_screenshot(screencap)
+
+        stop_time = datetime.now()
+        config.screenshot_time = stop_time
+        interval = (stop_time - start_time).total_seconds() * 1000
+        if config.screenshot_avg is None:
+            config.screenshot_avg = interval
+        else:
+            config.screenshot_avg = config.screenshot_avg * 0.9 + interval * 0.1
+        if config.screenshot_count >= 100:
+            config.screenshot_count = 0
+            logger.info(
+                f"截图用时{interval:.0f}ms 平均用时{config.screenshot_avg:.0f}ms"
+            )
+        else:
+            config.screenshot_count += 1
+
         return screencap, img, gray
 
     def current_focus(self) -> str:

@@ -94,37 +94,10 @@ const show_map = ref(false)
           <div>使用指定编队中的指定干员</div>
         </help-text>
       </n-form-item>
-      <n-form-item label="编队">
-        <n-select :options="squads" v-model:value="credit_fight.squad" />
-      </n-form-item>
-      <n-form-item label="干员">
-        <n-select
-          filterable
-          :options="operators"
-          v-model:value="credit_fight.operator"
-          :filter="(p, o) => pinyin_match(o.label, p)"
-          :render-label="render_op_label"
-        />
-      </n-form-item>
-      <n-form-item label="部署">
-        <div style="width: 40px; text-align: right">X</div>
-        <n-input-number style="margin: 0 8px" v-model:value="credit_fight.x" :show-button="false" />
-        <div style="width: 40px; text-align: right">Y</div>
-        <n-input-number style="margin: 0 8px" v-model:value="credit_fight.y" :show-button="false" />
-        <n-select
-          style="width: 250px; margin-right: 8px"
-          :options="deploy_directions"
-          v-model:value="credit_fight.direction"
-        />
-        <n-button @click="show_map = !show_map">{{ show_map ? '隐藏' : '显示' }}OF-1地图</n-button>
-      </n-form-item>
-      <n-form-item :show-label="false" v-if="show_map">
-        <n-image src="/map-OF-1.webp" width="100%" />
-      </n-form-item>
     </n-form>
     <n-divider />
     <n-checkbox v-model:checked="maa_enable" class="maa-shop">
-      <div class="item">信用商店购物</div>
+      <div class="item">MAA信用商店购物</div>
     </n-checkbox>
     <help-text>
       <span>性价比参考：</span>
@@ -138,6 +111,7 @@ const show_map = ref(false)
         罗德岛物价局
       </n-button>
       <p>注意：跑单时赤金与作战记录均大幅升值</p>
+      <p>暂时无法关闭，将在每次调用MAA时进行</p>
     </help-text>
     <n-form
       :label-placement="mobile ? 'top' : 'left'"
@@ -182,22 +156,12 @@ const show_map = ref(false)
 </template>
 
 <style scoped lang="scss">
-.card-title {
-  font-weight: 500;
-  font-size: 18px;
-}
-
 p {
   margin: 2px 0;
 }
 
 h4 {
   margin: 12px 0 8px 0;
-}
-
-ol {
-  margin: 0 0 8px 0;
-  padding-left: 24px;
 }
 
 table {

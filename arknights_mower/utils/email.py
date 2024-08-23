@@ -1,6 +1,4 @@
-import os
 import smtplib
-import sys
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -8,27 +6,19 @@ from threading import Thread
 from time import sleep
 from typing import Literal, Optional
 
-import cv2
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from arknights_mower.utils import config
 from arknights_mower.utils import typealias as tp
 from arknights_mower.utils.log import logger
 
-if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-    template_dir = os.path.join(
-        sys._MEIPASS,
-        "arknights_mower",
-        "__init__",
-        "templates",
-    )
-else:
-    template_dir = os.path.join(
-        os.getcwd(),
-        "arknights_mower",
-        "templates",
-    )
+from arknights_mower.utils import config
+from arknights_mower.utils import typealias as tp
+from arknights_mower.utils.image import img2bytes
+from arknights_mower.utils.log import logger
+from arknights_mower.utils.path import get_path
 
+template_dir = get_path("@internal/arknights_mower/templates")
 env = Environment(loader=FileSystemLoader(template_dir), autoescape=select_autoescape())
 
 task_template = env.get_template("task.html")
@@ -49,10 +39,7 @@ class Email:
         msg["To"] = ", ".join(conf.recipient)
 
         if attach_image is not None:
-            img = cv2.cvtColor(attach_image, cv2.COLOR_RGB2BGR)
-            _, attachment = cv2.imencode(
-                ".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
-            )
+            attachment = img2bytes(attach_image)
             image_content = MIMEImage(attachment.tobytes())
             image_content.add_header(
                 "Content-Disposition", "attachment", filename="image.jpg"

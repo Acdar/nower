@@ -32,21 +32,10 @@ const { check_mail_enable, report_enable, sign_in, visit_friend, skland_info, sk
         <div class="item">领取邮件</div>
       </n-checkbox>
       <n-divider />
-      <n-checkbox v-model:checked="visit_friend">
-        <div class="item">访问好友</div>
-      </n-checkbox>
-      <n-divider />
       <n-flex>
         <n-checkbox v-model:checked="report_enable">
           <div class="item">读取基报</div>
         </n-checkbox>
-      </n-flex>
-      <n-divider />
-      <n-flex>
-        <n-checkbox v-model:checked="sign_in.enable">
-          <div class="item">签到活动</div>
-        </n-checkbox>
-        <help-text>游戏内签到、矿区、限定池每日单抽等</help-text>
       </n-flex>
     </n-flex>
   </n-card>

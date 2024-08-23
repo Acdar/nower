@@ -86,16 +86,28 @@ class ExtraPart(ConfModel):
         tray: bool = True
         "托盘图标"
 
+    class WaitingSceneConf(ConfModel):
+        CONNECTING: tuple[int, int] = (1, 10)
+        UNKNOWN: tuple[int, int] = (1, 10)
+        LOADING: tuple[int, int] = (2, 30)
+        LOGIN_LOADING: tuple[int, int] = (3, 10)
+        LOGIN_MAIN_NOENTRY: tuple[int, int] = (3, 10)
+        OPERATOR_ONGOING: tuple[int, int] = (10, 30)
+
     start_automatically: bool = False
     "启动后自动开始任务"
     webview: WebViewConf
     "GUI相关设置"
     theme: str = "light"
     "界面主题"
-    screenshot: int = 200
-    "截图数量"
+    screenshot_interval: int = 500
+    "截图最短间隔（毫秒）"
+    screenshot: float = 24
+    "截图保留时长（小时）"
     check_for_updates: bool = True
     "检查更新"
+    waiting_scene: WaitingSceneConf
+    "等待时间"
 
 
 class LongTaskPart(ConfModel):
@@ -206,7 +218,9 @@ class RegularTaskPart(ConfModel):
     maa_gap: float = 3
     "日常任务间隔"
     maa_expiring_medicine: bool = True
-    "自动使用快要过期（约3天）的理智药"
+    "自动使用将要过期（约3天）的理智药"
+    exipring_medicine_on_weekend: bool = False
+    "仅在周末使用将要过期的理智药"
     maa_eat_stone: bool = False
     "无限吃源石"
     maa_weekly_plan: list[MaaDailyPlan] = [
@@ -554,3 +568,13 @@ class Conf(
     @property
     def SF(self):
         return self.maa_rg_enable == 1 and self.maa_long_task_type == "sf"
+
+    @property
+    def run_order_buffer_time(self):
+        """
+        >  0 葛朗台跑单的缓冲时间
+        <= 0 无人机跑单
+        """
+        if self.run_order_grandet_mode.enable:
+            return self.run_order_grandet_mode.buffer_time
+        return -1

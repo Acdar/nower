@@ -2,9 +2,13 @@ import functools
 
 import networkx as nx
 
+from arknights_mower.utils import config
 from arknights_mower.utils.csleep import MowerExit
+from arknights_mower.utils.device.adb_client.session import Session
+from arknights_mower.utils.device.scrcpy import Scrcpy
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.scene import Scene, SceneComment
+from arknights_mower.utils.simulator import restart_simulator
 from arknights_mower.utils.solver import BaseSolver
 
 DG = nx.DiGraph()
@@ -403,6 +407,11 @@ def skip(solver: BaseSolver):
 # 其它场景
 
 
+@edge(Scene.UNDEFINED, Scene.INDEX)
+def get_scene(solver: BaseSolver):
+    solver.scene()
+
+
 @edge(Scene.LOGIN_START, Scene.LOGIN_QUICKLY)
 def login_start(solver: BaseSolver):
     solver.tap((665, 741))
@@ -422,7 +431,9 @@ class SceneGraphSolver(BaseSolver):
     def scene_graph_navigation(self, scene: int):
         if scene not in DG.nodes:
             logger.error(f"{SceneComment[scene]}不在场景图中")
-            return False
+            return
+
+        error_count=0
 
         while (current := self.scene()) != scene:
             if current in self.waiting_scene:
@@ -437,8 +448,14 @@ class SceneGraphSolver(BaseSolver):
                 sp = nx.shortest_path(DG, current, scene, weight="weight")
             except Exception as e:
                 logger.exception(f"场景图路径计算异常：{e}")
-                self.sleep(3)
-                return False
+                restart_simulator()
+                self.device.client.check_server_alive()
+                Session().connect(config.conf.adb)
+                if config.conf.droidcast.enable:
+                    self.device.start_droidcast()
+                if config.conf.touch_method == "scrcpy":
+                    self.device.control.scrcpy = Scrcpy(self.device.client)
+                return
 
             logger.debug(sp)
 
@@ -447,13 +464,35 @@ class SceneGraphSolver(BaseSolver):
 
             try:
                 transition(self)
+                error_count = 0
             except MowerExit:
                 raise
             except Exception as e:
                 logger.exception(f"场景转移异常：{e}")
-                self.sleep(3)
+                '''restart_simulator()
+                self.device.client.check_server_alive()
+                Session().connect(config.conf.adb)
+                if config.conf.droidcast.enable:
+                    self.device.start_droidcast()
+                if config.conf.touch_method == "scrcpy":
+                    self.device.control.scrcpy = Scrcpy(self.device.client)
+                self.check_current_focus()
                 return False
-        return True
+        return True'''
+                if error_count <= 5:
+                    self.sleep()
+                    continue
+                if restart_simulator():
+                    self.device.client.check_server_alive()
+                    Session().connect(config.conf.adb)
+                    if config.conf.droidcast.enable:
+                        self.device.start_droidcast()
+                    if config.conf.touch_method == "scrcpy":
+                        self.device.control.scrcpy = Scrcpy(self.device.client)
+                    self.check_current_focus()
+                else:
+                    self.restart_game()
+                error_count = 0
 
     def back_to_index(self):
         logger.info("场景图导航：back_to_index")

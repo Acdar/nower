@@ -11,7 +11,6 @@ from PIL import Image, ImageDraw, ImageFont
 from skimage.feature import hog
 from sklearn.neighbors import KNeighborsClassifier
 
-from arknights_mower.data import agent_list
 from arknights_mower.utils.image import loadimg, thres2
 
 
@@ -354,6 +353,7 @@ class Arknights数据处理器:
 
     def load_recruit_template(self):
         # !/usr/bin/env python3
+        template = {}
         with open("./arknights_mower/data/recruit.json", "r", encoding="utf-8") as f:
             recruit_operators = json.load(f)
 
@@ -364,7 +364,40 @@ class Arknights数据处理器:
             draw = ImageDraw.Draw(im)
             draw.text((0, 0), recruit_operators[operator]["name"], font=font)
             im = im.crop(im.getbbox())
-            im.save(f"./arknights_mower/resources/agent_name/{operator}.png")
+            im = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2GRAY)
+            template[operator] = im
+
+        with lzma.open("arknights_mower/models/recruit_result.pkl", "wb") as f:
+            pickle.dump(template, f)
+
+    def load_recruit_tag(self):
+        with open("./arknights_mower/data/recruit.json", "r", encoding="utf-8") as f:
+            recruit_agent = json.load(f)
+
+        font = ImageFont.truetype(
+            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 30
+        )
+        recruit_tag = ["资深干员", "高级资深干员"]
+        recruit_tag_template = {}
+        for x in recruit_agent.values():
+            recruit_tag += x["tags"]
+        recruit_tag = list(set(recruit_tag))
+        for tag in recruit_tag:
+            im = Image.new(mode="RGBA", color=(49, 49, 49), size=(215, 70))
+            W, H = im.size
+            draw = ImageDraw.Draw(im)
+            _, _, w, h = draw.textbbox((0, 0), tag, font=font)
+            draw.text(((W - w) / 2, (H - h) / 2 - 5), tag, font=font)
+            recruit_tag_template[tag] = cv2.cvtColor(
+                np.array(im.crop(im.getbbox())), cv2.COLOR_RGB2BGR
+            )
+        with lzma.open("./arknights_mower/models/recruit.pkl", "wb") as f:
+            pickle.dump(recruit_tag_template, f)
+
+    def load_recruit_resource(self):
+        self.load_recruit_data()
+        self.load_recruit_template()
+        self.load_recruit_tag()
 
     def 训练仓库的knn模型(self, 模板文件夹, 模型保存路径):
         def 提取特征点(模板):
@@ -421,6 +454,8 @@ class Arknights数据处理器:
 
         kernel = np.ones((12, 12), np.uint8)
 
+        with open("./arknights_mower/data/agent.json", "r", encoding="utf-8") as f:
+            agent_list = json.load(f)
         for operator in sorted(agent_list, key=lambda x: len(x), reverse=True):
             img = Image.new(mode="L", size=(400, 100))
             draw = ImageDraw.Draw(img)
@@ -457,6 +492,8 @@ class Arknights数据处理器:
 
         kernel = np.ones((10, 10), np.uint8)
 
+        with open("./arknights_mower/data/agent.json", "r", encoding="utf-8") as f:
+            agent_list = json.load(f)
         for idx, operator in enumerate(agent_list):
             font = font31
             if not operator[0].encode().isalpha():
@@ -582,7 +619,7 @@ class Arknights数据处理器:
         干员技能列表 = sorted(干员技能列表, key=lambda x: (-x["key"]))
         # print(干员技能列表)
         with open(
-            r".\ui\src\pages\basement_skill\skill.json", "w", encoding="utf-8"
+            "./ui/src/pages/basement_skill/skill.json", "w", encoding="utf-8"
         ) as f:
             json.dump(干员技能列表, f, ensure_ascii=False, indent=2)
 
@@ -602,14 +639,14 @@ class Arknights数据处理器:
             buff_table[item.replace(".", "_")] = dict1
 
         with open(
-            r".\ui\src\pages\basement_skill\buffer.json", "w", encoding="utf-8"
+            "./ui/src/pages/basement_skill/buffer.json", "w", encoding="utf-8"
         ) as f:
             json.dump(buff_table, f, ensure_ascii=False, indent=2)
 
     def 添加基建技能图标(self):
         # 源目录和目标目录
-        source_dir = r".\ArknightsGameResource\building_skill"
-        destination_dir = r".\ui\public\building_skill"
+        source_dir = "./ArknightsGameResource/building_skill"
+        destination_dir = "./ui/public/building_skill"
 
         # 创建目标目录（如果不存在）
         os.makedirs(destination_dir, exist_ok=True)
@@ -673,5 +710,4 @@ print("训练选中的干员名的模型,完成")
 
 数据处理器.添加基建技能图标()
 
-数据处理器.load_recruit_data()
-数据处理器.load_recruit_template()
+数据处理器.load_recruit_resource()

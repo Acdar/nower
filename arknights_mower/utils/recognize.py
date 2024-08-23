@@ -9,6 +9,7 @@ from arknights_mower import __rootdir__
 from arknights_mower.utils import config
 from arknights_mower.utils import typealias as tp
 from arknights_mower.utils.csleep import MowerExit
+from arknights_mower.utils.deprecated import deprecated
 from arknights_mower.utils.device.device import Device
 from arknights_mower.utils.image import bytes2img, cmatch, cropimg, loadres, thres2
 from arknights_mower.utils.log import logger, save_screenshot
@@ -21,7 +22,7 @@ class RecognizeError(Exception):
     pass
 
 
-class Recognizer(object):
+class Recognizer:
     def __init__(self, device: Device, screencap: bytes = None) -> None:
         self.device = device
         self.w = 1920
@@ -66,7 +67,7 @@ class Recognizer(object):
             self._matcher = Matcher(self.gray)
         return self._matcher
 
-    def start(self, screencap: bytes = None) -> None:
+    def start(self, screencap: Optional[bytes] = None) -> None:
         """init with screencap"""
         retry_times = config.MAX_RETRYTIME
         while retry_times > 0:
@@ -94,8 +95,10 @@ class Recognizer(object):
         """get the color of the pixel"""
         return self.img[y][x]
 
+    @deprecated
     def save_screencap(self, folder):
-        save_screenshot(self.screencap, subdir=str(folder))
+        del folder  # 兼容2024.05旧版接口
+        save_screenshot(self.screencap)
 
     def detect_index_scene(self) -> bool:
         res = loadres("index_nav", True)
@@ -348,12 +351,9 @@ class Recognizer(object):
 
         else:
             self.scene = Scene.UNKNOWN
-        # save screencap to analyse
-        self.save_screencap(self.scene)
-        logger.info(f"Scene {self.scene}: {SceneComment[self.scene]}")
-
-        if self.scene == Scene.UNKNOWN:
             self.check_current_focus()
+
+        logger.info(f"Scene {self.scene}: {SceneComment[self.scene]}")
 
         return self.scene
 
@@ -466,8 +466,6 @@ class Recognizer(object):
             self.scene = Scene.UNKNOWN
             self.check_current_focus()
 
-        # save screencap to analyse
-        self.save_screencap(self.scene)
         log_msg = f"Scene: {self.scene}: {SceneComment[self.scene]}"
         if self.scene == Scene.UNKNOWN:
             logger.debug(log_msg)
@@ -529,8 +527,6 @@ class Recognizer(object):
             self.scene = Scene.UNKNOWN
             self.check_current_focus()
 
-        # save screencap to analyse
-        self.save_screencap(self.scene)
         log_msg = f"Scene: {self.scene}: {SceneComment[self.scene]}"
         if self.scene == Scene.UNKNOWN:
             logger.debug(log_msg)
@@ -581,8 +577,6 @@ class Recognizer(object):
             self.scene = Scene.UNKNOWN
             self.check_current_focus()
 
-        # save screencap to analyse
-        self.save_screencap(self.scene)
         logger.info(f"Scene: {self.scene}: {SceneComment[self.scene]}")
 
         self.check_loading_time()
@@ -615,8 +609,6 @@ class Recognizer(object):
             self.scene = Scene.UNKNOWN
             self.check_current_focus()
 
-        # save screencap to analyse
-        self.save_screencap(self.scene)
         logger.info(f"Scene: {self.scene}: {SceneComment[self.scene]}")
 
         self.check_loading_time()

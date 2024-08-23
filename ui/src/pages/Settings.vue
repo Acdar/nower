@@ -30,6 +30,7 @@ const {
   exit_game_when_idle,
   close_simulator_when_idle,
   screenshot,
+  screenshot_interval,
   run_order_grandet_mode,
   webview,
   fix_mumu12_adb_disconnect,
@@ -39,7 +40,8 @@ const {
   maa_adb_path,
   maa_gap,
   custom_screenshot,
-  check_for_updates
+  check_for_updates,
+  waiting_scene
 } = storeToRefs(config_store)
 
 const { operators } = storeToRefs(plan_store)
@@ -130,6 +132,15 @@ async function test_screenshot() {
     loading.value = false
     tested.value = true
   }
+}
+
+const scene_name = {
+  CONNECTING: '正在提交反馈至神经',
+  UNKNOWN: '未知',
+  LOADING: '加载中',
+  LOGIN_LOADING: '场景跳转时的等待界面',
+  LOGIN_MAIN_NOENTRY: '登录页面（无按钮入口）',
+  OPERATOR_ONGOING: '代理作战'
 }
 </script>
 
@@ -309,16 +320,46 @@ async function test_screenshot() {
                 <div>（截图用时{{ elapsed }}ms）</div>
               </n-flex>
             </n-form-item>
+            <n-form-item label="截图最短间隔">
+              <n-input-number v-model:value="screenshot_interval" :precision="0">
+                <template #suffix>毫秒</template>
+              </n-input-number>
+            </n-form-item>
             <n-form-item>
               <template #label>
-                <span>截图数量</span>
-                <help-text>
-                  <div><code>screenshot</code>下每个文件夹中最多保存的截图数量</div>
-                </help-text>
+                <span>截图保存时间</span>
+                <help-text>可填小数</help-text>
               </template>
               <n-input-number v-model:value="screenshot">
-                <template #suffix>张</template>
+                <template #suffix>小时</template>
               </n-input-number>
+            </n-form-item>
+            <n-form-item label="等待时间">
+              <n-table size="small" class="waiting-table">
+                <thead>
+                  <tr>
+                    <th>场景</th>
+                    <th>截图间隔</th>
+                    <th>等待次数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(value, key) in waiting_scene">
+                    <td>{{ scene_name[key] }}</td>
+                    <td>
+                      <n-input-number v-model:value="value[0]" :show-button="false" :precision="0">
+                        <template #suffix>秒</template>
+                      </n-input-number>
+                    </td>
+                    <td>
+                      <n-input-number v-model:value="value[1]" :show-button="false" :precision="0">
+                        <template #suffix>次</template>
+                      </n-input-number>
+                    </td>
+                  </tr>
+                </tbody>
+              </n-table>
+              <!-- {{ waiting_scene }} -->
             </n-form-item>
             <n-form-item label="界面缩放">
               <n-slider
@@ -577,11 +618,6 @@ h4 {
   margin: 12px 0 10px 0;
 }
 
-ul {
-  padding-left: 24px;
-  margin: 0 0 10px 0;
-}
-
 .time-table {
   width: 100%;
   margin-bottom: 12px;
@@ -598,6 +634,20 @@ ul {
 
 .scale-apply {
   margin-left: 24px;
+}
+
+.waiting-table {
+  th,
+  td {
+    padding: 4px;
+    min-width: 70px;
+    width: 100px;
+
+    &:first-child {
+      width: auto;
+      padding: 4px 8px;
+    }
+  }
 }
 </style>
 
