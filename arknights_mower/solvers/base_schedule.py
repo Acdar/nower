@@ -74,7 +74,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.credit_fight = None
         self.task_count = 0
         self.refresh_connecting = False
-        self.recruit_time = None
+        #self.recruit_time = None
         self.last_clue = None
         self.sleeping = False
         self.operators = {}
@@ -89,6 +89,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.daily_skland = (datetime.now() - timedelta(days=1, hours=4)).date()
         self.daily_mail = (datetime.now() - timedelta(days=1, hours=8)).date()
         self.daily_visit_friend = (datetime.now() - timedelta(days=1, hours=4)).date()
+        self.recruit_time = (datetime.now() - timedelta(days=1, hours=4)).date()
+        self.maa_recruit = False
 
     def find_next_task(
         self,
@@ -375,6 +377,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             for op in fia_plan:
                 data = self.op_data.operators[op]
                 op_mood_t = data.current_mood()
+                if data.rest_in_full and data.exhaust_require and not data.is_resting():
+                    logger.debug(f"{operator}为暖机干员但不在宿舍，跳过充能")
+                    continue
                 if op_mood_t < op_mood:
                     target = op
                     op_mood = op_mood_t
@@ -634,7 +639,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                                 )
                                                 free_agent.mood = free_agent.upper_limit
                                                 free_agent.time_stamp = dorm.time
-                        self.task.plan = {}
+                                else:
+                                    self.task.plan = {}
+                            else:
+                                self.task.plan = {}
+                        else:
+                            self.task.plan = {}
                     if (
                         config.conf.run_order_grandet_mode.back_to_index
                         and TaskTypes.RUN_ORDER == self.task.type
@@ -3192,8 +3202,15 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             self.MAA.append_task(type)
         elif type == "Fight":
             conf = config.conf
-            _plan = conf.maa_weekly_plan[get_server_weekday()]
+            server_weekday = get_server_weekday()
+            _plan = conf.maa_weekly_plan[server_weekday]
             logger.info(f"现在服务器是{_plan.weekday}")
+            use_medicine = False
+            if conf.maa_expiring_medicine:
+                if conf.exipring_medicine_on_weekend:
+                    use_medicine = server_weekday >= 5
+                else:
+                    use_medicine = True
             for stage in _plan.stage:
                 logger.info(f"添加关卡:{stage}")
                 self.MAA.append_task(
@@ -3211,7 +3228,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         "DrGrandet": False,
                         "server": "CN",
                         "expiring_medicine": 999
-                        if conf.exipring_medicine_on_weekend
+                        if use_medicine
                         else 0,
                     },
                 )
@@ -3235,12 +3252,16 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         #         "enable": self.maa_config['maa_depot_enable']
         #     })
         elif type == "Recruit":
+            if self.maa_recruit:
+                maa_recruit_confirm = [3, 4]
+            else:
+                maa_recruit_confirm = [4]
             self.MAA.append_task(
                 "Recruit",
                 {
                     "refresh": True,
                     "select": [3, 4],
-                    "confirm": [4],
+                    "confirm": maa_recruit_confirm,
                     "times": 4
                 }
             )
@@ -3481,7 +3502,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         return (datetime.now() - timedelta(hours=4)).date()
 
     def recruit_plan_solver(self):
-        if self.last_execution[
+        """if self.last_execution[
             "recruit"
         ] is None or datetime.now() > self.last_execution["recruit"] + timedelta(
             hours=config.conf.recruit_gap
@@ -3489,7 +3510,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             RecruitSolver(self.device, self.recog).run()
 
             self.last_execution["recruit"] = datetime.now()
-            logger.info(f"下一次公开招募执行时间在{config.conf.recruit_gap}小时之后")
+            logger.info(f"下一次公开招募执行时间在{config.conf.recruit_gap}小时之后")"""
+        if config.conf.recruit_enable:
+            self.maa_recruit = RecruitSolver(self.device, self.recog).run()
+            logger.debug(self.maa_recruit)
+        return True
 
     def mail_plan_solver(self):
         if config.conf.check_mail_enable:
