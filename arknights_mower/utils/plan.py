@@ -2,7 +2,6 @@ import copy
 from enum import Enum
 from typing import Optional, Self
 
-from arknights_mower.utils.log import logger
 from arknights_mower.utils.logic_expression import LogicExpression
 
 
@@ -155,10 +154,6 @@ class Plan:
     def set_timing_enum(value: str) -> PlanTriggerTiming:
         "将字符串转换为副表触发时机"
         try:
-            if value is not None:
-                return PlanTriggerTiming[value.upper()]
-            else:
-                return PlanTriggerTiming.AFTER_PLANNING
-        except Exception as e:
-            logger.exception(e)
+            return PlanTriggerTiming[value.upper()]
+        except Exception:
             return PlanTriggerTiming.AFTER_PLANNING
