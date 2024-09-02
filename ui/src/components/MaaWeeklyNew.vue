@@ -47,6 +47,8 @@ const togglePlan = (plan) => {
       .flat()
   })
 }
+
+
 const changestage = (plan, newstage) => {
   plan['stage'] = newstage
   console.log(plan['stage'])
@@ -351,7 +353,6 @@ function clear() {
       <div>如何不打本：<b>把所有的"打"都点了</b>或者点一次<b>清除当前配置以匹配最新表格</b></div>
       <div>将要过期的理智药选项在上面 往上滑。</div>
       <div>建议每次更新后 点一次<b>清除当前配置以匹配最新表格</b></div>
-      <div>如果觉得这个表有什么要改进的 at群管理</div>
       <div>前三行的空行用来写 一些自定义关卡</div>
       <div>
         新用法<n-tag closable>SSReopen-XX</n-tag> 如<n-tag closable>SSReopen-FC</n-tag

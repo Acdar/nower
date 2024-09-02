@@ -787,7 +787,7 @@ class Recognizer:
             "recruit/agent_token": ((1740, 765), (1920, 805)),
             "recruit/agent_token_first": ((1700, 760), (1920, 810)),
             "recruit/available_level": (1294, 234),
-            "recruit/begin_recruit": scope,
+            "recruit/begin_recruit": ((900, 0), (1920, 120)),
             "recruit/career_needs": (350, 593),
             "recruit/lmb": (945, 27),
             "recruit/recruit_done": scope,

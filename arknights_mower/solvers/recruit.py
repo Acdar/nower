@@ -66,11 +66,13 @@ class RecruitSolver(SceneGraphSolver):
 
         self.result_agent = {}
         self.ticket_number = None
+        self.recruit_permission = False
 
     def run(self):
         self.add_recruit_param()
         super().run()
-        logger.info(self.result_agent)
+        #logger.info(self.result_agent)
+        return self.recruit_permission
 
         if self.agent_choose:
             logger.info("开包汇总如下")
@@ -95,10 +97,31 @@ class RecruitSolver(SceneGraphSolver):
                 "公招汇总通知",
                 "INFO",
             )
-        return self.agent_choose, self.result_agent
+        #return self.agent_choose, self.result_agent
 
     def transition(self) -> bool:
         if (scene := self.scene()) == Scene.RECRUIT_MAIN:
+            if self.recruit_index > 4:
+                return True
+            if pos := self.find("recruit/ticket"):
+                self.ticket_number = self.get_ticket_number()
+                self.recruit_index=5
+                '''if self.ticket_number == 0:
+                    self.recruit_index = self.recruit_index + 1
+                    logger.debug(f"{self.recruit_index} 张招募券")
+                    return
+                self.tap(pos)'''
+                logger.info(f"{self.ticket_number}张招募券，结束检测")
+                if self.ticket_number > config.conf.recruitment_permit:
+                    self.recruit_permission = True
+                    logger.info(f"大于阈值{config.conf.recruitment_permit}张招募券")
+                else:
+                    self.recruit_permission = False
+                    logger.info(f"小于阈值{config.conf.recruitment_permit}张招募券")
+                return
+        else:
+            self.scene_graph_navigation(Scene.RECRUIT_MAIN)
+        """if (scene := self.scene()) == Scene.RECRUIT_MAIN:
             if self.recruit_index > 4:
                 logger.info("结束公招")
                 return True
@@ -175,7 +198,7 @@ class RecruitSolver(SceneGraphSolver):
         elif scene in self.waiting_scene:
             self.waiting_solver()
         else:
-            self.scene_graph_navigation(Scene.RECRUIT_MAIN)
+            self.scene_graph_navigation(Scene.RECRUIT_MAIN)"""
 
     def recruit_result(self):
         try:
