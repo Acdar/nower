@@ -40,10 +40,13 @@ onUnmounted(() => {
   clearTimeout(get_task_id.value)
 })
 
-function start() {
+function start(value) {
   running.value = true
   log_lines.value = []
-  axios.get(`${import.meta.env.VITE_HTTP_URL}/start`)
+  if (value == undefined) {
+    value = '0'
+  }
+  axios.get(`${import.meta.env.VITE_HTTP_URL}/start/${value}`)
   get_tasks()
 }
 
@@ -82,6 +85,20 @@ const stop_options = [
   {
     label: '停止Maa',
     key: 'maa'
+  }
+]
+const start_options = [
+  {
+    label: '载入心情任务',
+    key: '0'
+  },
+  {
+    label: '载入心情数据',
+    key: '1'
+  },
+  {
+    label: '缓存清零重启',
+    key: '2'
   }
 ]
 </script>
@@ -135,14 +152,22 @@ const stop_options = [
           <template v-if="!mobile">立即停止</template>
         </n-button>
       </drop-down>
-      <n-button type="primary" @click="start" v-else :loading="waiting" :disabled="waiting">
-        <template #icon>
-          <n-icon>
-            <play-icon />
-          </n-icon>
-        </template>
-        <template v-if="!mobile">开始执行</template>
-      </n-button>
+      <drop-down v-if="!running" :select="start" :options="start_options" type="primary" :up="true">
+        <n-button
+          v-if="!running"
+          type="primary"
+          @click="start"
+          :loading="waiting"
+          :disabled="waiting"
+        >
+          <template #icon>
+            <n-icon>
+              <play-icon />
+            </n-icon>
+          </template>
+          <template v-if="!mobile">开始执行</template>
+        </n-button>
+      </drop-down>
       <task-dialog />
       <n-button type="warning" @click="show_task = true">
         <template #icon>
