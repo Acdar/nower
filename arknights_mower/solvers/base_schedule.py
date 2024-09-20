@@ -129,6 +129,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if len(self.tasks) > 0:
             # 找到时间最近的一次单个任务
             self.task = self.tasks[0]
+            logger.debug(f"当前任务: {str(self.task)}")
         else:
             self.task = None
         if self.task is not None and datetime.now() < self.task.time:
@@ -144,7 +145,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             self.free_clue = None
         if self.credit_fight is not None and self.credit_fight != get_server_weekday():
             self.credit_fight = None
-        #logger.debug(self.credit_fight)
         self.todo_task = False
         self.collect_notification = False
         self.planned = False
@@ -445,6 +445,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 continue
             _name = dorm.name
             if _name == "":
+                continue
+            if self.op_data.operators[dorm.name].operator_type != "high":
                 continue
             # 如果是rest in full，则新增单独任务..
             if (
@@ -1550,10 +1552,15 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         # 对于252可能需要进行额外判定，由于 low_free 性质等同于 high_free
         success = True
         if high_free - _high >= 0 and low_free - _low >= 0:
+            logger.debug(f"计算排班:{agents}")
             for agent in agents:
                 if not success:
                     break
                 x = self.op_data.operators[agent]
+                if x.room not in base_room_list:
+                    logger.debug(f"干员房间出错:{agent}")
+                    success = False
+                    break
                 if self.op_data.get_dorm_by_name(x.name)[0] is not None:
                     # 如果干员已经被安排了
                     success = False
