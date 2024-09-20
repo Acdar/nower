@@ -3450,7 +3450,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         return (datetime.now() - timedelta(hours=4)).date()
 
     def recruit_plan_solver(self):
-        """if self.last_execution[
+        if self.last_execution[
             "recruit"
         ] is None or datetime.now() > self.last_execution["recruit"] + timedelta(
             hours=config.conf.recruit_gap
@@ -3458,11 +3458,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             RecruitSolver(self.device, self.recog).run()
 
             self.last_execution["recruit"] = datetime.now()
-            logger.info(f"下一次公开招募执行时间在{config.conf.recruit_gap}小时之后")"""
-        if config.conf.recruit_enable:
-            self.maa_recruit = RecruitSolver(self.device, self.recog).run()
-            logger.debug(self.maa_recruit)
-        return True
+            logger.info(f"下一次公开招募执行时间在{config.conf.recruit_gap}小时之后")
 
     def mail_plan_solver(self):
         if config.conf.check_mail_enable:
