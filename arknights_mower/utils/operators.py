@@ -92,7 +92,7 @@ class Operators:
         # 基本5%
         basic = 5
         if support.add_on:
-            # 阿斯卡伦
+            # 阿斯卡纶
             basic += 5
         if hour == 0:
             hour = level * 8
@@ -364,19 +364,11 @@ class Operators:
             else:
                 self.set_mood_limit(TOTTER, upper_limit=24, lower_limit=20)
 
-        # 减少仅回满干员的心情阈值0.5
-        for name in self.operators:
-            if (
-                self.operators[name].rest_in_full
-                and self.operators[name].exhaust_require is not True
-            ):
-                self.set_mood_limit(
-                    name, upper_limit=self.operators[name].upper_limit - 0.5
-                )
-
     def evaluate_expression(self, expression):
         try:
-            result = Expr(expression, self.eval_model).eval({"op_data": self})
+            model = {e: e for e in base_room_list}
+            model["op_data"] = self
+            result = Expr(expression, self.eval_model).eval(model)
             return result
         except Exception as e:
             logger.exception(f"Error evaluating expression: {e}")
@@ -480,15 +472,9 @@ class Operators:
 
     def refresh_dorm_time(self, room, index, agent):
         for idx, dorm in enumerate(self.dorm):
-            # Filter out resting priority low
-            # if idx >= self.config.max_resting_count:
-            #     break
             if dorm.position[0] == room and dorm.position[1] == index:
-                # 如果人为高效组，则记录时间
                 _name = agent["agent"]
-                if _name in self.operators.keys() and (
-                    self.operators[_name].is_high() or self.config.free_room
-                ):
+                if _name in self.operators.keys() or _name in agent_list:
                     dorm.name = _name
                     _agent = self.operators[_name]
                     # 如果干员有心情上限，则按比例修改休息时间
@@ -501,9 +487,6 @@ class Operators:
                         dorm.time = _agent.time_stamp + timedelta(seconds=sec_remaining)
                     else:
                         dorm.time = agent["time"]
-                elif _name in agent_list:
-                    dorm.name = _name
-                    dorm.time = agent["time"]
                 break
 
     def correct_dorm(self):
@@ -523,6 +506,7 @@ class Operators:
                     ):
                         op.mood = op.upper_limit
                         op.time_stamp = self.dorm[idx].time
+                        op.depletion_rate = 0
                         logger.debug(
                             f"检测到{op.name}心情恢复满，设置心情至{op.upper_limit}"
                         )
@@ -796,8 +780,7 @@ class Operator:
                 else:
                     return False
             return (
-                # 歌蕾蒂娅主班 刷新心情频率提升
-                self.need_to_refresh(2.5 if self.name != "歌蕾蒂娅" else 0.5)
+                self.need_to_refresh(2.5)
                 or self.current_room != self.room
                 or self.index != self.current_index
             )

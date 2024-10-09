@@ -28,7 +28,7 @@ mimetypes.add_type("text/html", ".html")
 mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("application/javascript", ".js")
 
-app = Flask(__name__, static_folder="dist", static_url_path="")
+app = Flask(__name__, static_folder="ui/dist", static_url_path="")
 sock = Sock(app)
 CORS(app)
 
@@ -64,17 +64,17 @@ def require_token(f):
 
 @app.route("/<path:path>")
 def serve_index(path):
-    return send_from_directory("dist", path)
+    return send_from_directory("ui/dist", path)
 
 
 @app.errorhandler(404)
 def not_found(e):
     if (path := request.path).startswith("/docs"):
         try:
-            return send_from_directory("dist" + path, "index.html")
+            return send_from_directory("ui/dist" + path, "index.html")
         except NotFound:
             return "<h1>404 Not Found</h1>", 404
-    return send_from_directory("dist", "index.html")
+    return send_from_directory("ui/dist", "index.html")
 
 
 @app.route("/conf", methods=["GET", "POST"])
@@ -617,7 +617,7 @@ def get_count():
                         if len(supports) == 0:
                             raise Exception("请添加专精工具人")
                         base_scheduler.op_data.skill_upgrade_supports = supports
-                        logger.error("更新专精工具人完毕")
+                        logger.info("更新专精工具人完毕")
                     base_scheduler.tasks.append(new_task)
                     logger.debug(f"成功：{str(new_task)}")
                     return "添加任务成功！"
