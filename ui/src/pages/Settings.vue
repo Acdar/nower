@@ -584,6 +584,9 @@ const onSelectionChange = (newValue) => {
       <div>
         <email />
       </div>
+      <div>
+        <ServerJang />
+      </div>
     </div>
 
     <div class="grid-right">
