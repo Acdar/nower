@@ -491,6 +491,10 @@ class Arknights数据处理器:
             "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 25
         )
 
+        font27 = ImageFont.truetype(
+            "arknights_mower/fonts/SourceHanSansCN-Medium.otf", 27
+        )
+
         data = {}
 
         kernel = np.ones((10, 10), np.uint8)
@@ -501,12 +505,34 @@ class Arknights数据处理器:
             font = font31
             if not operator[0].encode().isalpha():
                 if len(operator) == 7:
-                    font = font25
+                    if "·" in operator:
+                        # 维娜·维多利亚 识别的临时解决办法
+                        font = font27
+                    else:
+                        font = font25
                 elif len(operator) == 6:
                     font = font30
             img = Image.new(mode="L", size=(400, 100))
             draw = ImageDraw.Draw(img)
-            draw.text((50, 20), operator, fill=(255,), font=font)
+            if "·" in operator:
+                x, y = 50, 20
+                char_index = {
+                    i: False for i, char in enumerate(operator) if char == "·"
+                }
+                for i, char in enumerate(operator):
+                    if i in char_index and not char_index[i]:
+                        x -= 8
+                        char_index[i] = True
+                        if i + 1 not in char_index and char == "·":
+                            char_index[i + 1] = False
+                    draw.text((x, y), char, fill=(255,), font=font)  # 绘制每个字符
+                    char_width, char_height = font.getbbox(char)[
+                        2:4
+                    ]  # getbbox 返回 (x1, y1, x2, y2)
+                    x += char_width
+            else:
+                draw.text((50, 20), operator, fill=(255,), font=font)
+
             img = np.array(img, dtype=np.uint8)
             img = thres2(img, 140)
             dilation = cv2.dilate(img, kernel, iterations=1)
