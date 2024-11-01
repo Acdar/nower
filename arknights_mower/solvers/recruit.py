@@ -63,7 +63,7 @@ class RecruitSolver(SceneGraphSolver):
         # 默认要支援机械
         self.recruit_order_index = 2
         self.recruit_order = [6, 5, 1, 4, 3, 2]
-
+        self.refresh = False
         self.result_agent = {}
         self.ticket_number = None
 
@@ -145,6 +145,8 @@ class RecruitSolver(SceneGraphSolver):
 
             if self.find("recruit/job_requirements", scope=job_requirements_scope):
                 self.recruit_index = self.recruit_index + 1
+                if self.recruit_index in self.agent_choose.keys():
+                    self.agent_choose[self.recruit_index]["choosed"] = True
                 logger.debug(f"{self.recruit_index}正在招募")
                 return
             elif pos := self.find("recruit/recruit_lock", scope=recruit_lock_scope):
@@ -165,7 +167,90 @@ class RecruitSolver(SceneGraphSolver):
 
         elif scene == Scene.RECRUIT_TAGS:
             self.ticket_number = self.get_ticket_number()
-            return self.recruit_tags()
+
+            if self.recruit_index not in self.tags.keys() or self.refresh:
+                tmp_tags = self.get_recruit_tag()
+                if tmp_tags is False:
+                    self.back()
+                    return
+                self.tags[self.recruit_index] = tmp_tags
+                self.refresh = False
+                logger.info(
+                    f"{self.recruit_index}号位置的tag识别结果{self.tags[self.recruit_index]}"
+                )
+
+            if self.recruit_index in self.agent_choose.keys():
+                if self.agent_choose[self.recruit_index]["level"] == 3:
+                    if pos := self.find("recruit/refresh"):
+                        self.tap(pos)
+                        del self.tags[self.recruit_index]
+                        del self.agent_choose[self.recruit_index]
+                        self.refresh = True
+                        return
+
+                choose = self.agent_choose[self.recruit_index]["tags"]
+                tags = self.tags[self.recruit_index]
+                logger.info(f"选择标签:{choose}")
+                tag_all_choose = True
+                for x in choose:
+                    h, w, _ = tag_template[x].shape
+                    tag_img = cropimg(self.recog.img, [tags[x], va(tags[x], (w, h))])
+
+                    if self.tag_not_choosed(tag_img):
+                        tag_all_choose = False
+                        self.tap(tags[x])
+
+                if tag_all_choose is False:
+                    return
+
+                if self.ticket_number == 0:
+                    self.recruit_index = self.recruit_index + 1
+                    self.back()
+                    return
+
+                # 默认三星招募时长是9：00
+                recruit_time_choose = 540
+                recruit_result_level = self.agent_choose[self.recruit_index]["level"]
+                # 默认一星招募时长是3：50
+                if recruit_result_level == 1:
+                    recruit_time_choose = 230
+
+                if (
+                    self.ticket_number < config.conf.recruitment_permit
+                    and recruit_result_level == 3
+                ):
+                    self.recruit_index = self.recruit_index + 1
+                    logger.info("没券 返回")
+                    self.back()
+                    return
+
+                recruit_time = [9, 0]
+                if recruit_time_choose == 230:
+                    recruit_time = [3, 50]
+                elif recruit_time_choose == 460:
+                    recruit_time = [7, 40]
+
+                now_time = [
+                    self.get_recruit_time("hour"),
+                    self.get_recruit_time("minute"),
+                ]
+
+                if now_time[1] != recruit_time[1]:
+                    self.choose_time(now_time[1], recruit_time[1], mode="minute")
+                    return
+
+                if now_time[0] != recruit_time[0]:
+                    self.choose_time(now_time[0], recruit_time[0], mode="hour")
+                    return
+
+                # # start recruit
+                self.tap_element("recruit/start_recruit")
+                self.agent_choose[self.recruit_index]["choosed"] = True
+                self.ticket_number = self.ticket_number - 1
+                self.recruit_index = self.recruit_index + 1
+                return
+            else:
+                self.recruit_tags(self.tags[self.recruit_index])
         elif scene == Scene.REFRESH_TAGS:
             self.tap_element("recruit/refresh_comfirm")
         elif scene == Scene.RECRUIT_AGENT:
@@ -259,81 +344,22 @@ class RecruitSolver(SceneGraphSolver):
                         self.back()
                         return
 
-        if self.ticket_number == 0:
-            self.recruit_index = self.recruit_index + 1
-            self.back()
+        if recruit_result_level != 3:
+            self.agent_choose[self.recruit_index] = {
+                "tags": list(recruit_cal_result[-1]["tag"]),
+                "result": list(recruit_cal_result[-1]["result"]),
+                "level": recruit_result_level,
+                "choosed": False,
+            }
             return
 
-        if (
-            self.ticket_number < config.conf.recruitment_permit
-            and recruit_result_level == 3
-        ):
-            self.recruit_index = self.recruit_index + 1
-            logger.info("没券 返回")
-            self.back()
-            return
+        self.agent_choose[self.recruit_index] = {
+            "tags": [],
+            "result": [{"id": "", "name": "随机三星干员", "star": 3}],
+            "level": recruit_result_level,
+            "choosed": False,
+        }
 
-        choose = []
-        if recruit_result_level > 3:
-            choose = recruit_cal_result[0]["tag"]
-
-        # tap selected tags
-        logger.info(f"选择标签：{list(choose)} ")
-        for x in choose:
-            # 存在choose为空但是进行标签选择的情况
-            logger.debug(f"tap{x}:{tags[x]}")
-            self.tap(tags[x])
-
-        # 9h为True 3h50min为False
-        logger.debug("开始选择时长")
-        # 默认三星招募时长是9：00
-        recruit_time_choose = 540
-        # 默认一星招募时长是3：50
-        if recruit_result_level == 1:
-            recruit_time_choose = 230
-
-        if recruit_time_choose == 540:
-            # 09:00
-            logger.debug("时间9h")
-            self.tap_element("one_hour", 0.2, 0.8, 0.5)
-        elif recruit_time_choose == 230:
-            # 03:50
-            logger.debug("时间3h50min")
-            [self.tap_element("one_hour", 0.2, 0.2, 0.5) for _ in range(2)]
-            [self.tap_element("one_hour", 0.5, 0.2, 0.5) for _ in range(5)]
-        # elif recruit_time_choose == 460:
-        #     # 07:40
-        #     logger.debug("时间7h40min")
-        #     [self.tap_element("one_hour", 0.2, 0.8, 0) for _ in range(2)]
-        #     [self.tap_element("one_hour", 0.5, 0.8, 0) for _ in range(2)]
-
-        # start recruit
-        self.tap_element("recruit/start_recruit")
-        self.ticket_number = self.ticket_number - 1
-
-        if recruit_result_level > 3:
-            self.agent_choose[str(self.recruit_index)] = {
-                "tags": list(choose),
-                "result": list(recruit_cal_result[0]["result"]),
-            }
-            tmp_res_list = []
-            for i in list(recruit_cal_result[0]["result"]):
-                tmp_res_list.append(i["name"])
-            logger.info(
-                "第{}个位置上的公招预测结果：{}".format(
-                    self.recruit_index,
-                    tmp_res_list,
-                )
-            )
-        else:
-            self.agent_choose[str(self.recruit_index)] = {
-                "tags": list(choose),
-                "result": [{"id": "", "name": "随机三星干员", "star": 3}],
-            }
-            logger.info(
-                f'第{self.recruit_index}个位置上的公招预测结果：{"随机三星干员"}'
-            )
-        self.recruit_index = self.recruit_index + 1
         return
 
     def all_same_res(self, recruit_cal_res, index):
@@ -399,7 +425,7 @@ class RecruitSolver(SceneGraphSolver):
                 if max_star < 6 and agent["star"] == 6:
                     continue
                 result_dict[item[0]].append(agent)
-                logger.debug(item[0], agent)
+
             try:
                 for key in list(result_dict.keys()):
                     if len(result_dict[key]) == 0:
