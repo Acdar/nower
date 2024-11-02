@@ -3,23 +3,24 @@ import pickle
 from itertools import combinations
 
 import cv2
+import numpy as np
 
 from arknights_mower import __rootdir__
 from arknights_mower.data import (
     agent_with_tags,
     recruit_agent,
 )
+from arknights_mower.models import noto_sans, riic_base_digits
 from arknights_mower.utils import config
 from arknights_mower.utils.device.device import Device
 from arknights_mower.utils.email import recruit_rarity, recruit_template, send_message
 from arknights_mower.utils.graph import SceneGraphSolver
-from arknights_mower.utils.image import cropimg, thres2
+from arknights_mower.utils.image import cmatch, cropimg, loadres, thres2
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.recognize import Recognizer, Scene
 from arknights_mower.utils.vector import va
 
-with lzma.open(f"{__rootdir__}/models/riic_base_digits.pkl", "rb") as f:
-    number = pickle.load(f)
+number = riic_base_digits
 with lzma.open(f"{__rootdir__}/models/recruit_result.pkl", "rb") as f:
     recruit_res_template = pickle.load(f)
 with lzma.open(f"{__rootdir__}/models/recruit.pkl", "rb") as f:
@@ -65,37 +66,45 @@ class RecruitSolver(SceneGraphSolver):
         self.recruit_order = [6, 5, 1, 4, 3, 2]
         self.refresh = False
         self.result_agent = {}
+        self.tags = {}
         self.ticket_number = None
+
+        self.normal = loadres("recruit/choose_template/normal")
+        self.rare = loadres("recruit/choose_template/rare")
 
     def run(self):
         self.add_recruit_param()
         super().run()
         logger.info(self.result_agent)
-
+        recruit_results = {}
         if self.agent_choose:
-            logger.info("开包汇总如下")
             for pos in self.agent_choose:
+                if self.agent_choose[pos]["choosed"] is False:
+                    continue
                 agent = []
-                for item in self.agent_choose[pos]["result"]:
-                    agent.append(item["name"])
-                logger.info(
-                    "{}:[".format(pos)
-                    + ",".join(self.agent_choose[pos]["tags"])
-                    + "]:{}".format(",".join(agent))
-                )
+                if self.agent_choose[pos]["result"]:
+                    for item in self.agent_choose[pos]["result"]:
+                        agent.append(item["name"])
+                    recruit_results[pos] = self.agent_choose[pos]
+                    logger.info(
+                        "{}:[".format(pos)
+                        + ",".join(self.agent_choose[pos]["tags"])
+                        + "]:{}".format(",".join(agent))
+                    )
+        logger.info(recruit_results)
         if self.agent_choose or self.result_agent:
             logger.info("招募汇总如下")
             send_message(
                 recruit_template.render(
-                    recruit_results=self.agent_choose,
+                    recruit_results=recruit_results,
                     recruit_get_agent=self.result_agent,
-                    permit_count=config.conf.recruitment_permit,
+                    permit_count=self.ticket_number,
                     title_text="公招汇总",
                 ),
                 "公招汇总通知",
                 "INFO",
             )
-        return self.agent_choose, self.result_agent
+        return recruit_results, self.result_agent
 
     def transition(self) -> bool:
         if (scene := self.scene()) == Scene.RECRUIT_MAIN:
@@ -164,6 +173,8 @@ class RecruitSolver(SceneGraphSolver):
                     return
                 self.tap(pos)
                 return
+            else:
+                self.sleep()
 
         elif scene == Scene.RECRUIT_TAGS:
             self.ticket_number = self.get_ticket_number()
@@ -292,10 +303,7 @@ class RecruitSolver(SceneGraphSolver):
         finally:
             self.tap((500, 500))
 
-    def recruit_tags(self):
-        tags = self.get_recruit_tag()
-        logger.debug("tag识别结果{}".format(tags))
-
+    def recruit_tags(self, tags):
         tem_res = self.recruit_cal(sorted(tags))
         recruit_cal_result = None
         recruit_result_level = -1
@@ -313,11 +321,7 @@ class RecruitSolver(SceneGraphSolver):
             recruit_cal_result = [tem_res[recruit_result_level][-1]]
         else:
             recruit_cal_result = tem_res[recruit_result_level]
-        logger.debug(recruit_cal_result)
-        if recruit_result_level == 3:
-            if pos := self.find("recruit/refresh"):
-                self.tap(pos)
-                return
+        logger.debug(f"recruit_cal_result:{recruit_cal_result}")
 
         if self.recruit_order.index(recruit_result_level) <= self.recruit_order_index:
             logger.info("稀有tag,发送邮件")
@@ -458,7 +462,7 @@ class RecruitSolver(SceneGraphSolver):
                 logger.debug("{}:{}".format(item, result[item]))
         return result
 
-    def get_recruit_tag(self):
+    def get_recruit_tag(self) -> dict | bool:
         up = 520
         down = 740
         left = 530
@@ -470,6 +474,8 @@ class RecruitSolver(SceneGraphSolver):
         h, w, _ = img.shape
 
         for index, value in enumerate(tags_img):
+            if self.tag_not_choosed(value) is False:
+                return False
             max_v = -1
             tag_res = None
             for key in tag_template:
@@ -542,3 +548,82 @@ class RecruitSolver(SceneGraphSolver):
         if not config.conf.recruit_robot:
             self.recruit_order = [6, 5, 4, 3, 2, 1]
             self.recruit_order_index = 1
+
+    def tag_not_choosed(self, tag: np.ndarray):
+        if cmatch(tag, self.normal, thresh=80) or cmatch(tag, self.rare, thresh=80):
+            return False
+
+        return True
+
+    def get_recruit_time(
+        self, mode="hour" or "minute", height: int | None = 84, thres: int | None = 100
+    ):
+        area = []
+        if mode == "hour":
+            area = [(610, 280), (750, 400)]
+        elif mode == "minute":
+            area = [(850, 280), (980, 400)]
+
+        img = cropimg(self.recog.gray, area)
+        templates = noto_sans
+        default_height = 28
+
+        if height and height != default_height:
+            scale = default_height / height
+            img = cv2.resize(img, None, None, scale, scale)
+        img = thres2(img, thres)
+        contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        rect = [cv2.boundingRect(c) for c in contours]
+        rect.sort(key=lambda c: c[0])
+
+        value = 0
+        img = cv2.bitwise_not(img)
+        for x, y, w, h in rect:
+            digit = cropimg(img, ((x, y), (x + w, y + h)))
+            digit = cv2.copyMakeBorder(
+                digit, 10, 10, 10, 10, cv2.BORDER_CONSTANT, None, (0,)
+            )
+            if digit.size < 900:
+                continue
+            score = []
+            for i in range(10):
+                im = templates[i]
+                result = cv2.matchTemplate(digit, im, cv2.TM_SQDIFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                score.append(min_val)
+            value = value * 10 + score.index(min(score))
+
+        return value
+
+    def choose_time(self, now_time: int, to_time: int, mode="hour" or "minute"):
+        subtract_time = now_time - to_time
+
+        click_time = 0
+        max_click = 0
+        tap_pos = 0
+        if mode == "minute":
+            click_time = int(abs(subtract_time) / 10)
+            tap_pos = 0.5
+            [self.tap_element("one_hour", tap_pos, 0.8, 0.1) for _ in range(click_time)]
+            return
+
+        if mode == "hour":
+            click_time = abs(subtract_time)
+            max_click = 9
+            tap_pos = 0.2
+
+        if abs(subtract_time) > (max_click / 2):
+            if subtract_time > 0:
+                [self.tap_element("one_hour", 0.2, 0.2, 0.1) for _ in range(click_time)]
+            else:
+                [
+                    self.tap_element("one_hour", 0.2, 0.8, 0.1)
+                    for _ in range(max_click - click_time)
+                ]
+        else:
+            if subtract_time < 0:
+                [self.tap_element("one_hour", 0.2, 0.2, 0.1) for _ in range(click_time)]
+            else:
+                [self.tap_element("one_hour", 0.2, 0.8, 0.1) for _ in range(click_time)]
+
+        return
