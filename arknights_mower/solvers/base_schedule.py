@@ -76,11 +76,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.last_clue = None
         self.sleeping = False
         self.operators = {}
-
-        self.last_execution = {
-            "maa": None,
-            "recruit": None,
-        }
+        self.last_execution = {"maa": None, "recruit": None, "todo": None}
 
         self.sign_in = (datetime.now() - timedelta(days=1, hours=4)).date()
         self.daily_report = (datetime.now() - timedelta(days=1, hours=4)).date()
@@ -778,10 +774,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             ):
                 self.clue_new()
                 self.last_clue = datetime.now()
-            # if (self.party_time is None or self.free_clue is None) and self.enable_party:
-            #     self.clue()
-            # if self.clue_count > self.clue_count_limit and self.enable_party:
-            #     self.share_clue()
             if (
                 self.drone_room not in self.op_data.run_order_rooms
                 and (
@@ -1750,15 +1742,19 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         """处理基建 Todo 列表"""
         tapped = False
         collect = {"bill": "订单", "factory": "制造站产物", "trust": "信赖"}
-        for res, name in collect.items():
-            tap_times = 0
-            while pos := self.find(f"infra_collect_{res}"):
-                logger.info(f"收取{name}")
-                self.tap(pos)
-                tapped = True
-                tap_times += 1
-                if tap_times > 0:
-                    break
+        if self.last_execution["todo"] is None or self.last_execution[
+            "todo"
+        ] < datetime.now() - timedelta(minutes=15):
+            for res, name in collect.items():
+                tap_times = 0
+                while pos := self.find(f"infra_collect_{res}"):
+                    logger.info(f"收取{name}")
+                    self.tap(pos)
+                    tapped = True
+                    tap_times += 1
+                    if tap_times > 0:
+                        break
+            self.last_execution["todo"] = datetime.now()
         if not tapped:
             # 点击右上角的通知图标
             # 可能被产物收取提示挡住，所以直接点位置
@@ -2223,6 +2219,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     if not self.waiting_solver():
                         return
                 self.recog.update()
+                wait = 0
+                while self.find("order_ready", scope=((450, 675), (600, 750))) is None:
+                    if wait > 6:
+                        break
+                    self.sleep(1)
+                self.recog.save_screencap("run_order")
                 if not (
                     self.drone_room is None
                     or (
