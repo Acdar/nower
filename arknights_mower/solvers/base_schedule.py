@@ -47,6 +47,7 @@ from arknights_mower.utils.scheduler_task import (
     scheduling,
     try_add_release_dorm,
 )
+from arknights_mower.utils.trading_order import TradingOrder
 
 
 class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
@@ -77,7 +78,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.sleeping = False
         self.operators = {}
         self.last_execution = {"maa": None, "recruit": None, "todo": None}
-
+        self.order_reader = TradingOrder()
         self.sign_in = (datetime.now() - timedelta(days=1, hours=4)).date()
         self.daily_report = (datetime.now() - timedelta(days=1, hours=4)).date()
         self.daily_skland = (datetime.now() - timedelta(days=1, hours=4)).date()
@@ -2225,6 +2226,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         break
                     self.sleep(1)
                 self.recog.save_screencap("run_order")
+                self.order_reader.save(self.recog.img)
                 if not (
                     self.drone_room is None
                     or (
@@ -2440,7 +2442,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if "" in agents:
             fast_mode = False
             agents = [item for item in agents if item != ""]
+        current_list = set()
         for idx, n in enumerate(agents):
+            if n not in current_list:
+                current_list.add(n)
+            elif n != "Free":
+                agents[idx] = "Free"
             if room.startswith("dorm") and n in self.op_data.operators.keys():
                 __agent = self.op_data.operators[n]
                 if __agent.mood == __agent.upper_limit and not __agent.room.startswith(
@@ -2516,7 +2523,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     pre_order = [3, "true"]
                 if not fast_mode:
                     self.tap((self.recog.w * 0.38, self.recog.h * 0.95), interval=0.5)
-                changed, ret = self.scan_agent(agent)
+                changed, ret = self.scan_agent(
+                    agent, full_scan=last_special_filter == "ALL"
+                )
                 if changed:
                     selected.extend(changed)
                     if len(agent) == 0:
@@ -2565,7 +2574,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         right_swipe = 0
                     last_special_filter = profession
                     self.switch_arrange_order(3, "true")
-            changed, ret = self.scan_agent(agent)
+            changed, ret = self.scan_agent(
+                agent, full_scan=last_special_filter == "ALL"
+            )
             if changed:
                 selected.extend(changed)
                 # 如果找到了
@@ -2621,7 +2632,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 free_list.remove(train_support)
             while free_num:
                 selected_name, ret = self.scan_agent(
-                    free_list, max_agent_count=free_num
+                    free_list,
+                    max_agent_count=free_num,
+                    full_scan=last_special_filter == "ALL",
                 )
                 selected.extend(selected_name)
                 free_num -= len(selected_name)
@@ -3135,6 +3148,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 ):
                     if not_take:
                         self.recog.save_screencap("run_order")
+                        self.order_reader.save(self.recog.img)
                         not_take = False
                     self.tap((self.recog.w * 0.25, self.recog.h * 0.25), interval=0.5)
                 if self.drone_room is None or (
