@@ -8,6 +8,7 @@ from arknights_mower.utils.plan import PlanConfig
 from ..data import agent_arrange_order, agent_list, base_room_list
 from ..solvers.record import save_action_to_sqlite_decorator
 from ..utils.log import logger
+from . import config
 
 
 class SkillUpgradeSupport:
@@ -283,6 +284,7 @@ class Operators:
         current_high = self.config.max_resting_count
         current_low = len(self.dorm) - self.config.max_resting_count
         for key in self.groups:
+            total_count = 0
             high_count = 0
             low_count = 0
             _replacement = []
@@ -305,8 +307,13 @@ class Operators:
                     high_count += 1
                 else:
                     low_count += 1
-            if high_count > current_high or low_count > current_low:
-                return f"{key} 分组无法排班,宿舍可用高优先{current_high},低优先{current_low}->分组需要高优先{high_count},低优先{low_count}"
+                if (
+                    high_count > current_high or low_count > current_low
+                ) and not config.conf.flexible_shift_mode:
+                    return f"{key} 分组无法排班,宿舍可用高优先{current_high},低优先{current_low}->分组需要高优先{high_count},低优先{low_count}"
+                total_count += 1
+            if total_count > len(self.dorm) and config.conf.flexible_shift_mode:
+                return f"{key} 分组无法排班,分组总数(不包含0心情工作){total_count}大于总宿舍数{len(self.dorm)}"
         # 设定令夕模式的心情阈值
         self.init_mood_limit()
         for name in self.workaholic_agent:
@@ -420,6 +427,7 @@ class Operators:
     @save_action_to_sqlite_decorator
     def update_detail(self, name, mood, current_room, current_index, update_time=False):
         agent = self.operators[name]
+        logger.debug(f"{name},{mood},{current_room},{current_index},{update_time}")
         if update_time:
             if agent.time_stamp is not None and agent.mood > mood:
                 time_difference = datetime.now() - agent.time_stamp
@@ -595,12 +603,14 @@ class Operators:
         total_mood = 0
         current_mood = 0
         count = 0
-        for k, v in self.operators().items():
+        for k, v in self.operators.items():
             if not v.is_resting() and v.operator_type != "low" and not v.workaholic:
                 current_mood += v.current_mood() - v.lower_limit
                 total_mood += v.upper_limit - v.lower_limit
                 count += 1
-        logger.debug(f"{count}, {current_mood / total_mood}")
+        logger.info(
+            f"当前工作总计高效组：{count}, 当前平均心情百分比 {current_mood / total_mood}"
+        )
         return current_mood / total_mood
 
     def available_free(self, free_type="high"):
@@ -645,7 +655,7 @@ class Operators:
                     self.operators[name].time_stamp = datetime.now()
         return ret
 
-    def assign_dorm(self, name):
+    def assign_dorm(self, name, is_new=False):
         is_high = self.operators[name].resting_priority == "high"
         if is_high:
             _room = next(
@@ -656,7 +666,9 @@ class Operators:
             )
         else:
             _room = None
-            for i in range(self.config.max_resting_count, len(self.dorm)):
+            for i in range(
+                4 if is_new else self.config.max_resting_count, len(self.dorm)
+            ):
                 _name = self.dorm[i].name
                 if (
                     _name == ""
@@ -827,7 +839,7 @@ class Operator:
         remaining_mood = self.mood - self.lower_limit  # 剩余心情
         depletion_rate = self.depletion_rate  # 心情掉率，小时单位
         # 计算到心情归零所需时间（小时），再加上当前时间戳
-        if depletion_rate > 0:
+        if self.time_stamp and depletion_rate > 0:
             return self.time_stamp + timedelta(
                 hours=((remaining_mood / depletion_rate) - 0.5)
             )
