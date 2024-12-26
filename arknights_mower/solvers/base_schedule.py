@@ -1432,6 +1432,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 )
         for name in self.op_data.exhaust_agent:
             op = self.op_data.operators[name]
+            if op.is_resting():
+                continue
             if op.current_mood() <= op.lower_limit + 2:
                 if (
                     self.find_next_task(
@@ -2923,7 +2925,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             interval=0,
                         )
                     right_swipe = skip_swipe_count
-                    self.sleep(0.25)
+                    self.sleep(1)
             changed, ret = self.scan_agent(
                 agent, full_scan=last_special_filter == "ALL"
             )
