@@ -559,7 +559,7 @@ class Recognizer:
             self.scene = Scene.SSS_START
         elif self.find("sss/ec_button"):
             self.scene = Scene.SSS_EC
-        elif self.find("sss/device_button"):
+        elif self.find("sss/device_button") or self.find("sss/next_step_button"):
             self.scene = Scene.SSS_DEVICE
         elif self.find("sss/squad_button"):
             self.scene = Scene.SSS_SQUAD
@@ -567,6 +567,8 @@ class Recognizer:
             self.scene = Scene.SSS_DEPLOY
         elif self.find("sss/redeploy_button"):
             self.scene = Scene.SSS_REDEPLOY
+        elif self.find("sss/confirm"):
+            self.scene = Scene.SSS_CONFIRM
         elif self.find("sss/loading"):
             self.scene = Scene.SSS_LOADING
         elif self.find("sss/close_button"):
@@ -645,7 +647,7 @@ class Recognizer:
         color = {
             "1800": (158, 958),
             "12cadpa": (1810, 21),
-            "arrange_confirm": (755, 903),
+            "arrange_confirm": (963, 969),
             "arrange_order_options": (1652, 23),
             "arrange_order_options_scene": (369, 199),
             "clue": (1740, 855),
@@ -739,7 +741,6 @@ class Recognizer:
             "recruit/riic_res/WARRIOR": 0.7,
             "recruit/time": 0.8,
             "recruit/stone": 0.7,
-            "arrange_confirm": 0.85,
         }
 
         if res in color:
