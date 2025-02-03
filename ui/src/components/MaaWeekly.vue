@@ -80,11 +80,7 @@ function create_tag(label) {
         <div class="card-title">刷理智周计划</div>
       </n-checkbox>
       <help-text>
-        <div>支持的常驻和活动关卡：</div>
-        <ul>
-          <li>全部常驻关卡；</li>
-          <li>在MAA导航更新后支持的活动关卡。</li>
-        </ul>
+        <div>支持所有maa支持的关卡</div>
       </help-text>
       <n-button
         text

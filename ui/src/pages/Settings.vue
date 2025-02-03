@@ -15,6 +15,7 @@ const mobile = inject('mobile')
 
 const {
   run_order_delay,
+  dorm_order,
   drone_room,
   drone_count_limit,
   drone_interval,
@@ -26,6 +27,8 @@ const {
   theme,
   resting_threshold,
   fia_threshold,
+  rescue_threshold,
+  favorite,
   tap_to_launch_game,
   exit_game_when_idle,
   close_simulator_when_idle,
@@ -43,7 +46,9 @@ const {
   maa_gap,
   custom_screenshot,
   check_for_updates,
-  waiting_scene
+  waiting_scene,
+  enable_party,
+  leifeng_mode
 } = storeToRefs(config_store)
 
 const { operators } = storeToRefs(plan_store)
@@ -422,6 +427,18 @@ const onSelectionChange = (newValue) => {
         </n-card>
       </div>
       <div>
+        <SKLand />
+      </div>
+      <div>
+        <Depotswitch />
+      </div>
+      <div>
+        <DailyMission />
+      </div>
+    </div>
+
+    <div class="grid-right">
+      <div>
         <n-card title="基建设置">
           <n-form
             :label-placement="mobile ? 'top' : 'left'"
@@ -429,6 +446,20 @@ const onSelectionChange = (newValue) => {
             label-width="140"
             label-align="left"
           >
+            <n-form-item>
+              <n-flex>
+                <n-checkbox v-model:checked="enable_party"
+                  ><div class="item">线索收集</div></n-checkbox
+                >
+                <n-checkbox v-model:checked="leifeng_mode">
+                  雷锋模式
+                  <help-text>
+                    <div>开启时，向好友赠送多余的线索；</div>
+                    <div>关闭则超过9个线索才送好友。</div>
+                  </help-text>
+                </n-checkbox>
+              </n-flex>
+            </n-form-item>
             <n-form-item>
               <template #label>
                 <span>跑单前置延时</span>
@@ -543,8 +574,19 @@ const onSelectionChange = (newValue) => {
             <n-form-item :show-label="false">
               <n-checkbox v-model:checked="fia_fool">
                 菲亚防呆
-                <help-text>沿用默认逻辑，不确定菲亚替换心情消耗请启用本选项</help-text>
+                <help-text
+                  >当菲亚替换干员心情均超过90%时菲亚等待半小时，不确定菲亚替换心情消耗请启用本选项</help-text
+                >
               </n-checkbox>
+            </n-form-item>
+            <n-form-item>
+              <template #label>
+                <span>宿舍优先级排序</span>
+                <help-text>
+                  <div>正常情况千万不需要，除非你有特殊情况</div>
+                </help-text>
+              </template>
+              <slick-dorm-select v-model="dorm_order"></slick-dorm-select>
             </n-form-item>
             <n-form-item>
               <template #label>
@@ -569,17 +611,38 @@ const onSelectionChange = (newValue) => {
                 </n-input-number>
               </div>
             </n-form-item>
+            <n-form-item>
+              <template #label>
+                <span>急救阈值</span>
+                <help-text>
+                  <div>整体心情低于换班阈值乘急救阈值后，将忽视高优人数安排休息任务。</div>
+                </help-text>
+              </template>
+              <div class="threshold">
+                <n-slider
+                  v-model:value="rescue_threshold"
+                  :step="5"
+                  :min="0"
+                  :max="90"
+                  :format-tooltip="(v) => `${v}%`"
+                />
+                <n-input-number v-model:value="rescue_threshold" :step="5" :min="0" :max="90">
+                  <template #suffix>%</template>
+                </n-input-number>
+              </div>
+            </n-form-item>
+            <n-form-item>
+              <template #label>
+                <span>替换组心情监视</span>
+                <help-text>填入需要查看心情曲线的替换组干员</help-text>
+              </template>
+              <slick-operator-select v-model="favorite"></slick-operator-select>
+            </n-form-item>
           </n-form>
         </n-card>
       </div>
       <div>
-        <SKLand />
-      </div>
-      <div>
-        <Depotswitch />
-      </div>
-      <div>
-        <DailyMission />
+        <Recruit />
       </div>
       <div>
         <email />
@@ -587,19 +650,6 @@ const onSelectionChange = (newValue) => {
       <div>
         <ServerJang />
       </div>
-    </div>
-
-    <div class="grid-right">
-      <div>
-        <clue />
-      </div>
-      <div>
-        <Recruit />
-      </div>
-      <div><maa-weekly /></div>
-      <div><maa-weekly-new /></div>
-      <div><maa-basic /></div>
-      <div><long-tasks /></div>
     </div>
   </div>
 </template>
