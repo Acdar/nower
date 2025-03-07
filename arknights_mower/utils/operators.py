@@ -440,6 +440,16 @@ class Operators:
 
     @save_action_to_sqlite_decorator
     def update_detail(self, name, mood, current_room, current_index, update_time=False):
+        """更新对象的详细信息，并记录到SQLite数据库
+        参数:
+        name(str): 对象的名称。
+        mood(str): 当前的心情状态。
+        current_room(str): 当前所在的房间名称(新)。
+        current_index(int): 当前索引（新）。
+        update_time(bool, 可选): 是否更新时间戳，默认为
+        False 是否刷新时间
+
+        返回: index 如果需要读取时间 None"""
         agent = self.operators[name]
         logger.debug(f"{name},{mood},{current_room},{current_index},{update_time}")
         if update_time:
@@ -457,41 +467,26 @@ class Operators:
                         f"更新 {agent.name} 心情掉率为：{agent.depletion_rate}"
                     )
             agent.time_stamp = datetime.now()
-        # 如果移出宿舍，则清除对应宿舍数据 且重新记录高效组心情（如果有备用班，则跳过高效组判定）
-        if (
-            agent.current_room.startswith("dorm")
-            and not current_room.startswith("dorm")
-            and (agent.is_high() or self.backup_plans)
-        ):
-            self.refresh_dorm_time(
-                agent.current_room, agent.current_index, {"agent": ""}
-            )
+        from_dorm = agent.current_room.startswith("dorm")
+        to_dorm = current_room.startswith("dorm")
+        if from_dorm and not to_dorm:
             if update_time:
                 self.time_stamp = datetime.now()
             else:
                 self.time_stamp = None
             agent.depletion_rate = 0
-        if (
-            self.get_dorm_by_name(name)[0] is not None
-            and not current_room.startswith("dorm")
-            and (agent.is_high() or self.backup_plans)
-        ):
-            _dorm = self.get_dorm_by_name(name)[1]
-            _dorm.name = ""
-            _dorm.time = None
+        if from_dorm:
+            idx, dorm = self.get_dorm_by_name(name)
+            if dorm:
+                dorm.reset()
         agent.current_room = current_room
         agent.current_index = current_index
         agent.mood = mood
         # 如果是高效组且没有记录时间，则返还index
-        if agent.current_room.startswith("dorm") and (
-            agent.is_high() or self.backup_plans
-        ):
-            for dorm in self.dorm:
-                if (
-                    dorm.position[0] == current_room
-                    and dorm.position[1] == current_index
-                    and dorm.time is None
-                ):
+        if to_dorm:
+            idx, dorm = self.get_dorm_by_name(name)
+            if dorm:
+                if dorm.time is None:
                     return current_index
         if agent.name == "菲亚梅塔" and (
             self.operators["菲亚梅塔"].time_stamp is None
@@ -567,8 +562,15 @@ class Operators:
         return ret
 
     def get_dorm_by_name(self, name):
+        _op = self.operators[name]
+        logger.debug(name)
         for idx, dorm in enumerate(self.dorm):
-            if dorm.name == name:
+            if (
+                dorm.position[0] == _op.current_room
+                and dorm.position[1] == _op.current_index
+            ):
+                logger.debug(idx)
+                logger.debug(dorm)
                 return idx, dorm
         return None, None
 
@@ -627,46 +629,41 @@ class Operators:
     def available_free(self, free_type="high", time=None):
         if not time:
             time = datetime.now()
-        ret = 0
-        freeName = []
-        max_count = sum(1 for key in self.plan if key.startswith("dorm"))
-        if free_type == "high":
-            idx = 0
-            for dorm in self.dorm:
-                if dorm.name == "" or (
-                    dorm.name in self.operators.keys()
-                    and not self.operators[dorm.name].is_high()
-                ):
-                    ret += 1
-                elif dorm.time is not None and dorm.time < time:
-                    logger.info(f"检测到房间休息完毕，释放{dorm.name}宿舍位")
-                    freeName.append(dorm.name)
-                    ret += 1
-                if idx == max_count - 1:
-                    break
+
+        dorm_count = sum(1 for key in self.plan if key.startswith("dorm"))
+        total = len(self.dorm)
+
+        count_high = 0
+        count_low = 0
+        free_name = []
+
+        # 一次性遍历 dorm
+        for idx, dorm in enumerate(self.dorm):
+            if dorm.name == "" or (
+                dorm.name in self.operators.keys()
+                and not self.operators[dorm.name].is_high()
+            ):
+                continue
+            elif dorm.time is not None and dorm.time < time:
+                free_name.append(dorm.name)
+                continue
+            if dorm.name in self.operators:
+                op = self.operators[dorm.name]
+                if op.resting_priority == "high":
+                    count_high += 1
                 else:
-                    idx += 1
-        else:
-            for i in range(max_count, len(self.dorm)):
-                dorm = self.dorm[i]
-                # 释放满休息位
-                # TODO 高效组且低优先可以相互替换
-                if dorm.name == "" or (
-                    dorm.name in self.operators.keys()
-                    and not self.operators[dorm.name].is_high()
-                ):
-                    ret += 1
-                elif dorm.time is not None and dorm.time < time:
-                    logger.info(f"检测到房间休息完毕，释放{dorm.name}宿舍位")
-                    freeName.append(dorm.name)
-                    ret += 1
-        if len(freeName) > 0:
-            for name in freeName:
+                    count_low += 1
+        available_high = max(0, dorm_count - count_high)
+        available_low = total - count_low - max(count_high, dorm_count)
+
+        if len(free_name) > 0:
+            for name in free_name:
+                logger.debug(f"检测到房间休息完毕，释放{dorm.name}宿舍位")
                 if name in agent_list:
                     self.operators[name].mood = self.operators[name].upper_limit
                     self.operators[name].depletion_rate = 0
                     self.operators[name].time_stamp = time
-        return ret
+        return available_high if free_type == "high" else available_low
 
     def assign_dorm(self, name, is_new=False):
         is_high = self.operators[name].resting_priority == "high"
@@ -695,6 +692,7 @@ class Operators:
                 or not self.operators[obj.name].is_high()
                 or (obj.time is not None and obj.time < datetime.now())
             )
+        logger.debug(f"安排{name}去{_room.position}")
         _room.name = name
         _room.time = None
         return _room
@@ -728,6 +726,10 @@ class Dormitory:
         return (
             f"Dormitory(position={self.position},name='{self.name}',time='{self.time}')"
         )
+
+    def reset(self):
+        self.name = ""
+        self.time = None
 
 
 class Operator:
@@ -785,6 +787,7 @@ class Operator:
     def current_room(self, value):
         if self._current_room != value:
             self._current_room = value
+            logger.debug("call_back")
             if (
                 Operators.current_room_changed_callback
                 and self.refresh_order_room[0]
@@ -793,6 +796,7 @@ class Operator:
                 Operators.current_room_changed_callback(self)
 
     def is_high(self):
+        # 是否为高效组
         return self.operator_type == "high"
 
     def is_resting(self):
