@@ -34,6 +34,7 @@ class PackagePathFilter(logging.Filter):
         return True
 
 
+last_screenshot = None
 filter = PackagePathFilter()
 
 logger = logging.getLogger(__name__)
@@ -106,13 +107,16 @@ def screenshot_cleanup():
 
 def screenshot_worker():
     screenshot_cleanup()
+    global last_screenshot
     while True:
         now = datetime.now()
         if now - cleanup_time > timedelta(hours=1):
             screenshot_cleanup()
-        img, filename = screenshot_queue.get()
+        img, filename, upate_last = screenshot_queue.get()
         with screenshot_folder.joinpath(filename).open("wb") as f:
             f.write(img)
+            if upate_last:
+                last_screenshot = filename
 
 
 Thread(target=screenshot_worker, daemon=True).start()
@@ -125,7 +129,7 @@ def save_screenshot(img: bytes, sub_folder=None) -> None:
         sub_folder_path = Path(screenshot_folder) / sub_folder
         sub_folder_path.mkdir(parents=True, exist_ok=True)
         filename = f"{sub_folder}/{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
-    screenshot_queue.put((img, filename))
+    screenshot_queue.put((img, filename, not sub_folder))
 
 
 def get_log_by_time(target_time, time_range=1):

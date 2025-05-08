@@ -127,7 +127,11 @@ class BaseMixin:
                 (label for label in self.profession_labels if label != special_filter),
                 None,
             )
-            self.profession_filter(selected_label)
+            # 硬切换职业筛选 的时候有时候游戏会出bug，回不去，改成切换到ALL
+            if special_filter == "ALL":
+                self.profession_filter(selected_label)
+            else:
+                self.profession_filter("ALL")
             self.profession_filter(special_filter)
         else:
             swipe_time = 2 if right_swipe == 3 else right_swipe
