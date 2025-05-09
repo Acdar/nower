@@ -1067,7 +1067,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     if self.drone_room in self.op_data.run_order_rooms:
                         adjust_room = self.drone_room
                     else:
-                        lowest_room = self.op_data.run_order_rooms[0]
+                        lowest_room = next(iter(self.op_data.run_order_rooms.keys()))
                         for room in self.op_data.run_order_rooms:
                             if len(self.op_data.plan[room]) < len(
                                 self.op_data.plan[lowest_room]
@@ -1888,9 +1888,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     def adjust_order_time(self, accelerate, room):
         error_count = 0
         action_required_task = scheduling(self.tasks)
-        while (
-            action_required_task is not None and action_required_task.meta_data == room
-        ):
+        while action_required_task:
             self.tap(accelerate)
             if self.scene() in self.waiting_scene:
                 if not self.waiting_solver():
@@ -2248,6 +2246,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         logger.info(f"安排干员 ：{agent}")
         # 若不是空房间，则清空工作中的干员
         is_dorm = room.startswith("dorm")
+        not_production = not room.startswith("room")
         first_time = True
         # 在 agent 中 'Free' 表示任意空闲干员
         free_num = agent.count("Free")
@@ -2264,6 +2263,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             self.switch_arrange_order("工作状态")
         siege = False  # 推进之王
         last_special_filter = "ALL"
+        start_time, finish_time = datetime.now(), datetime.now()
         while len(agent) > 0:
             if retry_count > 1:
                 raise Exception("到达最大尝试次数 1次")
@@ -2319,7 +2319,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         right_swipe = 0
                     last_special_filter = profession
             elif agent and agent[0] in agent_list:
-                if is_dorm and agent[0] != "阿米娅":
+                if (is_dorm or not_production) and agent[0] != "阿米娅":
                     # 在宿舍并且不是阿米娅则打开职介筛选
                     profession = agent_profession[agent[0]]
                     self.profession_filter(profession)
@@ -2328,7 +2328,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     last_special_filter = profession
                     if index_change:
                         self.switch_arrange_order(3, "true")
-                elif is_dorm and agent[0] == "阿米娅" and last_special_filter != "ALL":
+                elif (
+                    (is_dorm or not_production)
+                    and agent[0] == "阿米娅"
+                    and last_special_filter != "ALL"
+                ):
                     # 如果是阿米娅且filter 不是all
                     self.profession_filter("ALL")
                     last_special_filter = "ALL"
@@ -2336,7 +2340,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     agent[0] in self.op_data.operators
                     and self.op_data.operators[agent[0]].is_resting()
                     and fast_mode
-                    and is_dorm
+                    and (is_dorm or not_production)
                     and agent[0] != "阿米娅"
                     and agent[0] not in self.choose_error
                 ):
@@ -2468,6 +2472,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         logger.debug("验证干员选择..")
         self.swipe_left(right_swipe, last_special_filter)
         self.switch_arrange_order(2)
+        finish_time = datetime.now()
+        if finish_time - start_time > timedelta(seconds=15) * len(agents):
+            # 如果超过5分钟，则所有里面的干员自动用职介筛选
+            for agent in agents:
+                if agent != "阿米娅" and agent:
+                    logger.debug(f"检测到{agent}选择时间过长，自动使用职介筛选")
+                    self.op_data.profession_filter.add(agent)
         if not self.verify_agent(agents):
             logger.debug(agents)
             raise Exception("检测到干员选择错误，重新选择")
