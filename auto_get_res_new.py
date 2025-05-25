@@ -698,6 +698,37 @@ class Arknights数据处理器:
                     else:
                         print(f"跳过: {dest_file_path} 已存在")
 
+    def 获取加工站配方类别(self):
+        配方类别 = {}
+        种类 = set([])
+
+        # 从基建表获取所有配方
+        配方数据 = self.基建表.get("workshopFormulas", {})
+
+        # 遍历所有配方
+        for 配方ID, 配方信息 in 配方数据.items():
+            # 从物品表获取配方产出物品的名称
+            物品ID = 配方信息.get("itemId")
+            物品名称 = self.物品表["items"].get(物品ID, {}).get("name", 物品ID)
+            子类材料 = [
+                self.物品表["items"].get(i["id"], {}).get("name")
+                for i in 配方信息.get("costs")
+            ]
+            # 获取配方类型
+            配方类型 = 配方信息.get("formulaType")
+            种类.add(配方类型)
+            # 添加到结果字典中
+            配方类别[物品名称] = {
+                "tab": formulaType[配方类型],
+                "apCost": 配方信息.get("apCost") / 360000,
+                "goldCost": 配方信息.get("goldCost"),
+                "items": 子类材料,
+            }
+        with open(
+            "./arknights_mower/data/workshop_formula.json", "w", encoding="utf8"
+        ) as json_file:
+            json.dump(配方类别, json_file, ensure_ascii=False, indent=4)
+
 
 roomType = {
     "POWER": "发电站",
@@ -709,6 +740,12 @@ roomType = {
     "HIRE": "人力办公室",
     "TRAINING": "训练室",
     "CONTROL": "中枢",
+}
+formulaType = {
+    "F_SKILL": "技巧概要",
+    "F_ASC": "芯片",
+    "F_BUILDING": "基建材料",
+    "F_EVOLVE": "精英材料",
 }
 
 
@@ -744,3 +781,5 @@ print("训练选中的干员名的模型,完成")
 数据处理器.添加基建技能图标()
 
 数据处理器.load_recruit_resource()
+
+数据处理器.获取加工站配方类别()

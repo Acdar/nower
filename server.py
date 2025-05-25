@@ -118,6 +118,13 @@ def shop_list():
     return list(shop_items.keys())
 
 
+@app.route("/item")
+def item_list():
+    from arknights_mower.data import workshop_formula
+
+    return list(workshop_formula.keys())
+
+
 @app.route("/depot/readdepot")
 def read_depot():
     from arknights_mower.utils import depot
@@ -647,7 +654,7 @@ def test_skland():
 
 
 @app.route("/task", methods=["GET", "POST"])
-def get_count():
+def add_task():
     from arknights_mower.__main__ import base_scheduler
     from arknights_mower.data import agent_list
     from arknights_mower.utils.operators import SkillUpgradeSupport
@@ -704,7 +711,7 @@ def get_count():
                     base_scheduler.tasks.append(new_task)
                     logger.debug(f"成功：{str(new_task)}")
                     return "添加任务成功！"
-            raise Exception("添加任务失败！！")
+            raise Exception("添加任务失败！！请确保Mower正在运行")
         except Exception as e:
             logger.exception(f"添加任务失败：{str(e)}")
             return str(e)

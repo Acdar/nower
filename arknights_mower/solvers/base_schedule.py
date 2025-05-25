@@ -4,6 +4,7 @@ import os
 import pathlib
 import sys
 import urllib
+from collections import defaultdict, deque
 from ctypes import CFUNCTYPE, c_char_p, c_int, c_void_p
 from datetime import datetime, timedelta
 from typing import Literal
@@ -11,7 +12,12 @@ from typing import Literal
 import cv2
 import urllib.request
 
-from arknights_mower.data import agent_list, agent_profession, base_room_list
+from arknights_mower.data import (
+    agent_list,
+    agent_profession,
+    base_room_list,
+    workshop_formula,
+)
 from arknights_mower.solvers.base_mixin import BaseMixin
 from arknights_mower.solvers.credit import CreditSolver
 from arknights_mower.solvers.cultivate_depot import cultivate as cultivateDepotSolver
@@ -49,6 +55,7 @@ from arknights_mower.utils.scheduler_task import (
     scheduling,
     try_add_release_dorm,
     try_reorder,
+    try_workshop_tasks,
 )
 from arknights_mower.utils.trading_order import TradingOrder
 
@@ -390,6 +397,30 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             )
             self.tasks.sort(key=lambda task: task.time)
 
+    def craft_material(self):
+        task = self.task
+        try:
+            self.enter_room("factory")
+            current_agent = [
+                key
+                for key, value in self.op_data.operators.items()
+                if value.current_room == "factory"
+            ]
+            agent_room = self.op_data.operators[task.meta_data].current_room
+            logger.debug(f"当前工厂干员: {current_agent}")
+            logger.debug(f"当前加工干员位置: {agent_room}")
+            self.agent_arrange({"factory": [task.meta_data]})
+            self.enter_room("factory")
+            self.generate_product(task.meta_data)
+            if len(current_agent) > 0 and current_agent[0] != task.meta_data:
+                new_plan = {"factory": current_agent}
+                if agent_room:
+                    new_plan[agent_room] = [task.meta_data]
+                self.agent_arrange(new_plan)
+        except Exception as e:
+            logger.error(f"工厂任务失败: {e}")
+            logger.exception(e)
+
     def plan_metadata(self):
         self.tasks = plan_metadata(self.op_data, self.tasks)
 
@@ -416,8 +447,20 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                     and free_agent.current_index == free_index
                                 ):
                                     get_time = True
+                                    if free_agent in [
+                                        item.operator
+                                        for item in config.conf.workshop_settings
+                                    ]:
+                                        logger.info(
+                                            "检测到释放干员为工作站加工干员，切换为工作站任务"
+                                        )
+                                        self.craft_material()
                                     # 如果是高优先，还需要把宿舍reference移除
-                                    if free_agent.is_high():
+                                    # 如果在上一步完成了加工，心情会强制归零
+                                    if (
+                                        free_agent.is_high()
+                                        and self.op_data.operators[free_agent].mood > 0
+                                    ):
                                         idx, dorm = self.op_data.get_dorm_by_name(
                                             free_agent.name
                                         )
@@ -472,6 +515,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 # 如果任务名称包含干员名,则为动态生成的
                 elif self.task.type == TaskTypes.FIAMMETTA:
                     self.plan_fia()
+                elif self.task.type == TaskTypes.WORKSHOP:
+                    self.craft_material()
                 elif (
                     self.task.meta_data.split(",")[0] in agent_list
                     and self.task.type == TaskTypes.EXHAUST_OFF
@@ -858,6 +903,129 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 if scene == Scene.TRAIN_SKILL_UPGRADE:
                     self.back()
             self.back()
+        except Exception as e:
+            logger.exception(e)
+
+    def generate_product(self, agent: str):
+        """
+        Process materials in a factory with specified operators
+        Args:
+            agent: List of operators that need two production cycles
+        """
+
+        try:
+            unknown_cnt = 0
+            # is_9colored = agent == "九色鹿"
+            if agent not in [s.operator for s in config.conf.workshop_settings]:
+                logger.info(f"当前干员{agent}不在加工站配置中")
+                return
+            item_list = next(
+                (s.items for s in config.conf.workshop_settings if s.operator == agent)
+            )
+            seen = set()
+            group = defaultdict(dict)
+            for item in item_list:
+                if item.item_name in seen:
+                    logger.info(
+                        f"当前干员{agent}的加工站配置中存在重复材料{item.item_name}，以第一个设置为准"
+                    )
+                    continue
+                seen.add(item.item_name)
+                group[workshop_formula[item.item_name]["tab"]][item.item_name] = item
+            tab_queue = deque(group.items())
+            tab_pos = {
+                "基建材料": (self.recog.w * 0.1, self.recog.h * 0.18),
+                "精英材料": (self.recog.w * 0.1, self.recog.h * 0.31),
+                "技巧概要": (self.recog.w * 0.1, self.recog.h * 0.45),
+                "芯片": (self.recog.w * 0.1, self.recog.h * 0.57),
+            }
+            tasks = ["enter", "select", "process"]
+            while tasks:
+                scene = self.factory_scene()
+                if scene == Scene.UNKNOWN:
+                    unknown_cnt += 1
+                    if unknown_cnt > 5:
+                        unknown_cnt = 0
+                        self.back_to_infrastructure()
+                        self.enter_room("factory")
+                    else:
+                        self.sleep()
+                elif scene == Scene.CONNECTING:
+                    self.sleep()
+                elif self.find("arrange_check_in") or self.find(
+                    "arrange_check_in_small"
+                ):
+                    self.tap((self.recog.w * 0.25, self.recog.h * 0.95), interval=0.5)
+                elif scene == Scene.FACTORY_DASHBOARD:
+                    if tasks[0] == "enter":
+                        del tasks[0]
+                    elif tasks[0] == "select":
+                        self.tap(
+                            (self.recog.w * 0.45, self.recog.h * 0.65), interval=0.5
+                        )
+                    else:
+                        # add_btn = (self.recog.w * 0.84, self.recog.h * 0.4)
+                        max_btn = (self.recog.w * 0.95, self.recog.h * 0.4)
+                        produce_btn = (self.recog.w * 0.88, self.recog.h * 0.88)
+                        self.tap(max_btn, interval=0.5)
+                        if self.find("factory_warning"):
+                            tasks = []
+                            logger.info("检测到干员心情见底，任务结束")
+                            self.op_data.operators[agent].mood = 0
+                            self.op_data.operators[agent].time_stamp = datetime.now()
+                            logger.debug("设置加工站干员心情为0，别问我，我懒得算了")
+                            continue
+                        self.tap(produce_btn, interval=5.5)
+                elif scene == Scene.FACTORY_FORMULA:
+                    if tasks[0] in ["enter", "process"]:
+                        self.back()
+                    else:
+                        if not tab_queue:
+                            logger.info("没有任何材料满足条件，任务结束")
+                            tasks = []
+                            continue
+                        tab, item_list = tab_queue.popleft()
+                        item_list = set(item_list)
+                        self.tap(tab_pos[tab], interval=0.2)
+                        logger.info(f"开始检索{tab}的材料")
+                        last_scaned = []
+                        while True and item_list:
+                            scanned_items = self.item_list()
+                            current_scan = [item for item, pos, valid in scanned_items]
+                            if current_scan == last_scaned:
+                                logger.info("已经到底了")
+                                break
+                            last_scaned = current_scan
+                            for item, pos, valid in scanned_items:
+                                if item in item_list:
+                                    if valid:
+                                        logger.info(f"检测到{item}满足条件，开始加工")
+                                        self.tap(
+                                            (
+                                                (pos[0][0] + pos[1][0]) / 2,
+                                                (pos[0][1] + pos[1][1]) / 2,
+                                            ),
+                                            interval=0.5,
+                                        )
+                                        item_list = []
+                                        del tasks[0]
+                                        break
+                                    else:
+                                        logger.info(f"检测到{item}不满足条件，跳过")
+                                        item_list.remove(item)
+                            self.swipe_noinertia(
+                                (0.5 * self.recog.w, 0.9 * self.recog.h),
+                                (0, -800),
+                                interval=1,
+                            )
+
+                elif scene == Scene.FACTORY_PRODUCT_COLLECT:
+                    self.recog.save_screencap("workshop")
+                    self.back()
+                elif scene == Scene.FACTORY_ROOM:
+                    self.tap((self.recog.w * 0.1, self.recog.h * 0.95), 0.5)
+            self.back()
+            self.back_to_infrastructure()
         except Exception as e:
             logger.exception(e)
 
@@ -1277,6 +1445,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 task_type=TaskTypes.SHIFT_OFF if new_plan else TaskTypes.NOT_SPECIFIC,
             )
             self.tasks.append(task)
+        if not self.find_next_task(datetime.now() + timedelta(minutes=5)):
+            try_workshop_tasks(self.op_data, self.tasks)
         if not self.find_next_task(datetime.now() + timedelta(minutes=5)):
             try_add_release_dorm({}, None, self.op_data, self.tasks)
         if self.find_next_task(datetime.now() + timedelta(seconds=15)):
@@ -2396,16 +2566,16 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 siege = True
                 if agent[0] in self.op_data.profession_filter:
                     profession = agent_profession[agent[0]]
-                    self.profession_filter(profession)
                     if last_special_filter != profession:
+                        self.profession_filter(profession)
                         right_swipe = 0
                     last_special_filter = profession
             elif agent and agent[0] in agent_list:
                 if (is_dorm or not_production) and agent[0] != "阿米娅":
                     # 在宿舍并且不是阿米娅则打开职介筛选
                     profession = agent_profession[agent[0]]
-                    self.profession_filter(profession)
                     if last_special_filter != profession:
+                        self.profession_filter(profession)
                         right_swipe = 0
                     last_special_filter = profession
                     if index_change:
@@ -2417,12 +2587,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 ):
                     # 如果是阿米娅且filter 不是all
                     self.profession_filter("ALL")
+                    right_swipe = 0
                     last_special_filter = "ALL"
                 if (
                     agent[0] in self.op_data.operators
                     and self.op_data.operators[agent[0]].is_resting()
                     and fast_mode
-                    and (is_dorm or not_production)
+                    and is_dorm
                     and agent[0] != "阿米娅"
                     and agent[0] not in self.choose_error
                 ):
@@ -2476,6 +2647,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             if last_special_filter != "ALL":
                 self.profession_filter("ALL")
                 last_special_filter = "ALL"
+                right_swipe = 0
             self.switch_arrange_order(3, "true")
             # 只选择在列表里面的
             # 替换组小于20才休息，防止进入就满心情进行网络连接
@@ -3246,6 +3418,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         "medicine": _plan.medicine,
                         "stone": 999 if conf.maa_eat_stone else 0,
                         "times": 999,
+                        "series": 0,
                         "report_to_penguin": True,
                         "client_type": "",
                         "penguin_id": "",
