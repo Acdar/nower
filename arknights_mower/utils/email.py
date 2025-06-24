@@ -122,7 +122,7 @@ def send_message(
         email = Email(body, subject, attach_image)
     if conf.server_push_enable:
         send_key = conf.sendKey
-        url = f"http://sft.acdar.dev/message/push?pushkey={send_key}"
+        url = f"https://sft.acdar.dev/message/push?pushkey={send_key}"
         body = md(body)
         if attach_image is not None:
             image_url = upload_message(attach_image)

@@ -628,7 +628,7 @@ def test_serverJang_push():
 
     try:
         response = requests.get(
-            f"http://sft.acdar.dev/message/push?pushkey={config.conf.sendKey}",
+            f"https://sft.acdar.dev/message/push?pushkey={config.conf.sendKey}",
             params={
                 "text": "arknights-mower推送测试",
                 "desp": "arknights-mower推送测试",
