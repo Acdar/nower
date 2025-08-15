@@ -3904,7 +3904,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 self.sleep(remaining_time)
             self.check_current_focus()
 
-    def skland_plan_solover(self):
+    def skland_plan_solver(self):
         try:
             return SKLand().start()
         except MowerExit:
