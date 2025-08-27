@@ -86,6 +86,7 @@ export const useConfigStore = defineStore('config', () => {
   const fia_fool = ref(true)
   const sign_in = ref({ enable: true })
   const droidcast = ref({})
+  const mumu12IPC = ref(false)
   const visit_friend = ref(true)
   const credit_fight = ref({})
   const custom_screenshot = ref({})
@@ -211,6 +212,7 @@ export const useConfigStore = defineStore('config', () => {
     fia_fool.value = response.data.fia_fool
     sign_in.value = response.data.sign_in
     droidcast.value = response.data.droidcast
+    mumu12IPC.value = response.data.mumu12IPC
     visit_friend.value = response.data.visit_friend
     credit_fight.value = response.data.credit_fight
     custom_screenshot.value = response.data.custom_screenshot
@@ -316,6 +318,7 @@ export const useConfigStore = defineStore('config', () => {
       fia_fool: fia_fool.value,
       sign_in: sign_in.value,
       droidcast: droidcast.value,
+      mumu12IPC: mumu12IPC.value,
       visit_friend: visit_friend.value,
       credit_fight: credit_fight.value,
       custom_screenshot: custom_screenshot.value,
@@ -426,6 +429,7 @@ export const useConfigStore = defineStore('config', () => {
     fia_fool,
     sign_in,
     droidcast,
+    mumu12IPC,
     visit_friend,
     credit_fight,
     custom_screenshot,
