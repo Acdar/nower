@@ -75,36 +75,30 @@ def retry_mumuipc(func):
 class MuMu12IPC:
     def __init__(self, device):
         self.device = device
-        norm = os.path.normpath(config.conf.simulator.simulator_folder)
-        if os.path.basename(norm).lower() == "shell":
-            self.emulator_folder = os.path.dirname(norm)
-        else:
-            self.emulator_folder = norm
+
+        sim_folder_from_config = os.path.normpath(config.conf.simulator.simulator_folder)
+        self.manager_path = os.path.join(sim_folder_from_config, "MuMuManager.exe")
+        dll_path = os.path.join(sim_folder_from_config, "sdk", "external_renderer_ipc.dll")
+        self.emulator_folder = os.path.dirname(sim_folder_from_config)
+
         self.instanse_index = int(config.conf.simulator.index)
         self.connection = 0
         self.display_id = -1
         self.app_index = 0
         self.buffer_pool = BufferPool(10)
-        self.manager_path = config.conf.simulator.simulator_folder + "MuMuManager.exe"
         self._setting_info = None
+
         # 加载动态链接库
-        dll_path = os.path.join(
-            self.emulator_folder, "shell", "sdk", "external_renderer_ipc.dll"
-        )
         try:
-            self.external_renderer = ctypes.CDLL(dll_path)
-        except OSError as e:
-            logger.error(e)
             if not os.path.exists(dll_path):
                 raise NemuIpcIncompatible(
-                    f"文件不存在: {dll_path}, 请检查模拟器文件夹是否正确"
-                    f"NemuIpc requires MuMu12 version >= 3.8.13, please check your version"
+                    f"致命错误: 文件不存在于预期路径: {dll_path}。"
                 )
-            else:
-                raise NemuIpcIncompatible(
-                    f"ipc_dll={dll_path} exists, but cannot be loaded"
-                )
+            self.external_renderer = ctypes.CDLL(dll_path)
 
+        except (OSError, NemuIpcIncompatible) as e:
+            logger.error(f"加载 DLL '{dll_path}' 失败。")
+            raise e
         # 定义函数原型
         self.external_renderer.nemu_connect.argtypes = [ctypes.c_wchar_p, ctypes.c_int]
         self.external_renderer.nemu_connect.restype = ctypes.c_int
@@ -172,19 +166,69 @@ class MuMu12IPC:
         ]
         self.external_renderer.nemu_input_event_key_up.restype = ctypes.c_int
 
-    def get_setting_info(self):
+    def _run_manager_command(self, *args) -> dict:
+        """ 封装执行 MuMuManager.exe 命令的通用逻辑 """
+        cmd = [self.manager_path, *args]
+        
+        # 为 Windows 设置 creationflags 以隐藏窗口
+        creation_flags = 0
+        if sys.platform == "win32":
+            creation_flags = subprocess.CREATE_NO_WINDOW
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                encoding='utf-8', # 明确指定编码
+                creationflags=creation_flags
+            )
+            
+            # 优先使用 stdout，如果为空则尝试 stderr
+            output = result.stdout.strip()
+            if not output and result.stderr:
+                logger.debug("Command output was found in stderr.")
+                output = result.stderr.strip()
+
+            if not output:
+                # 命令成功执行但没有输出
+                logger.warning(f"命令 {' '.join(cmd)} 成功执行，但没有输出。")
+                return {} # 返回一个空字典以避免后续错误
+            
+            return json.loads(output)
+        
+        except subprocess.CalledProcessError as e:
+            # 安全地获取错误信息，处理 stdout/stderr 可能为 None 的情况
+            error_output = e.stderr if e.stderr else e.stdout
+            error_message = error_output.strip() if error_output else "[命令执行失败，且没有任何输出]"
+        
+            logger.error(f"执行 MuMuManager 命令失败，返回码: {e.returncode}，错误: {error_message}")
+            raise
+        except json.JSONDecodeError as e:
+            # 输出不是有效的 JSON
+            raw_output = result.stdout.strip() if 'result' in locals() and result.stdout else "N/A"
+            logger.error(f"解析 MuMuManager 的 JSON 输出失败: {e}。原始输出: {raw_output}")
+            raise
+        except FileNotFoundError:
+            logger.error(f"无法找到 MuMuManager.exe，请检查路径: {self.manager_path}")
+            raise
+        except Exception as e:
+            # 捕获其他所有异常
+            logger.error(f"执行 MuMuManager 命令时发生未知错误: {e}")
+            raise
+        
+    def get_setting_info(self) -> dict:
         """获取模拟器 setting 信息，只执行一次并缓存"""
         if self._setting_info is None:
-            cmd = [self.manager_path, "setting", "-v", str(self.instanse_index), "-a"]
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                output = result.stdout.strip()
-                self._setting_info = json.loads(output)
-                logger.debug("MuMu setting info loaded and cached.")
-            except Exception as e:
-                logger.error(f"获取 MuMu setting 失败: {e}")
-                raise
+            logger.debug("Loading MuMu setting info...")
+            self._setting_info = self._run_manager_command("setting", "-v", str(self.instanse_index), "-a")
+            logger.debug("MuMu setting info loaded and cached.")
         return self._setting_info
+
+    def get_emulator_info(self) -> dict:
+        """获取模拟器运行状态（实时查询）"""
+        return self._run_manager_command("info", "-v", str(self.instanse_index), "-a")
 
     def get_field_value(self, data, key):
         return data.get(key)
@@ -192,17 +236,6 @@ class MuMu12IPC:
     def emulator_version(self) -> list[int]:
         version = self.get_field_value(self.get_setting_info(), "core_version")
         return [int(v) for v in version.split(".")]
-
-    def get_emulator_info(self):
-        """获取模拟器运行状态（实时查询）"""
-        cmd = [self.manager_path, "info", "-v", str(self.instanse_index), "-a"]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            output = result.stdout.strip()
-            return json.loads(output)
-        except Exception as e:
-            logger.error(f"获取 MuMu 模拟器 info 失败: {e}")
-            raise
 
     def emulator_status(self) -> str:
         data = self.get_emulator_info()
@@ -244,14 +277,32 @@ class MuMu12IPC:
         logger.info("MuMu截图增强连接模拟器成功")
 
     def get_display_id(self):
-        pkg_name = config.conf.APPNAME.encode("utf-8")  # 替换为实际包名
-        self.display_id = self.external_renderer.nemu_get_display_id(
-            self.connection, pkg_name, self.app_index
-        )
-        if self.display_id < 0:
-            logger.error(f"获取Display ID失败: {self.display_id}")
-            raise RuntimeError("获取Display ID失败")
-        logger.debug(f"获取Display ID成功: {self.display_id}")
+        """
+        获取指定应用的 Display ID，并增加等待和重试机制。
+        应用启动需要时间，因此需要轮询。
+        """
+        pkg_name = config.conf.APPNAME.encode("utf-8")
+        timeout_seconds = 20  # 等待应用启动的总超时时间，可以根据需要调整
+        start_time = time.time()
+        
+        logger.info(f"正在等待应用 '{config.conf.APPNAME}' 启动并获取其 Display ID...")
+
+        while time.time() - start_time < timeout_seconds:
+            self.display_id = self.external_renderer.nemu_get_display_id(
+                self.connection, pkg_name, self.app_index
+            )
+            
+            if self.display_id >= 0:
+                logger.info(f"成功获取 Display ID: {self.display_id}")
+                return  # 成功获取，退出函数
+            
+            # 如果获取失败，记录返回码并等待后重试
+            logger.debug(f"获取 Display ID 失败 (返回码: {self.display_id})，将在 1 秒后重试...")
+            time.sleep(1)
+
+        # 如果循环结束（超时），仍未获取成功，则抛出最终的异常
+        logger.error(f"在 {timeout_seconds} 秒内未能获取到 Display ID，应用可能未能正常启动或置于前台。")
+        raise RuntimeError("获取Display ID失败")
 
     @retry_mumuipc
     def check_status(self):
