@@ -1,12 +1,15 @@
+# MIT-licensed clean-room reimplementation for MuMu12 IPC bindings.
+# This file intentionally avoids copying any GPL-licensed implementation details.
+# It only binds to the public C API exposed by external_renderer_ipc.dll.
+
 import ctypes
-import gc
+import functools
 import json
 import os
 import subprocess
 import sys
 import time
-from functools import cached_property, wraps
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -16,104 +19,147 @@ from arknights_mower.utils.log import logger
 from arknights_mower.utils.simulator import restart_simulator
 
 
-class BufferPool:
-    def __init__(self, max_buffers=5):
-        self.max_buffers = max_buffers
-        self.buffers = {}
+def retry_wrapper(max_retries: int = 3, delay: float = 0.5):
+    """
+    通用重试装饰器（适配 @retry_wrapper(3) 用法）
+    - 捕获异常 -> 重置连接状态 -> 尝试重启模拟器 -> 睡眠 -> 重试
+    - 命中 MowerExit 直接向上抛出，避免吞掉退出信号
+    """
 
-    def get_buffer(self):
-        self.cleanup_buffers()
-        for buffer in self.buffers.values():
-            refcount = sys.getrefcount(buffer)
-            if refcount <= 3:
-                return buffer
-        # 如果没有可复用的缓冲区，分配新的内存
-        new_buffer = (ctypes.c_ubyte * 8294400)()
-        self.buffers[id(new_buffer)] = new_buffer
-        return new_buffer
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            last_exc = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return func(self, *args, **kwargs)
+                except MowerExit:
+                    raise
+                except RuntimeError as e:
+                    last_exc = e
+                    logger.info(
+                        f"{func.__name__} runtime error (attempt {attempt}/{max_retries}): {e}"
+                    )
+                    try:
+                        # 若有该方法则调用
+                        if hasattr(self, "device") and hasattr(
+                            self.device, "check_current_focus"
+                        ):
+                            self.device.check_current_focus()
+                    except Exception as inner:
+                        logger.info(f"check_current_focus failed: {inner}")
+                except Exception as e:
+                    last_exc = e
+                    logger.info(
+                        f"{func.__name__} failed (attempt {attempt}/{max_retries}): {e}"
+                    )
 
-    def cleanup_buffers(self):
-        """
-        超过最大数量时清理未被使用的缓冲区
-        """
-        if len(self.buffers) <= self.max_buffers:
-            return
-        elif len(self.buffers) >= 30:
-            self.buffers.clear()
-            gc.collect()
-            return
-        for id in list(self.buffers.keys()):
-            refcount = sys.getrefcount(self.buffers[id])
-            if refcount <= 2:
-                del self.buffers[id]
-                if len(self.buffers) <= self.max_buffers:
-                    return
+                    try:
+                        if hasattr(self, "_conn"):
+                            self._conn = 0
+                        if hasattr(self, "_display_id"):
+                            self._display_id = -1
+                        restart_simulator()
+                    except Exception as inner:
+                        logger.error(f"restart_simulator failed: {inner}")
+                time.sleep(delay)
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError(f"{func.__name__} failed after {max_retries} retries")
+
+        return wrapper
+
+    return decorator
 
 
-class NemuIpcIncompatible(Exception):
+class MuMuIpcError(RuntimeError):
     pass
 
 
-def retry_mumuipc(func):
-    @wraps(func)
-    def retry_wrapper(self, *args, **kwargs):
-        for _ in range(3):
-            try:
-                return func(self, *args, **kwargs)
-            except MowerExit:
-                raise
-            except RuntimeError as e:
-                logger.exception(e)
-                self.device.check_current_focus()
-            except Exception as e:
-                logger.exception(e)
-                restart_simulator()
-
-    return retry_wrapper
-
-
 class MuMu12IPC:
+    """
+    Drop-in replacement implementing display capture and input injection via MuMu 12
+    external_renderer_ipc.dll.
+
+    Public methods preserved for compatibility:
+      - connect(), get_display_id(), capture_display()
+      - key_down(), key_up(), touch_down(), touch_up()
+      - finger_touch_down(), finger_touch_up()
+      - tap(), send_keyevent(), back()
+      - swipe(), swipe_ext(), kill_server(), reset_when_exit()
+    """
+
+    _W = 1920
+    _H = 1080
+    _BYTES = _W * _H * 4
+
     def __init__(self, device):
         self.device = device
-
+        # Normalize emulator folder from config (compatible with your project layout)
         sim_folder_from_config = os.path.normpath(config.conf.simulator.simulator_folder)
         self.manager_path = os.path.join(sim_folder_from_config, "MuMuManager.exe")
-        dll_path = os.path.join(sim_folder_from_config, "sdk", "external_renderer_ipc.dll")
-        self.emulator_folder = os.path.dirname(sim_folder_from_config)
+        self._emu_root = os.path.dirname(sim_folder_from_config)
 
-        self.instanse_index = int(config.conf.simulator.index)
-        self.connection = 0
-        self.display_id = -1
-        self.app_index = 0
-        self.buffer_pool = BufferPool(10)
-        self._setting_info = None
+        self._index: int = int(config.conf.simulator.index)
+        self._conn: int = 0
+        self._display_id: int = -1
+        self._app_index: int = (
+            0  # 0 works for single-game bind; adjust if multi instance mapping needed
+        )
 
-        # 加载动态链接库
-        try:
-            if not os.path.exists(dll_path):
-                raise NemuIpcIncompatible(
-                    f"致命错误: 文件不存在于预期路径: {dll_path}。"
-                )
-            self.external_renderer = ctypes.CDLL(dll_path)
+        # Manager path (CLI JSON for version/status)
+        self._manager = os.path.join(
+            config.conf.simulator.simulator_folder, "MuMuManager.exe"
+        )
 
-        except (OSError, NemuIpcIncompatible) as e:
-            logger.error(f"加载 DLL '{dll_path}' 失败。")
-            raise e
-        # 定义函数原型
-        self.external_renderer.nemu_connect.argtypes = [ctypes.c_wchar_p, ctypes.c_int]
-        self.external_renderer.nemu_connect.restype = ctypes.c_int
+        # Lazy-initialized members
+        self._dll = None
+        self._buffer = None  # single reusable framebuffer
+        self._is_new_coord: Optional[bool] = None  # coord system flag (>= 4.1.21)
 
-        self.external_renderer.nemu_disconnect.argtypes = [ctypes.c_int]
-        self.external_renderer.nemu_disconnect.restype = None
+        # Preload to fail-fast with clear diagnostics
+        self._load_renderer()
 
-        self.external_renderer.nemu_get_display_id.argtypes = [
+    # -----------------------
+    # Loading / version logic
+    # -----------------------
+    def _load_renderer(self):
+        """
+        Load external_renderer_ipc.dll from typical MuMu 12 locations.
+        """
+        candidates = [
+            os.path.join(self._emu_root, "shell", "sdk", "external_renderer_ipc.dll"),
+            os.path.join(self._emu_root, "nx_main", "sdk", "external_renderer_ipc.dll"),
+        ]
+        last_err = None
+        for path in candidates:
+            try:
+                self._dll = ctypes.CDLL(path)
+                logger.debug(f"Loaded MuMu renderer DLL: {path}")
+                break
+            except OSError as e:
+                last_err = e
+                logger.debug(f"Failed to load renderer from {path}: {e}")
+        if self._dll is None:
+            msg = f"Cannot load external_renderer_ipc.dll. Checked: {candidates}. Last error: {last_err}"
+            logger.error(msg)
+            raise MuMuIpcError(msg)
+
+        # Bind types only after successful load
+        self._dll.nemu_connect.argtypes = [ctypes.c_wchar_p, ctypes.c_int]
+        self._dll.nemu_connect.restype = ctypes.c_int
+
+        self._dll.nemu_disconnect.argtypes = [ctypes.c_int]
+        self._dll.nemu_disconnect.restype = None
+
+        self._dll.nemu_get_display_id.argtypes = [
             ctypes.c_int,
             ctypes.c_char_p,
             ctypes.c_int,
         ]
-        self.external_renderer.nemu_get_display_id.restype = ctypes.c_int
+        self._dll.nemu_get_display_id.restype = ctypes.c_int
 
-        self.external_renderer.nemu_capture_display.argtypes = [
+        self._dll.nemu_capture_display.argtypes = [
             ctypes.c_int,
             ctypes.c_uint,
             ctypes.c_int,
@@ -121,54 +167,53 @@ class MuMu12IPC:
             ctypes.POINTER(ctypes.c_int),
             ctypes.POINTER(ctypes.c_ubyte),
         ]
-        self.external_renderer.nemu_capture_display.restype = ctypes.c_int
-        self.external_renderer.nemu_input_event_touch_down.argtypes = [
+        self._dll.nemu_capture_display.restype = ctypes.c_int
+
+        self._dll.nemu_input_event_touch_down.argtypes = [
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
         ]
-        self.external_renderer.nemu_input_event_touch_down.restype = ctypes.c_int
+        self._dll.nemu_input_event_touch_down.restype = ctypes.c_int
 
-        self.external_renderer.nemu_input_event_touch_up.argtypes = [
-            ctypes.c_int,
-            ctypes.c_int,
-        ]
-        self.external_renderer.nemu_input_event_touch_up.restype = ctypes.c_int
+        self._dll.nemu_input_event_touch_up.argtypes = [ctypes.c_int, ctypes.c_int]
+        self._dll.nemu_input_event_touch_up.restype = ctypes.c_int
 
-        self.external_renderer.nemu_input_event_finger_touch_down.argtypes = [
+        self._dll.nemu_input_event_finger_touch_down.argtypes = [
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
         ]
-        self.external_renderer.nemu_input_event_finger_touch_down.restype = ctypes.c_int
+        self._dll.nemu_input_event_finger_touch_down.restype = ctypes.c_int
 
-        self.external_renderer.nemu_input_event_finger_touch_up.argtypes = [
+        self._dll.nemu_input_event_finger_touch_up.argtypes = [
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
         ]
-        self.external_renderer.nemu_input_event_finger_touch_up.restype = ctypes.c_int
+        self._dll.nemu_input_event_finger_touch_up.restype = ctypes.c_int
 
-        self.external_renderer.nemu_input_event_key_down.argtypes = [
+        self._dll.nemu_input_event_key_down.argtypes = [
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
         ]
-        self.external_renderer.nemu_input_event_key_down.restype = ctypes.c_int
+        self._dll.nemu_input_event_key_down.restype = ctypes.c_int
 
-        self.external_renderer.nemu_input_event_key_up.argtypes = [
+        self._dll.nemu_input_event_key_up.argtypes = [
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
         ]
-        self.external_renderer.nemu_input_event_key_up.restype = ctypes.c_int
+        self._dll.nemu_input_event_key_up.restype = ctypes.c_int
 
-    def _run_manager_command(self, *args) -> dict:
+
+    def _manager_json(self, subcmd: str) -> dict:
         """ 封装执行 MuMuManager.exe 命令的通用逻辑 """
-        cmd = [self.manager_path, *args]
+        cmd = [self._manager, subcmd, "-v", str(self._index), "-a"]
         
         # 为 Windows 设置 creationflags 以隐藏窗口
         creation_flags = 0
@@ -211,70 +256,53 @@ class MuMu12IPC:
             logger.error(f"解析 MuMuManager 的 JSON 输出失败: {e}。原始输出: {raw_output}")
             raise
         except FileNotFoundError:
-            logger.error(f"无法找到 MuMuManager.exe，请检查路径: {self.manager_path}")
+            logger.error(f"无法找到 MuMuManager.exe，请检查路径: {self._manager}")
             raise
         except Exception as e:
             # 捕获其他所有异常
             logger.error(f"执行 MuMuManager 命令时发生未知错误: {e}")
             raise
-        
-    def get_setting_info(self) -> dict:
-        """获取模拟器 setting 信息，只执行一次并缓存"""
-        if self._setting_info is None:
-            logger.debug("Loading MuMu setting info...")
-            self._setting_info = self._run_manager_command("setting", "-v", str(self.instanse_index), "-a")
-            logger.debug("MuMu setting info loaded and cached.")
-        return self._setting_info
 
-    def get_emulator_info(self) -> dict:
-        """获取模拟器运行状态（实时查询）"""
-        return self._run_manager_command("info", "-v", str(self.instanse_index), "-a")
+    def _emu_version(self) -> tuple:
+        """
+        Returns (major, minor, patch) for decision-making. Caches coord mapping rule.
+        """
+        data = self._manager_json("setting")
+        version = str(data.get("core_version", "0.0.0"))
+        parts = tuple(int(x) for x in version.split(".")[:3])
+        if self._is_new_coord is None:
+            # MuMu 12 changed coordinate arguments since 4.1.21
+            self._is_new_coord = parts >= (4, 1, 21)
+        return parts
 
-    def get_field_value(self, data, key):
-        return data.get(key)
-
-    def emulator_version(self) -> list[int]:
-        version = self.get_field_value(self.get_setting_info(), "core_version")
-        return [int(v) for v in version.split(".")]
-
-    def emulator_status(self) -> str:
-        data = self.get_emulator_info()
-        android = self.get_field_value(data, "is_android_started")
-        process = self.get_field_value(data, "is_process_started")
-        state = self.get_field_value(data, "player_state")
-
-        if android or state == "start_finished":
+    def _emu_state(self) -> str:
+        """
+        'running' | 'launching' | 'stopped'
+        """
+        info = self._manager_json("info")
+        if (
+            info.get("is_android_started")
+            or info.get("player_state") == "start_finished"
+        ):
             return "running"
-        if process:
+        if info.get("is_process_started"):
             return "launching"
         return "stopped"
 
-    @cached_property
-    def is_new_version(self):
-        version = self.emulator_version()
-        target = [4, 1, 21]
-        for i in range(3):
-            if version[i] < target[i]:
-                return False
-            elif version[i] > target[i]:
-                return True
-        return True
-
+    # -----------------------
+    # Connection & display
+    # -----------------------
     def connect(self):
-        "连接到 emulator"
-        if self.emulator_status() != "running":
+        """
+        Establish IPC connection to emulator if running.
+        """
+        if self._emu_state() != "running":
             raise Exception("模拟器未启动，请启动模拟器")
-        logger.debug(
-            f"尝试连接 MuMu: path={self.emulator_folder}, instanse_index={self.instanse_index}"
-        )
-
-        self.connection = self.external_renderer.nemu_connect(
-            ctypes.c_wchar_p(self.emulator_folder),
-            self.instanse_index,
-        )
-        if self.connection == 0:
+        path = ctypes.c_wchar_p(self._emu_root)
+        self._conn = self._dll.nemu_connect(path, self._index)
+        if self._conn == 0:
             raise Exception("连接模拟器失败，请启动模拟器")
-        logger.info("MuMu截图增强连接模拟器成功")
+        logger.info("MuMu IPC connected.")
 
     def get_display_id(self):
         """
@@ -284,133 +312,202 @@ class MuMu12IPC:
         pkg_name = config.conf.APPNAME.encode("utf-8")
         timeout_seconds = 20  # 等待应用启动的总超时时间，可以根据需要调整
         start_time = time.time()
-        
+
         logger.info(f"正在等待应用 '{config.conf.APPNAME}' 启动并获取其 Display ID...")
 
         while time.time() - start_time < timeout_seconds:
-            self.display_id = self.external_renderer.nemu_get_display_id(
-                self.connection, pkg_name, self.app_index
+            self._display_id = self._dll.nemu_get_display_id(
+                self._conn, pkg_name, self._app_index
             )
-            
-            if self.display_id >= 0:
-                logger.info(f"成功获取 Display ID: {self.display_id}")
+
+            if self._display_id >= 0:
+                logger.info(f"成功获取 Display ID: {self._display_id}")
                 return  # 成功获取，退出函数
-            
+
             # 如果获取失败，记录返回码并等待后重试
-            logger.debug(f"获取 Display ID 失败 (返回码: {self.display_id})，将在 1 秒后重试...")
+            logger.debug(f"获取 Display ID 失败 (返回码: {self._display_id})，将在 1 秒后重试...")
             time.sleep(1)
 
         # 如果循环结束（超时），仍未获取成功，则抛出最终的异常
         logger.error(f"在 {timeout_seconds} 秒内未能获取到 Display ID，应用可能未能正常启动或置于前台。")
         raise RuntimeError("获取Display ID失败")
 
-    @retry_mumuipc
-    def check_status(self):
-        if self.connection == 0:
+    @retry_wrapper(3)  # type: ignore
+    def _ensure_ready(self):
+        """
+        Ensure connection and display id are valid; auto-recover if needed.
+        """
+        if self._conn == 0:
             self.connect()
-        if self.display_id < 0:
+        if self._display_id < 0:
             self.get_display_id()
 
+    def _ensure_buffer(self):
+        if self._buffer is None:
+            self._buffer = (ctypes.c_ubyte * self._BYTES)()
+
     def capture_display(self) -> np.ndarray:
-        self.check_status()
-        pixels = self.buffer_pool.get_buffer()
-        result = self.external_renderer.nemu_capture_display(
-            self.connection,
-            self.display_id,
-            8294400,
-            ctypes.byref(ctypes.c_int(1920)),
-            ctypes.byref(ctypes.c_int(1080)),
-            pixels,
-        )
-        if result != 0:
-            logger.error(f"获取截图失败: {result}")
-            self.connection = 0
-            self.display_id = -1
+        """
+        Capture RGBA frame into reusable buffer, return HxWx3 (RGB) numpy array flipped to upright.
+        """
+        # Try a few times before giving up. Many IPC errors are transient (simulator focus,
+        # display not ready, temporary renderer loss, etc.). On failure we attempt soft
+        # reconnects; only after exhausting retries we exit the device.
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                self._ensure_ready()
+                self._ensure_buffer()
+
+                w = ctypes.c_int(self._W)
+                h = ctypes.c_int(self._H)
+                ret = self._dll.nemu_capture_display(
+                    self._conn,
+                    self._display_id,
+                    self._BYTES,
+                    ctypes.byref(w),
+                    ctypes.byref(h),
+                    self._buffer,
+                )
+
+                if ret == 0:
+                    # Interpret buffer: RGBA -> RGB, flip vertically
+                    frame = np.frombuffer(self._buffer, dtype=np.uint8).reshape(
+                        (self._H, self._W, 4)
+                    )[:, :, :3]
+                    return np.flipud(frame)
+
+                # Non-zero return: log and try to recover. Treat some return codes as transient.
+                logger.warning(
+                    f"nemu_capture_display returned {ret} (attempt {attempt}/{attempts})"
+                )
+
+                # soft reset state so next attempt will re-establish connection/display id
+                self._conn = 0
+                self._display_id = -1
+
+                # Try to reconnect immediately for next attempt (best-effort)
+                try:
+                    self.connect()
+                    self.get_display_id()
+                except Exception as inner:
+                    logger.debug(f"reconnect attempt failed: {inner}")
+
+                # short backoff before retrying
+                time.sleep(0.2)
+
+            except MowerExit:
+                raise
+            except Exception as e:
+                logger.error(f"capture_display error on attempt {attempt}: {e}")
+                # prepare for next loop iteration
+                self._conn = 0
+                self._display_id = -1
+                time.sleep(0.2)
+
+        # All attempts exhausted. Perform final cleanup and signal device exit.
+        logger.error("capture_display failed after retries, exiting device")
+        try:
             self.device.exit()
-            return np.zeros((1080, 1920, 3), dtype=np.uint8)
-        image = np.frombuffer(pixels, dtype=np.uint8).reshape((1080, 1920, 4))[:, :, :3]
-        image = np.flipud(image)  # 翻转
-        return image
+        except Exception:
+            pass
+        return np.zeros((self._H, self._W, 3), dtype=np.uint8)
+
+    def _map_xy(self, x: int, y: int) -> tuple[int, int]:
+        """
+        Map logical coordinates to MuMu IPC expected arguments depending on version.
+        """
+        if self._is_new_coord is None:
+            self._emu_version()
+        if self._is_new_coord:
+            return int(x), int(y)
+        return int(self._H - y), int(x)
 
     def key_down(self, key_code: int):
-        """按下键盘按键"""
-        self.check_status()
-        result = self.external_renderer.nemu_input_event_key_down(
-            self.connection, self.display_id, key_code
-        )
-        if result != 0:
-            self.connection = 0
-            self.display_id = -1
+        try:
+            self._ensure_ready()
+            rc = self._dll.nemu_input_event_key_down(
+                self._conn, self._display_id, int(key_code)
+            )
+            if rc != 0:
+                raise MuMuIpcError(f"key_down failed: {rc}")
+        except Exception as e:
+            logger.error(f"key_down error: {e}")
+            self._conn = 0
+            self._display_id = -1
             self.device.exit()
 
     def key_up(self, key_code: int):
-        """释放键盘按键"""
-        self.check_status()
-        result = self.external_renderer.nemu_input_event_key_up(
-            self.connection, self.display_id, key_code
-        )
-        if result != 0:
-            self.connection = 0
-            self.display_id = -1
+        try:
+            self._ensure_ready()
+            rc = self._dll.nemu_input_event_key_up(
+                self._conn, self._display_id, int(key_code)
+            )
+            if rc != 0:
+                raise MuMuIpcError(f"key_up failed: {rc}")
+        except Exception as e:
+            logger.error(f"key_up error: {e}")
+            self._conn = 0
+            self._display_id = -1
             self.device.exit()
 
-    # 单点触控
     def touch_down(self, x: int, y: int):
-        self.check_status()
-        result = (
-            self.external_renderer.nemu_input_event_touch_down(
-                self.connection, self.display_id, int(x), int(y)
+        try:
+            self._ensure_ready()
+            tx, ty = self._map_xy(x, y)
+            rc = self._dll.nemu_input_event_touch_down(
+                self._conn, self._display_id, tx, ty
             )
-            if self.is_new_version
-            else self.external_renderer.nemu_input_event_touch_down(
-                self.connection, self.display_id, int(1080 - y), int(x)
-            )
-        )
-        # mumu12版本4.1.21之后的版本修改了坐标参数
-        if result != 0:
-            self.connection = 0
-            self.display_id = -1
+            if rc != 0:
+                raise MuMuIpcError(f"touch_down failed: {rc}")
+        except Exception as e:
+            logger.error(f"touch_down error: {e}")
+            self._conn = 0
+            self._display_id = -1
             self.device.exit()
 
     def touch_up(self):
-        self.check_status()
-        result = self.external_renderer.nemu_input_event_touch_up(
-            self.connection, self.display_id
-        )
-        if result != 0:
-            self.connection = 0
-            self.display_id = -1
+        try:
+            self._ensure_ready()
+            rc = self._dll.nemu_input_event_touch_up(self._conn, self._display_id)
+            if rc != 0:
+                raise MuMuIpcError(f"touch_up failed: {rc}")
+        except Exception as e:
+            logger.error(f"touch_up error: {e}")
+            self._conn = 0
+            self._display_id = -1
             self.device.exit()
 
-    # 多点触控
     def finger_touch_down(self, finger_id: int, x: int, y: int):
-        self.check_status()
-        result = self.external_renderer.nemu_input_event_finger_touch_down(
-            self.connection, self.display_id, finger_id, int(1080 - y), int(x)
-        )
-        if result != 0:
-            self.connection = 0
-            self.display_id = -1
+        try:
+            self._ensure_ready()
+            tx, ty = self._map_xy(x, y)
+            rc = self._dll.nemu_input_event_finger_touch_down(
+                self._conn, self._display_id, int(finger_id), tx, ty
+            )
+            if rc != 0:
+                raise MuMuIpcError(f"finger_touch_down failed: {rc}")
+        except Exception as e:
+            logger.error(f"finger_touch_down error: {e}")
+            self._conn = 0
+            self._display_id = -1
             self.device.exit()
 
     def finger_touch_up(self, finger_id: int):
-        self.check_status()
-        result = self.external_renderer.nemu_input_event_finger_touch_up(
-            self.connection, self.display_id, finger_id
-        )
-        if result != 0:
-            self.connection = 0
-            self.display_id = -1
+        try:
+            self._ensure_ready()
+            rc = self._dll.nemu_input_event_finger_touch_up(
+                self._conn, self._display_id, int(finger_id)
+            )
+            if rc != 0:
+                raise MuMuIpcError(f"finger_touch_up failed: {rc}")
+        except Exception as e:
+            logger.error(f"finger_touch_up error: {e}")
+            self._conn = 0
+            self._display_id = -1
             self.device.exit()
 
-    def tap(self, x, y, hold_time: float = 0.07) -> None:
-        """
-        Tap on screen
-        Args:
-            x: horizontal position
-            y: vertical position
-            hold_time: hold time
-        """
+    def tap(self, x: int, y: int, hold_time: float = 0.07):
         self.touch_down(x, y)
         time.sleep(hold_time)
         self.touch_up()
@@ -424,86 +521,85 @@ class MuMu12IPC:
         self.send_keyevent(1)
 
     def swipe(
-        self, x0: int, y0: int, x1: int, y1: int, duration: float = 0.5, steps: int = 10
+        self,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        duration: float = 0.5,
+        steps: int = 0,
+        fall: bool = True,
+        lift: bool = True,
+        update: bool = False,
+        interval: float = 0.0,
+        func: Callable[[np.ndarray], Any] = lambda _: None,
     ):
         """
-        简单滑动实现（基于 touch_down / touch_up）
-        Args:
-            x0, y0: 起点坐标
-            x1, y1: 终点坐标
-            duration: 滑动总时长（秒）
-            steps: 分成多少步滑动，越大越平滑
+        Simple swipe by progressive touch positions.
+
+        - If steps==0, choose steps adaptively based on path length and duration.
+        - 'update' optionally captures frame after swipe and invokes func(image).
         """
-        self.check_status()
+        self._ensure_ready()
 
-        self.touch_down(x0, y0)
+        if fall:
+            self.touch_down(x0, y0)
 
+        # Compute adaptive steps if not provided
+        if steps <= 0:
+            # heuristic: ~ every 6-8 pixels or 120 Hz * duration
+            dist = max(abs(x1 - x0), abs(y1 - y0))
+            steps = max(6, min(120, int(dist / 8) or int(120 * duration)))
+
+        dt = max(0.001, duration / steps)
         dx = (x1 - x0) / steps
         dy = (y1 - y0) / steps
-        delay = duration / steps
 
+        t0 = time.perf_counter()
         for i in range(1, steps + 1):
-            nx, ny = int(x0 + dx * i), int(y0 + dy * i)
-            self.touch_down(nx, ny)  # 重复调用 touch_down 模拟滑动
-            time.sleep(delay)
-        self.touch_up()
+            tx = int(x0 + dx * i)
+            ty = int(y0 + dy * i)
+            self.touch_down(tx, ty)
+            target = t0 + i * dt
+            now = time.perf_counter()
+            if now < target:
+                time.sleep(target - now)
+
+        if lift:
+            self.touch_up()
+
+        if update:
+            img = self.capture_display()
+            try:
+                func(img)
+            except Exception:
+                pass
+        if interval > 0:
+            time.sleep(interval)
 
     def swipe_ext(
         self,
         points: list[tuple[int, int]],
         durations: list[int],
         update: bool = False,
-        interval: float = 0,
+        interval: float = 0.0,
         func: Callable[[np.ndarray], Any] = lambda _: None,
     ):
-        """
-        多段滑动（扩展版）
-        Args:
-            points (list[tuple[int,int]]): 一系列坐标点 [(x0,y0), (x1,y1), ...]
-            durations (list[int]): 每一段滑动的时长（毫秒），数量应比 points 少 1
-            update (bool): 是否在最后一段完成后进行截图更新
-            interval (float): 完成后额外等待时间
-            func (Callable): 处理截图的函数，仅在最后一段时生效
-        """
-        if len(points) < 2:
-            raise ValueError("至少需要两个点才能进行 swipe_ext()")
-        if len(durations) != len(points) - 1:
-            raise ValueError("durations 数量必须比 points 少 1")
-
-        total = len(durations)
-        result = None
-
-        for idx, (S, E, D) in enumerate(zip(points[:-1], points[1:], durations)):
-            first = idx == 0
-            last = idx == total - 1
-            result = self.swipe(
-                x0=S[0],
-                y0=S[1],
-                x1=E[0],
-                y1=E[1],
-                duration=D / 1000.0,  # 毫秒 → 秒
-                steps=10,
+        if len(points) < 2 or len(durations) != len(points) - 1:
+            raise ValueError(
+                "swipe_ext requires at least 2 points and len(durations)==len(points)-1"
             )
-            if first:
-                self.touch_down(S[0], S[1])
-            if last:
-                self.touch_up()
-                if update:
-                    image = self.capture_display()
-                    func(image)
-                if interval > 0:
-                    time.sleep(interval)
-        return result
 
-    def kill_server(self):
-        if self.connection != 0:
-            self.external_renderer.nemu_disconnect(self.connection)
-            logger.debug(f"Disconnected from emulator: handle={self.connection}")
-            self.connection = 0
-            self.display_id = -1
-            self.buffer_pool.buffers.clear()
-        else:
-            logger.warning("No active connection to disconnect.")
-
-    def reset_when_exit(self):
-        self.display_id = -1
+        for i, (p0, p1, d_ms) in enumerate(zip(points[:-1], points[1:], durations)):
+            self.swipe(
+                p0[0],
+                p0[1],
+                p1[0],
+                p1[1],
+                duration=max(0.01, d_ms / 1000.0),
+                fall=(i == 0),
+                lift=(i == len(durations) - 1),
+                update=(i == len(durations) - 1) and update,
+                interval=interval if i == len(durations) - 1 else 0.0,
+                func=func,
+            )

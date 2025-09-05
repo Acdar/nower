@@ -75,12 +75,20 @@ class Device:
             self, points: list[tuple[int, int]], durations: list[int], up_wait: int
         ) -> None:
             if self.mumu12IPC:
-                self.mumu12IPC.swipe_ext(
-                    points=points,
-                    durations=durations,
-                    update=False,
-                    interval=up_wait / 1000,
-                )
+                total = len(durations)
+                for idx, (S, E, D) in enumerate(
+                    zip(points[:-1], points[1:], durations)
+                ):
+                    self.mumu12IPC.swipe(
+                        S[0],
+                        S[1],
+                        E[0],
+                        E[1],
+                        D / 1000,
+                        fall=idx == 0,
+                        lift=idx == total - 1,
+                        interval=up_wait / 1000 if idx == total - 1 else 0,
+                    )
             elif self.maatouch:
                 self.maatouch.swipe(
                     points,
