@@ -438,55 +438,27 @@ class MuMu12IPC:
         x1: int,
         y1: int,
         duration: float = 0.5,
-        steps: int = 0,
+        steps: int = 30,
         fall: bool = True,
         lift: bool = True,
-        update: bool = False,
         interval: float = 0.0,
-        func: Callable[[np.ndarray], Any] = lambda _: None,
     ):
-        """
-        Simple swipe by progressive touch positions.
-
-        - If steps==0, choose steps adaptively based on path length and duration.
-        - 'update' optionally captures frame after swipe and invokes func(image).
-        """
-        self._ensure_ready()
-
         if fall:
             self.touch_down(x0, y0)
 
-        # Compute adaptive steps if not provided
-        if steps <= 0:
-            # heuristic: ~ every 6-8 pixels or 120 Hz * duration
-            dist = max(abs(x1 - x0), abs(y1 - y0))
-            steps = max(6, min(120, int(dist / 8) or int(120 * duration)))
+        # 每步耗时
+        dt = duration / steps
 
-        dt = max(0.001, duration / steps)
-        dx = (x1 - x0) / steps
-        dy = (y1 - y0) / steps
-
-        t0 = time.perf_counter()
         for i in range(1, steps + 1):
-            tx = int(x0 + dx * i)
-            ty = int(y0 + dy * i)
+            tx = int(x0 + (x1 - x0) * (i / steps))
+            ty = int(y0 + (y1 - y0) * (i / steps))
             self.touch_down(tx, ty)
-            target = t0 + i * dt
-            now = time.perf_counter()
-            if now < target:
-                time.sleep(target - now)
+            time.sleep(dt)
 
         if lift:
+            if interval:
+                time.sleep(interval)
             self.touch_up()
-
-        if update:
-            img = self.capture_display()
-            try:
-                func(img)
-            except Exception:
-                pass
-        if interval > 0:
-            time.sleep(interval)
 
     def swipe_ext(
         self,
