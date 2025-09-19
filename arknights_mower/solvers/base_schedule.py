@@ -2265,7 +2265,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 elif scene == Scene.CLUE_SUMMARY:
                     logger.info("CLUE_SUMMARY")
                     self.back()
-
+                elif scene == Scene.INFRA_ARRANGE_ORDER:
+                    self.back()
                 elif scene in self.waiting_scene:
                     logger.info("waiting_scene")
                     self.waiting_solver()
@@ -3297,6 +3298,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                 logger.info(f"订单倒计时 {remaining_time}秒")
                                 self.back()
                                 self.turn_on_room_detail(room)
+                        elif self.task.adjusted:
+                            pass
                         else:
                             logger.info("检测到漏单")
                             send_message("检测到漏单！", level="WARNING")
