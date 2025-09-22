@@ -36,17 +36,3 @@ const type_options = [
     </n-form>
   </n-card>
 </template>
-<<<<<<< HEAD
-<style scoped>
-a {
-  color: #f5f5f5; /* 或你喜欢的浅色 */
-  text-decoration: underline;
-}
-a:visited {
-  color: #f5f5f5;
-}
-a:hover {
-  color: #ffd700;
-}
-</style>
-======= >>>>>>> 43db50353535c87d4eb6fd690fb9ac168a4abd55
