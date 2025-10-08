@@ -98,7 +98,9 @@ class MuMu12IPC:
         # Normalize emulator folder from config (compatible with your project layout)
         norm = os.path.normpath(config.conf.simulator.simulator_folder)
         self._emu_root = (
-            os.path.dirname(norm) if os.path.basename(norm).lower() in ["shell", "nx_main"] else norm
+            os.path.dirname(norm)
+            if os.path.basename(norm).lower() in ["shell", "nx_main"]
+            else norm
         )
 
         self._index: int = int(config.conf.simulator.index)
@@ -229,7 +231,14 @@ class MuMu12IPC:
     def get_setting_core_version(self):
         """获取模拟器 core_version 信息，只执行一次并缓存"""
         if self._setting_info is None:
-            cmd = [self._manager, "setting", "-v", str(self._index), "get_key","core_version"]
+            cmd = [
+                self._manager,
+                "setting",
+                "-v",
+                str(self._index),
+                "get_key",
+                "core_version",
+            ]
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 output = result.stdout.strip()
@@ -252,10 +261,9 @@ class MuMu12IPC:
             self._is_new_coord = parts >= (4, 1, 21)
         return parts
 
-
     def get_emulator_info(self):
         """获取模拟器运行状态（实时查询）"""
-        cmd = [self._manager, "api", "-v", str(self._index),"player_state"]
+        cmd = [self._manager, "api", "-v", str(self._index), "player_state"]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             player_index = None
@@ -272,12 +280,10 @@ class MuMu12IPC:
                     match2 = re.search(pattern2, stdout)
                     if match2:
                         return match2.group(1)
-            logger.error(f"获取 MuMu 模拟器 info 失败: {e}")
             raise
         except Exception as e:
             logger.error(f"获取 MuMu 模拟器 info 失败: {e}")
             raise
-
 
     def _emu_state(self) -> str:
         """

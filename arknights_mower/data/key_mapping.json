@@ -405,20 +405,6 @@
         "NORMAL",
         40001
     ],
-    "LINKAGE_TKT_GACHA_10_6501": [
-        "LINKAGE_TKT_GACHA_10_6501",
-        "LINKAGE_TKT_GACHA_10_6501",
-        "坠梦歌谣寻访凭证",
-        "NORMAL",
-        40003
-    ],
-    "坠梦歌谣寻访凭证": [
-        "LINKAGE_TKT_GACHA_10_6501",
-        "LINKAGE_TKT_GACHA_10_6501",
-        "坠梦歌谣寻访凭证",
-        "NORMAL",
-        40003
-    ],
     "7003": [
         "7003",
         "TKT_GACHA",
@@ -1284,6 +1270,20 @@
         "randomMaterial_11",
         "randomMaterial_1",
         "罗德岛物资补给VIII",
+        "CONSUME",
+        60110
+    ],
+    "randomMaterial_12": [
+        "randomMaterial_12",
+        "randomMaterial_1",
+        "罗德岛物资补给IX",
+        "CONSUME",
+        60110
+    ],
+    "罗德岛物资补给IX": [
+        "randomMaterial_12",
+        "randomMaterial_1",
+        "罗德岛物资补给IX",
         "CONSUME",
         60110
     ],
