@@ -6,6 +6,7 @@ import ctypes
 import functools
 import json
 import os
+import re
 import subprocess
 import time
 from typing import Any, Callable, Optional
@@ -97,7 +98,7 @@ class MuMu12IPC:
         # Normalize emulator folder from config (compatible with your project layout)
         norm = os.path.normpath(config.conf.simulator.simulator_folder)
         self._emu_root = (
-            os.path.dirname(norm) if os.path.basename(norm).lower() == "shell" else norm
+            os.path.dirname(norm) if os.path.basename(norm).lower() in ["shell", "nx_main"] else norm
         )
 
         self._index: int = int(config.conf.simulator.index)
@@ -111,6 +112,7 @@ class MuMu12IPC:
         self._manager = os.path.join(
             config.conf.simulator.simulator_folder, "MuMuManager.exe"
         )
+        self._setting_info = None
 
         # Lazy-initialized members
         self._dll = None
@@ -129,6 +131,7 @@ class MuMu12IPC:
         """
         candidates = [
             os.path.join(self._emu_root, "shell", "sdk", "external_renderer_ipc.dll"),
+            os.path.join(self._emu_root, "nx_main", "sdk", "external_renderer_ipc.dll"),
             os.path.join(self._emu_root, "sdk", "external_renderer_ipc.dll"),
         ]
         last_err = None
@@ -223,29 +226,78 @@ class MuMu12IPC:
         except Exception as e:
             raise Exception(f"MuMuManager `{subcmd}` failed: {e}")
 
+    def get_setting_core_version(self):
+        """获取模拟器 core_version 信息，只执行一次并缓存"""
+        if self._setting_info is None:
+            cmd = [self._manager, "setting", "-v", str(self._index), "get_key","core_version"]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                output = result.stdout.strip()
+                return output
+                # logger.debug("MuMu setting info loaded and cached.")
+            except Exception as e:
+                logger.error(f"获取 MuMu setting 失败: {e}")
+                raise
+        return self._setting_info
+
     def _emu_version(self) -> tuple:
         """
         Returns (major, minor, patch) for decision-making. Caches coord mapping rule.
         """
-        data = self._manager_json("setting")
-        version = str(data.get("core_version", "0.0.0"))
+        # data = self._manager_json("setting")
+        version = self.get_setting_core_version()
         parts = tuple(int(x) for x in version.split(".")[:3])
         if self._is_new_coord is None:
             # MuMu 12 changed coordinate arguments since 4.1.21
             self._is_new_coord = parts >= (4, 1, 21)
         return parts
 
+
+    def get_emulator_info(self):
+        """获取模拟器运行状态（实时查询）"""
+        cmd = [self._manager, "api", "-v", str(self._index),"player_state"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            player_index = None
+            found_condition = False
+            stdout = result.stdout
+            pattern1 = r"player index: (\d+)(?:\r\n|\r|\n)"
+            match1 = re.search(pattern1, stdout)
+            if match1:
+                player_index = int(match1.group(1))
+                found_condition = True
+            if found_condition:
+                if player_index == self._index:
+                    pattern2 = r"state: state=([^\s\r\n]+)(?:\r\n|\r|\n|$)"
+                    match2 = re.search(pattern2, stdout)
+                    if match2:
+                        return match2.group(1)
+            logger.error(f"获取 MuMu 模拟器 info 失败: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"获取 MuMu 模拟器 info 失败: {e}")
+            raise
+
+
     def _emu_state(self) -> str:
         """
         'running' | 'launching' | 'stopped'
         """
-        info = self._manager_json("info")
-        if (
-            info.get("is_android_started")
-            or info.get("player_state") == "start_finished"
-        ):
+        # info = self._manager_json("info")
+        # if (
+        #     info.get("is_android_started")
+        #     or info.get("player_state") == "start_finished"
+        # ):
+        #     return "running"
+        # if info.get("is_process_started"):
+        #     return "launching"
+        # return "stopped"
+        data = self.get_emulator_info()
+        if data == "start_finished":
             return "running"
-        if info.get("is_process_started"):
+        if data == "starting_vm":
+            return "launching"
+        if data == "starting_rom":
             return "launching"
         return "stopped"
 
