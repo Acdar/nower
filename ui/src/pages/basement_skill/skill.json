@@ -1,5 +1,112 @@
 [
   {
+    "key": 389,
+    "name": "冬时",
+    "span": 2,
+    "child_skill": [
+      {
+        "skill_key": 0,
+        "skill_level": 0,
+        "phase_level": "精0 1级",
+        "skillname": "科学改造",
+        "buffer": false,
+        "buffer_des": [],
+        "des": "进驻制造站时，当前制造站内其他干员提供的生产力<@cc.vdown>全部归零</>（不包含根据设施数量提供加成的生产力），每个当前制造站内干员为当前制造站仓库容量上限<@cc.vup>+5</>",
+        "roomType": "制造站",
+        "buffCategory": "OUTPUT",
+        "skillIcon": "bskill_man_spd_manu1",
+        "buffColor": "#ffd800",
+        "textColor": "#333333"
+      },
+      {
+        "skill_key": 0,
+        "skill_level": 1,
+        "phase_level": "精1 1级",
+        "skillname": "流程优化",
+        "buffer": false,
+        "buffer_des": [],
+        "des": "进驻制造站时，当前制造站内其他干员提供的生产力<@cc.vdown>全部归零</>（不包含根据设施数量提供加成的生产力），每个当前制造站内干员为当前制造站<@cc.vup>+10%</>生产力，仓库容量上限<@cc.vup>+5</>",
+        "roomType": "制造站",
+        "buffCategory": "OUTPUT",
+        "skillIcon": "bskill_man_spd_manu2",
+        "buffColor": "#ffd800",
+        "textColor": "#333333"
+      }
+    ]
+  },
+  {
+    "key": 388,
+    "name": "折桠",
+    "span": 2,
+    "child_skill": [
+      {
+        "skill_key": 0,
+        "skill_level": 0,
+        "phase_level": "精0 1级",
+        "skillname": "铁匠天赋",
+        "buffer": false,
+        "buffer_des": [],
+        "des": "进驻加工站加工<@cc.kw>异铁组</>材料时，心情消耗为<@cc.kw>2</>的配方全部<@cc.vup>-1</>心情消耗",
+        "roomType": "加工站",
+        "buffCategory": "FUNCTION",
+        "skillIcon": "bskill_ws_p8",
+        "buffColor": "#e3eb00",
+        "textColor": "#333333"
+      },
+      {
+        "skill_key": 1,
+        "skill_level": 0,
+        "phase_level": "精2 1级",
+        "skillname": "余料利用",
+        "buffer": false,
+        "buffer_des": [],
+        "des": "进驻加工站加工<@cc.kw>异铁组</>材料时，副产品的产出概率提升<@cc.vup>90%</>",
+        "roomType": "加工站",
+        "buffCategory": "FUNCTION",
+        "skillIcon": "bskill_ws_oriron",
+        "buffColor": "#e3eb00",
+        "textColor": "#333334"
+      }
+    ]
+  },
+  {
+    "key": 387,
+    "name": "真言",
+    "span": 2,
+    "child_skill": [
+      {
+        "skill_key": 0,
+        "skill_level": 0,
+        "phase_level": "精0 1级",
+        "skillname": "订单分发·α",
+        "buffer": false,
+        "buffer_des": [],
+        "des": "进驻贸易站时，订单获取效率<@cc.vup>+20%</>",
+        "roomType": "贸易站",
+        "buffCategory": "OUTPUT",
+        "skillIcon": "bskill_tra_spd1",
+        "buffColor": "#0075a9",
+        "textColor": "#ffffff"
+      },
+      {
+        "skill_key": 0,
+        "skill_level": 1,
+        "phase_level": "精2 1级",
+        "skillname": "精英小队",
+        "buffer": true,
+        "buffer_des": [
+          "cc_g_elite"
+        ],
+        "des": "进驻贸易站时，订单获取效率<@cc.vup>+25%</>，基建内（不包含副手及活动室）每有一间进驻<$cc.g.elite><@cc.kw>精英干员</></>的设施，订单获取效率额外<@cc.vup>+2%</>（最多<@cc.kw>10</>间）",
+        "roomType": "贸易站",
+        "buffCategory": "OUTPUT",
+        "skillIcon": "bskill_ord_spd&tag1",
+        "buffColor": "#0075a9",
+        "textColor": "#ffffff"
+      }
+    ]
+  },
+  {
     "key": 386,
     "name": "八幡海铃",
     "span": 2,
