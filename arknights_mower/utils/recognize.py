@@ -109,7 +109,7 @@ class Recognizer:
         result = cv2.matchTemplate(img, res, cv2.TM_SQDIFF_NORMED)
         result = result[0][0]
         logger.debug(result)
-        return result < 0.1
+        return result < 0.31
 
     def check_current_focus(self):
         if self.device.check_current_focus():
