@@ -74,17 +74,6 @@ class ReportSolver(SceneGraphSolver):
         if self.find("riic/manufacture"):
             try:
                 self.crop_report()
-                # 检查是否所有数据都是0，如果是则可能是识别失败
-                all_zero = all(
-                    value == 0
-                    for value in self.report_res.values()
-                    if value is not None
-                )
-                if all_zero and any(
-                    value is not None for value in self.report_res.values()
-                ):
-                    logger.warning("读取到的数据全为0，可能是识别失败，尝试备用方法")
-                    self.crop_report_backup()
                 logger.info(self.report_res)
                 self.record_report()
             except Exception as e:
@@ -278,20 +267,6 @@ class ReportSolver(SceneGraphSolver):
             score = []
             for i in range(10):
                 im = noto_sans[i]
-                digit_h, digit_w = digit.shape[:2]
-                template_h, template_w = im.shape[:2]
-                if digit_h > template_h or digit_w > template_w:
-                    scale_h = template_h / digit_h
-                    scale_w = template_w / digit_w
-                    scale = min(scale_h, scale_w)
-
-                    new_h, new_w = int(digit_h * scale), int(digit_w * scale)
-                    digit = cv2.resize(digit, (new_w, new_w))
-                    # 如果调整后的尺寸仍然大于模板尺寸(可能浮点数精度问题)，再次调整
-                    if new_h > template_h or new_w > template_w:
-                        scale = min(template_h / new_h, template_w / new_w) * 0.99
-                        new_h, new_w = int(new_h * scale), int(new_w * scale)
-                        digit = cv2.resize(digit, (new_w, new_h))
                 result = cv2.matchTemplate(digit, im, cv2.TM_SQDIFF_NORMED)
                 min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
                 score.append(min_val)
