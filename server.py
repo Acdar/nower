@@ -133,16 +133,15 @@ def read_depot():
     return depot.读取仓库()
 
 
-@app.route("/running")
-def running():
+@app.route("/status")
+def get_status():
     response = {
-        "running": bool(mower_thread and mower_thread.is_alive()),
         "plan_condition": [],
         "status": "stopped",
         "next_task_time": None,
         "remaining_seconds": None,
     }
-    if response["running"]:
+    if mower_thread and mower_thread.is_alive():
         from arknights_mower.__main__ import base_scheduler
 
         if base_scheduler and mower_thread.is_alive():
