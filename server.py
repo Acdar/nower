@@ -152,13 +152,17 @@ def get_status():
             response["plan_condition"] = [
                 name for name in response["plan_condition"] if name
             ]
-            
+
             # 添加工作状态信息
             response["status"] = "sleeping" if base_scheduler.sleeping else "working"
             if base_scheduler.tasks and len(base_scheduler.tasks) > 0:
-                response["next_task_time"] = base_scheduler.tasks[0].time.strftime("%Y-%m-%d %H:%M:%S")
+                response["next_task_time"] = base_scheduler.tasks[0].time.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
                 response["remaining_seconds"] = int(
-                    (base_scheduler.tasks[0].time - datetime.datetime.now()).total_seconds()
+                    (
+                        base_scheduler.tasks[0].time - datetime.datetime.now()
+                    ).total_seconds()
                 )
     return response
 
