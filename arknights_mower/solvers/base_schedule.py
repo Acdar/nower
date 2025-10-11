@@ -2922,7 +2922,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             # 左移
             right_swipe = self.swipe_left(right_swipe, last_special_filter)
             self.switch_arrange_order("技能", room)
-            not_match = False
             exists.extend(selected)
             logger.info(exists)
             click_order = []
