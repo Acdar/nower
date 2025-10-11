@@ -31,6 +31,7 @@ const {
   favorite,
   tap_to_launch_game,
   exit_game_when_idle,
+  return_home_when_idle,
   close_simulator_when_idle,
   screenshot,
   screenshot_interval,
@@ -42,6 +43,7 @@ const {
   merge_interval,
   fia_fool,
   droidcast,
+  mumu12IPC,
   maa_adb_path,
   maa_gap,
   custom_screenshot,
@@ -112,16 +114,24 @@ const screenshot_method = computed({
       result = 'droidcast'
     } else if (custom_screenshot.value.enable) {
       result = 'custom'
+    } else if (mumu12IPC.value) {
+      result = 'mumu12IPC'
+    }
+    if (result === 'mumu12IPC' && simulator.value.name !== 'MuMu12') {
+      return 'adb_gzip'
     }
     return result
   },
   set(value) {
     droidcast.value.enable = false
     custom_screenshot.value.enable = false
+    mumu12IPC.value = false
     if (value == 'droidcast') {
       droidcast.value.enable = true
     } else if (value == 'custom') {
       custom_screenshot.value.enable = true
+    } else if (value == 'mumu12IPC' && simulator.value.name === 'MuMu12') {
+      mumu12IPC.value = true
     }
   }
 })
@@ -151,6 +161,7 @@ const onSelectionChange = (newValue) => {
 import { ref } from 'vue'
 import ChatBotSetting from '../components/ChatBotSetting.vue'
 
+const idleAction = ref('') // 'home' | 'exit' | 'close'
 const showSettingModal = ref(false)
 const editingIndex = ref(null)
 
@@ -180,6 +191,29 @@ function createNewItem() {
     children_lower_limit: 20,
     self_upper_limit: 20
   }
+}
+watch(idleAction, (val) => {
+  return_home_when_idle.value = val === 'home'
+  exit_game_when_idle.value = val === 'exit'
+  close_simulator_when_idle.value = val === 'close'
+})
+watch(
+  [return_home_when_idle, exit_game_when_idle, close_simulator_when_idle],
+  ([home, exit, close]) => {
+    if (home) idleAction.value = 'home'
+    else if (exit) idleAction.value = 'exit'
+    else if (close) idleAction.value = 'close'
+    else idleAction.value = ''
+  }
+)
+if (return_home_when_idle.value) {
+  idleAction.value = 'home'
+} else if (exit_game_when_idle.value) {
+  idleAction.value = 'exit'
+} else if (close_simulator_when_idle.value) {
+  idleAction.value = 'close'
+} else {
+  idleAction.value = ''
 }
 </script>
 
@@ -296,19 +330,22 @@ function createNewItem() {
               <n-input-number v-model:value="tap_to_launch_game.y" />
             </n-form-item>
             <n-form-item :show-label="false">
-              <n-checkbox
-                v-model:checked="exit_game_when_idle"
-                :disabled="simulator.name != '' && close_simulator_when_idle"
-              >
-                任务结束后退出游戏
-                <help-text>降低功耗</help-text>
-              </n-checkbox>
-            </n-form-item>
-            <n-form-item :show-label="false" v-if="simulator.name">
-              <n-checkbox v-model:checked="close_simulator_when_idle">
-                任务结束后关闭模拟器
-                <help-text>减少空闲时的资源占用、避免模拟器长时间运行出现问题</help-text>
-              </n-checkbox>
+              <n-radio-group v-model:value="idleAction">
+                <n-space vertical>
+                  <n-radio value="home">
+                    任务结束后返回首页
+                    <help-text>降低功耗</help-text>
+                  </n-radio>
+                  <n-radio value="exit">
+                    任务结束后退出游戏
+                    <help-text>降低功耗</help-text>
+                  </n-radio>
+                  <n-radio value="close" v-if="simulator.name">
+                    任务结束后关闭模拟器
+                    <help-text>减少空闲时的资源占用、避免模拟器长时间运行出现问题</help-text>
+                  </n-radio>
+                </n-space>
+              </n-radio-group>
             </n-form-item>
             <n-form-item
               :show-label="false"
@@ -336,6 +373,9 @@ function createNewItem() {
                   </n-radio>
                   <n-radio value="droidcast">
                     DroidCast<help-text>有损压缩，速度更快</help-text>
+                  </n-radio>
+                  <n-radio v-if="simulator.name === 'MuMu12'" value="mumu12IPC">
+                    MuMu 截图增强<help-text>如果选择，则强制使用MuMu自带的触控方案</help-text>
                   </n-radio>
                   <n-radio value="custom">
                     自定义命令<help-text>向<code>STDOUT</code>打印图像</help-text>

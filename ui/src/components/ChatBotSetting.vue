@@ -3,7 +3,10 @@ import { useConfigStore } from '@/stores/config'
 import { storeToRefs } from 'pinia'
 const store = useConfigStore()
 const { ai_key, ai_type } = storeToRefs(store)
-const type_options = [{ label: 'Deepseek', value: 'deepseek' }]
+const type_options = [
+  { label: 'Deepseek', value: 'deepseek' },
+  { label: 'Deepseek 深度推理', value: 'deepseek_reasoner' }
+]
 </script>
 <template>
   <n-card>
@@ -33,17 +36,3 @@ const type_options = [{ label: 'Deepseek', value: 'deepseek' }]
     </n-form>
   </n-card>
 </template>
-<<<<<<< HEAD
-<style scoped>
-a {
-  color: #f5f5f5; /* 或你喜欢的浅色 */
-  text-decoration: underline;
-}
-a:visited {
-  color: #f5f5f5;
-}
-a:hover {
-  color: #ffd700;
-}
-</style>
-======= >>>>>>> 43db50353535c87d4eb6fd690fb9ac168a4abd55

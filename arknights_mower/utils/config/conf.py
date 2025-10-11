@@ -533,6 +533,8 @@ class SimulatorPart(ConfModel):
     "点击屏幕启动游戏"
     exit_game_when_idle: bool = True
     "任务结束后退出游戏"
+    return_home_when_idle: bool = False
+    "任务结束后返回首页"
     close_simulator_when_idle: bool = False
     "任务结束后关闭模拟器"
     fix_mumu12_adb_disconnect: bool = False
@@ -541,6 +543,8 @@ class SimulatorPart(ConfModel):
     "触控模式"
     droidcast: DroidCastConf
     "DroidCast截图设置"
+    mumu12IPC: bool = False
+    "MuMu12IPC截图设置"
 
 
 class SKLandPart(ConfModel):

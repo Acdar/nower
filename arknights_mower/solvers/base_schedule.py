@@ -62,6 +62,7 @@ from arknights_mower.utils.scheduler_task import (
     try_reorder,
     try_workshop_tasks,
 )
+from arknights_mower.utils.simulator import restart_simulator
 from arknights_mower.utils.trading_order import TradingOrder
 
 
@@ -994,8 +995,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             inf_material = "基建材料"
             gap = 0
             start_time = datetime.now()
-            is_9colored_crit = False
-            workshop_production = False
             while tasks:
                 if datetime.now() - start_time > timedelta(
                     minutes=5
@@ -1030,49 +1029,47 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         add_btn = (self.recog.w * 0.84, self.recog.h * 0.4)
                         tap_count = 99
                         ap_cost = current_material["apCost"]
-                        mood = self.op_data.operators[agent].mood
+                        material_tab = current_material["tab"]
+                        is_crit = ap_cost == 4 and material_tab == "精英材料"
                         if is_9colored:
+                            mood = self.op_data.operators[agent].mood
                             gap = 40 - self.get_number((290, 335, 95, 200))
                             logger.debug(f"九色鹿技能差值{gap}")
                             if gap > 40:
                                 logger.error("识别九色鹿阈值出错拉!任务停止")
                                 return
-                            if 0 < gap < 5 and not is_9colored_crit:
-                                if mood < 4:
+                            if 0 < gap < 5:
+                                if mood >= 4:
+                                    if not is_crit:
+                                        tasks.insert(0, "select")
+                                        tab_queue = deque(group.items())
+                                        logger.info(
+                                            "检测到九色鹿即将暴击，即将切换成暴击用材料"
+                                        )
+                                        continue
+                                else:
+                                    logger.info("暴击心情不足，任务结束")
                                     tasks = []
-                                    logger.info("九色鹿即将暴击但心情<4，任务结束")
                                     continue
-                                else:
+                            if gap >= 5:
+                                if is_crit:
                                     tasks.insert(0, "select")
-                                    logger.info(
-                                        "检测到九色鹿即将暴击，即将切换成暴击用材料"
-                                    )
-                                    is_9colored_crit = True
+                                    tab_queue = deque(group.items())
+                                    logger.info("切换成垫刀材料")
                                     continue
-                            if 36 < gap < 41 and is_9colored_crit:
-                                tasks.insert(0, "select")
-                                logger.info("九色鹿暴击结束，尝试切换成垫刀材料")
-                                is_9colored_crit = False
-                                continue
-                            if current_material:
-                                # 暴击时只合成1个
-                                if is_9colored_crit:
-                                    tap_count = 0
-                                elif gap <= mood:
-                                    tap_count = max(0, math.ceil(gap / ap_cost) - 2)
-                                else:
-                                    tap_count = max(0, math.ceil(mood / ap_cost) - 2)
-                            else:
-                                tasks.insert(0, "select")
-                                logger.info("切换材料")
-                                continue
+                            if gap <= mood:
+                                # 系统自带一次，少一次，一共减少2
+                                tap_count = math.ceil(gap / ap_cost) - 2
+                        max_btn = (self.recog.w * 0.95, self.recog.h * 0.4)
+                        produce_btn = (self.recog.w * 0.88, self.recog.h * 0.88)
+                        if tap_count != 99:
+                            logger.info(
+                                f"开始加工九色鹿{tap_count + 1 if tap_count > 0 else 1}次 x {ap_cost} 心情消耗"
+                            )
+                            for _ in range(int(tap_count)):
+                                self.tap(add_btn, interval=0.1)
                         else:
-                            if current_material:
-                                tap_count = max(0, math.ceil(mood / ap_cost) - 2)
-                            else:
-                                tasks.insert(0, "select")
-                                logger.info("切换材料")
-                                continue
+                            self.tap(max_btn, interval=0.5)
                         if self.find("factory_warning") or not self.item_valid():
                             if (
                                 not self.item_valid()
@@ -1082,45 +1079,47 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                 tasks.insert(0, "select")
                                 tab_queue = deque(group.items())
                                 logger.info("检测到当前材料用完，切换其他材料")
-                                is_9colored_crit = False
                                 continue
                             tasks = []
                             logger.info("检测到干员心情见底或材料不足，任务结束")
-                            continue
-                        produce_btn = (self.recog.w * 0.88, self.recog.h * 0.88)
-                        if tap_count != 99:
-                            logger.info(
-                                f"开始加工{tap_count + 1}次 x {ap_cost} 心情消耗"
-                            )
-                            for _ in range(int(tap_count)):
-                                self.tap(add_btn, interval=0.1)
-                            self.tap(produce_btn, interval=2)
-                            workshop_production = True
-                            cost = (tap_count + 1) * ap_cost
-                            self.op_data.operators[agent].mood -= cost
+                            self.op_data.operators[agent].mood = 0
                             self.op_data.operators[agent].time_stamp = datetime.now()
-                            logger.debug(
-                                f"设置{agent}心情为{self.op_data.operators[agent].mood}"
+                            logger.debug("设置加工站干员心情为0，别问我，我懒得算了")
+                            continue
+                        self.tap(produce_btn, interval=2)
+                        max_wait = 10
+                        sleep_time = 0
+                        while self.factory_scene() != Scene.FACTORY_PRODUCT_COLLECT:
+                            self.sleep()
+                            sleep_time += 1
+                            if sleep_time > max_wait:
+                                break
+                        self.recog.save_screencap("workshop")
+                        if is_9colored:
+                            # 更新心情
+                            tap = (
+                                tap_count + 1
+                                if tap_count > 0 and tap_count != 99
+                                else 1
                             )
-                            max_wait = 10
-                            sleep_time = 0
-                            while self.factory_scene() != Scene.FACTORY_PRODUCT_COLLECT:
-                                self.sleep()
-                                sleep_time += 1
-                                if sleep_time > max_wait:
-                                    break
-                            self.recog.save_screencap("workshop")
+                            cost = tap * ap_cost if tap_count != 99 else 24
+                            logger.debug(f"九色鹿心情消耗{cost}")
+                            self.op_data.operators[agent].mood -= cost
                 elif scene == Scene.FACTORY_FORMULA:
                     if tasks[0] in ["enter", "process"]:
                         self.back()
                     else:
+                        if list(tab_queue) == list(group.items()):
+                            # 重新切换材料则重头开始
+                            self.tap(tab_pos["芯片"], interval=0.2)
+                            self.tap(tab_pos[inf_material], interval=0.2)
+                            logger.debug("切换到基建材料页")
                         if not tab_queue:
-                            logger.info(f"材料列表遍历完毕，{agent}加工任务结束")
-                            if not workshop_production:
-                                send_message(
-                                    f"找不到任何满足{agent}的加工站材料，请及时更新设置",
-                                    level="WARNING",
-                                )
+                            logger.info("没有任何材料满足条件，任务结束")
+                            send_message(
+                                f"找不到任何满足{agent}的加工站材料，请及时更新设置",
+                                level="WARNING",
+                            )
                             tasks = []
                             continue
                         tab, item_list = tab_queue.popleft()
@@ -1145,14 +1144,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                                 and workshop_formula[item]["tab"]
                                                 != inf_material
                                             )
-                                            is_9colored_crit = True
                                         else:
                                             good_to_go = (
                                                 0 < workshop_formula[item]["apCost"] < 4
                                                 or workshop_formula[item]["tab"]
                                                 == inf_material
                                             )
-                                            is_9colored_crit = False
                                     if valid and good_to_go:
                                         logger.info(f"检测到{item}满足条件，开始加工")
                                         self.tap(
@@ -2268,7 +2265,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 elif scene == Scene.CLUE_SUMMARY:
                     logger.info("CLUE_SUMMARY")
                     self.back()
-
+                elif scene == Scene.INFRA_ARRANGE_ORDER:
+                    self.back()
                 elif scene in self.waiting_scene:
                     logger.info("waiting_scene")
                     self.waiting_solver()
@@ -2754,7 +2752,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         for i in range(agent.count("Free")):
             agent.remove("Free")
         index_change = False
-        pre_order = [2, False]
+        pre_order = ["技能", False]
         right_swipe = 0
         retry_count = 0
         selected = []
@@ -2826,9 +2824,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     if last_special_filter != profession:
                         self.profession_filter(profession)
                         right_swipe = 0
+                        if index_change:
+                            self.switch_arrange_order("心情", room, "true")
                     last_special_filter = profession
-                    if index_change:
-                        self.switch_arrange_order("心情", room, "true")
                 elif (
                     (is_dorm or not_production)
                     and agent[0] == "阿米娅"
@@ -2927,24 +2925,19 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             not_match = False
             exists.extend(selected)
             logger.info(exists)
-            for idx, item in enumerate(agents):
-                if agents[idx] != exists[idx] or not_match:
-                    not_match = True
-                    p_idx = exists.index(agents[idx])
-                    self.tap(
-                        (
-                            self.recog.w * position[p_idx][0],
-                            self.recog.h * position[p_idx][1],
-                        ),
-                        interval=0,
-                    )
-                    self.tap(
-                        (
-                            self.recog.w * position[p_idx][0],
-                            self.recog.h * position[p_idx][1],
-                        ),
-                        interval=0,
-                    )
+            click_order = []
+            for a in agents:
+                if a in exists:
+                    click_order.append(exists.index(a))
+                else:
+                    raise Exception("检测到干员选择错误，重新选择")
+            if click_order:
+                # 清空
+                self.tap((self.recog.w * 0.38, self.recog.h * 0.95), interval=0.5)
+                for p_idx in click_order:
+                    x = self.recog.w * position[p_idx][0]
+                    y = self.recog.h * position[p_idx][1]
+                    self.tap((x, y), interval=0)
         logger.debug("验证干员选择..")
         self.swipe_left(right_swipe, last_special_filter)
         self.switch_arrange_order("技能", room)
@@ -2957,6 +2950,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.op_data.profession_filter.add(agent)
         if not self.verify_agent(agents, room):
             logger.debug(agents)
+            logger.debug(room)
             raise Exception("检测到干员选择错误，重新选择")
         self.last_room = room
 
@@ -3300,6 +3294,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                 logger.info(f"订单倒计时 {remaining_time}秒")
                                 self.back()
                                 self.turn_on_room_detail(room)
+                        elif self.task.adjusted:
+                            pass
                         else:
                             logger.info("检测到漏单")
                             send_message("检测到漏单！", level="WARNING")
@@ -3400,7 +3396,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         for room in rooms:
             new_plan = self.agent_arrange_room(new_plan, room, plan, get_time=get_time)
         if len(new_plan) == 1:
-            if config.conf.run_order_buffer_time <= 0:
+            if config.conf.run_order_buffer_time <= 0 or self.task.adjusted:
+                if self.task.adjusted:
+                    logger.info("检测到跑单已调整，强制使用无人机跑单")
                 logger.info("开始插拔")
                 self.drone(room, not_customize=True)
             else:
@@ -3752,7 +3750,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     else:
                         self.sleep(5)
                 if hard_stop:
-                    hard_stop_msg = "Maa任务未完成，等待3分钟关闭游戏"
+                    hard_stop_msg = "Maa任务未完成，等待3分钟"
                     logger.info(hard_stop_msg)
                     send_message(hard_stop_msg)
                     self.sleep(180)
@@ -3859,6 +3857,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     sf_solver.run(self.tasks[0].time - datetime.now())
 
             remaining_time = (self.tasks[0].time - datetime.now()).total_seconds()
+            self.handle_idle_action(remaining_time)
             subject = f"休息 {format_time(remaining_time)}，到{self.tasks[0].time.strftime('%H:%M:%S')}开始工作"
             context = f"下一次任务:{self.tasks[0].plan if len(self.tasks[0].plan) != 0 else '空任务' if self.tasks[0].type == '' else self.tasks[0].type}"
             logger.info(context)
@@ -3905,7 +3904,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 self.sleep(remaining_time)
             self.check_current_focus()
 
-    def skland_plan_solover(self):
+    def skland_plan_solver(self):
         try:
             return SKLand().start()
         except MowerExit:
@@ -3966,3 +3965,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.exception(f"先不运行 出bug了 : {e}")
             return False
         return True
+
+    def handle_idle_action(self, remaining_time=0):
+        if config.conf.close_simulator_when_idle and remaining_time > 300:
+            restart_simulator(start=False)
+        elif config.conf.exit_game_when_idle and remaining_time > 300:
+            self.device.exit()
+        elif config.conf.return_home_when_idle:
+            self.device.return_home()

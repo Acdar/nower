@@ -109,7 +109,7 @@ class Recognizer:
         result = cv2.matchTemplate(img, res, cv2.TM_SQDIFF_NORMED)
         result = result[0][0]
         logger.debug(result)
-        return result < 0.1
+        return result < 0.31
 
     def check_current_focus(self):
         if self.device.check_current_focus():
@@ -710,7 +710,7 @@ class Recognizer:
             "12cadpa": (1810, 21),
             "arrange_confirm": (963, 969),
             "arrange_order_options": (1652, 23),
-            "arrange_order_options_scene": (369, 199),
+            ## "arrange_order_options_scene": (369, 199),
             "clue": (1751, 900),
             "clue/daily": (526, 623),
             "clue/filter_all": (1297, 99),

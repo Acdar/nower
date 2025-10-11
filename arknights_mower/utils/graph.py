@@ -336,6 +336,7 @@ def todo_complete(solver: BaseSolver):
 @edge(Scene.CLUE_GIVE_AWAY, Scene.INFRA_CONFIDENTIAL)
 @edge(Scene.CLUE_SUMMARY, Scene.INFRA_CONFIDENTIAL)
 @edge(Scene.CLUE_PLACE, Scene.INFRA_CONFIDENTIAL)
+@edge(Scene.INFRA_ARRANGE_ORDER, Scene.INFRA_DETAILS)
 @edge(Scene.ORDER_LIST, Scene.INFRA_DETAILS)
 @edge(Scene.FACTORY_ROOMS, Scene.INFRA_DETAILS)
 @edge(Scene.DRONE_ACCELERATE, Scene.ORDER_LIST)
@@ -349,11 +350,6 @@ def infra_back(solver: BaseSolver):
 @edge(Scene.INFRA_ARRANGE_CONFIRM, Scene.INFRA_DETAILS)
 def infra_arrange_confirm(solver: BaseSolver):
     solver.tap((1452, 1029))
-
-
-@edge(Scene.INFRA_ARRANGE_ORDER, Scene.INFRA_DETAILS)
-def infra_arrange_order(solver: BaseSolver):
-    solver.tap_element("arrange_blue_yes", x_rate=0.66)
 
 
 @edge(Scene.RIIC_REPORT, Scene.CTRLCENTER_ASSISTANT)
@@ -459,16 +455,6 @@ class SceneGraphSolver(BaseSolver):
                 raise
             except Exception as e:
                 logger.exception(f"场景转移异常：{e}")
-                """restart_simulator()
-                self.device.client.check_server_alive()
-                Session().connect(config.conf.adb)
-                if config.conf.droidcast.enable:
-                    self.device.start_droidcast()
-                if config.conf.touch_method == "scrcpy":
-                    self.device.control.scrcpy = Scrcpy(self.device.client)
-                self.check_current_focus()
-                return False
-        return True"""
                 if error_count <= 5:
                     self.sleep()
                     error_count += 1

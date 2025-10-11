@@ -43,6 +43,7 @@ export const useConfigStore = defineStore('config', () => {
   const theme = ref('light')
   const tap_to_launch_game = ref(false)
   const exit_game_when_idle = ref(true)
+  const return_home_when_idle = ref(false)
   const close_simulator_when_idle = ref(false)
   const maa_conn_preset = ref('General')
   const maa_touch_option = ref('maatouch')
@@ -82,6 +83,7 @@ export const useConfigStore = defineStore('config', () => {
   const fia_fool = ref(true)
   const sign_in = ref({ enable: true })
   const droidcast = ref({})
+  const mumu12IPC = ref(false)
   const visit_friend = ref(true)
   const credit_fight = ref({})
   const custom_screenshot = ref({})
@@ -164,6 +166,7 @@ export const useConfigStore = defineStore('config', () => {
     tap_to_launch_game.value = response.data.tap_to_launch_game
     tap_to_launch_game.value.enable = tap_to_launch_game.value.enable ? 'tap' : 'adb'
     exit_game_when_idle.value = response.data.exit_game_when_idle
+    return_home_when_idle.value = response.data.return_home_when_idle
     close_simulator_when_idle.value = response.data.close_simulator_when_idle
     maa_conn_preset.value = response.data.maa_conn_preset
     maa_touch_option.value = response.data.maa_touch_option
@@ -203,6 +206,7 @@ export const useConfigStore = defineStore('config', () => {
     fia_fool.value = response.data.fia_fool
     sign_in.value = response.data.sign_in
     droidcast.value = response.data.droidcast
+    mumu12IPC.value = response.data.mumu12IPC
     visit_friend.value = response.data.visit_friend
     credit_fight.value = response.data.credit_fight
     custom_screenshot.value = response.data.custom_screenshot
@@ -261,6 +265,7 @@ export const useConfigStore = defineStore('config', () => {
         y: tap_to_launch_game.value.y
       },
       exit_game_when_idle: exit_game_when_idle.value,
+      return_home_when_idle: return_home_when_idle.value,
       close_simulator_when_idle: close_simulator_when_idle.value,
       maa_conn_preset: maa_conn_preset.value,
       maa_touch_option: maa_touch_option.value,
@@ -304,6 +309,7 @@ export const useConfigStore = defineStore('config', () => {
       fia_fool: fia_fool.value,
       sign_in: sign_in.value,
       droidcast: droidcast.value,
+      mumu12IPC: mumu12IPC.value,
       visit_friend: visit_friend.value,
       credit_fight: credit_fight.value,
       custom_screenshot: custom_screenshot.value,
@@ -372,6 +378,7 @@ export const useConfigStore = defineStore('config', () => {
     theme,
     tap_to_launch_game,
     exit_game_when_idle,
+    return_home_when_idle,
     close_simulator_when_idle,
     maa_conn_preset,
     maa_touch_option,
@@ -411,6 +418,7 @@ export const useConfigStore = defineStore('config', () => {
     fia_fool,
     sign_in,
     droidcast,
+    mumu12IPC,
     visit_friend,
     credit_fight,
     custom_screenshot,
