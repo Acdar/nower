@@ -138,6 +138,9 @@ def running():
     response = {
         "running": bool(mower_thread and mower_thread.is_alive()),
         "plan_condition": [],
+        "status": "stopped",
+        "next_task_time": None,
+        "remaining_seconds": None,
     }
     if response["running"]:
         from arknights_mower.__main__ import base_scheduler
@@ -150,6 +153,14 @@ def running():
             response["plan_condition"] = [
                 name for name in response["plan_condition"] if name
             ]
+            
+            # 添加工作状态信息
+            response["status"] = "sleeping" if base_scheduler.sleeping else "working"
+            if base_scheduler.tasks and len(base_scheduler.tasks) > 0:
+                response["next_task_time"] = base_scheduler.tasks[0].time.strftime("%Y-%m-%d %H:%M:%S")
+                response["remaining_seconds"] = int(
+                    (base_scheduler.tasks[0].time - datetime.datetime.now()).total_seconds()
+                )
     return response
 
 
@@ -707,41 +718,6 @@ def add_task():
             ]
         else:
             return []
-
-
-@app.route("/status")
-def get_mower_status():
-    """
-    获取 Mower 当前工作状态
-    返回：
-    - status: stopped(未运行) / working(工作中) / sleeping(休息中)
-    - next_task_time: 下一个任务的时间（字符串格式）
-    - remaining_seconds: 距离下一个任务的剩余秒数
-    """
-    from arknights_mower.__main__ import base_scheduler
-
-    if not mower_thread or not mower_thread.is_alive():
-        return {
-            "status": "stopped",
-            "next_task_time": None,
-            "remaining_seconds": None,
-        }
-
-    status = "sleeping" if base_scheduler.sleeping else "working"
-    
-    next_task_time = None
-    remaining_seconds = None
-    if base_scheduler.tasks and len(base_scheduler.tasks) > 0:
-        next_task_time = base_scheduler.tasks[0].time.strftime("%Y-%m-%d %H:%M:%S")
-        remaining_seconds = int(
-            (base_scheduler.tasks[0].time - datetime.datetime.now()).total_seconds()
-        )
-
-    return {
-        "status": status,
-        "next_task_time": next_task_time,
-        "remaining_seconds": remaining_seconds,
-    }
 
 
 @app.route("/submit_feedback", methods=["POST"])
