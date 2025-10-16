@@ -2923,27 +2923,21 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             # 左移
             right_swipe = self.swipe_left(right_swipe, last_special_filter)
             self.switch_arrange_order("技能", room)
-            not_match = False
             exists.extend(selected)
             logger.info(exists)
-            for idx, item in enumerate(agents):
-                if agents[idx] != exists[idx] or not_match:
-                    not_match = True
-                    p_idx = exists.index(agents[idx])
-                    self.tap(
-                        (
-                            self.recog.w * position[p_idx][0],
-                            self.recog.h * position[p_idx][1],
-                        ),
-                        interval=0,
-                    )
-                    self.tap(
-                        (
-                            self.recog.w * position[p_idx][0],
-                            self.recog.h * position[p_idx][1],
-                        ),
-                        interval=0,
-                    )
+            click_order = []
+            for a in agents:
+                if a in exists:
+                    click_order.append(exists.index(a))
+                else:
+                    raise Exception("检测到干员选择错误，重新选择")
+            if click_order:
+                # 清空
+                self.tap((self.recog.w * 0.38, self.recog.h * 0.95), interval=0.5)
+                for p_idx in click_order:
+                    x = self.recog.w * position[p_idx][0]
+                    y = self.recog.h * position[p_idx][1]
+                    self.tap((x, y), interval=0)
         logger.debug("验证干员选择..")
         self.swipe_left(right_swipe, last_special_filter)
         self.switch_arrange_order("技能", room)
@@ -2956,6 +2950,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.op_data.profession_filter.add(agent)
         if not self.verify_agent(agents, room):
             logger.debug(agents)
+            logger.debug(room)
             raise Exception("检测到干员选择错误，重新选择")
         self.last_room = room
 
