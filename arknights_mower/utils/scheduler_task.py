@@ -775,7 +775,9 @@ class SchedulerTask:
     plan = {}
     meta_data = ""
 
-    def __init__(self, time=None, task_plan={}, task_type="", meta_data=""):
+    def __init__(
+        self, time=None, task_plan={}, task_type="", meta_data="", adjusted=False
+    ):
         if time is None:
             self.time = datetime.now()
         else:
@@ -783,7 +785,7 @@ class SchedulerTask:
         self.plan = task_plan
         self.type = set_type_enum(task_type)
         self.meta_data = meta_data
-        self.adjusted = False
+        self.adjusted = adjusted
 
     def format(self, time_offset=0):
         res = copy.deepcopy(self)
@@ -794,7 +796,7 @@ class SchedulerTask:
         return res
 
     def __str__(self):
-        return f"SchedulerTask(time='{self.time}',task_plan={self.plan},task_type={self.type},meta_data='{self.meta_data}')"
+        return f"SchedulerTask(time='{self.time}',task_plan={self.plan},task_type={self.type},meta_data='{self.meta_data}',adjusted={self.adjusted})"
 
     def __eq__(self, other):
         if isinstance(other, SchedulerTask):
