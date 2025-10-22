@@ -431,7 +431,7 @@ class RegularTaskPart(ConfModel):
 
 
 class WorkShopItem(ConfModel):
-    item_name: str = ""
+    item_names: list[str] = []
     "材料名称"
     children_lower_limit: int = 20
     "子项下限"
@@ -453,6 +453,8 @@ class RIICPart(ConfModel):
         "材料列表"
         operator: str = ""
         "干员"
+        enabled: bool = True
+        "启用"
 
     drone_count_limit: int = 100
     "无人机使用阈值"
