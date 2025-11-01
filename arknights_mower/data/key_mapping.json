@@ -189,11 +189,11 @@
         20001
     ],
     "ID信息更新卡": [
-        "renamingCard_30_061",
+        "renamingCard_30_067",
         "renamingCard",
         "ID信息更新卡",
         "CONSUME",
-        20026
+        20028
     ],
     "renamingCard_0_018": [
         "renamingCard_0_018",
@@ -320,6 +320,20 @@
         "ID信息更新卡",
         "CONSUME",
         20026
+    ],
+    "renamingCard_0_067": [
+        "renamingCard_0_067",
+        "renamingCard",
+        "ID信息更新卡",
+        "CONSUME",
+        20027
+    ],
+    "renamingCard_30_067": [
+        "renamingCard_30_067",
+        "renamingCard",
+        "ID信息更新卡",
+        "CONSUME",
+        20028
     ],
     "ap_supply_lt_100": [
         "ap_supply_lt_100",
@@ -494,7 +508,7 @@
         "voucher_recruitR5_g",
         "资深干员调用凭证",
         "CONSUME",
-        50021
+        50023
     ],
     "voucher_item_pick601": [
         "voucher_item_pick601",
@@ -518,11 +532,11 @@
         50006
     ],
     "感谢庆典干员凭证": [
-        "voucher_item_pick5601",
+        "voucher_item_pick6701",
         "voucher_recruitR6_g",
         "感谢庆典干员凭证",
         "CONSUME",
-        50018
+        50021
     ],
     "voucher_item_pick1803": [
         "voucher_item_pick1803",
@@ -644,11 +658,11 @@
         50018
     ],
     "中坚高级干员调用凭证": [
-        "voucher_class_pick6101",
+        "voucher_class_pick6701",
         "voucher_class_pick6101",
         "中坚高级干员调用凭证",
         "CONSUME",
-        50020
+        50022
     ],
     "voucher_item_pick6101": [
         "voucher_item_pick6101",
@@ -664,26 +678,40 @@
         "CONSUME",
         50020
     ],
+    "voucher_item_pick6701": [
+        "voucher_item_pick6701",
+        "voucher_recruitR6_g",
+        "感谢庆典干员凭证",
+        "CONSUME",
+        50021
+    ],
+    "voucher_class_pick6701": [
+        "voucher_class_pick6701",
+        "voucher_class_pick6101",
+        "中坚高级干员调用凭证",
+        "CONSUME",
+        50022
+    ],
     "voucher_recruitR5_pick6101": [
         "voucher_recruitR5_pick6101",
         "voucher_recruitR5_g",
         "资深干员调用凭证",
         "CONSUME",
-        50021
+        50023
     ],
     "voucher_recruitR6_pick6401": [
         "voucher_recruitR6_pick6401",
         "voucher_recruitR6_pick6401",
         "高级干员活动调用凭证",
         "CONSUME",
-        50017
+        50024
     ],
     "高级干员活动调用凭证": [
         "voucher_recruitR6_pick6401",
         "voucher_recruitR6_pick6401",
         "高级干员活动调用凭证",
         "CONSUME",
-        50017
+        50024
     ],
     "voucher_levelmax_6": [
         "voucher_levelmax_6",
@@ -914,7 +942,7 @@
         "premium_material_issue_voucher",
         "特级材料提货券",
         "CONSUME",
-        60004
+        60005
     ],
     "特级材料提货券": [
         "premium_material_issue_voucher",
@@ -928,7 +956,7 @@
         "advanced_material_issue_voucher",
         "高级材料提货券",
         "CONSUME",
-        60005
+        60006
     ],
     "高级材料提货券": [
         "advanced_material_issue_voucher",
@@ -1398,6 +1426,20 @@
         "铳械工坊赠品盒",
         "CONSUME",
         60116
+    ],
+    "randomMaterial_6d5": [
+        "randomMaterial_6d5",
+        "randomMaterial_4",
+        "2025感谢庆典物资补给",
+        "CONSUME",
+        60117
+    ],
+    "2025感谢庆典物资补给": [
+        "randomMaterial_6d5",
+        "randomMaterial_4",
+        "2025感谢庆典物资补给",
+        "CONSUME",
+        60117
     ],
     "2001": [
         "2001",
