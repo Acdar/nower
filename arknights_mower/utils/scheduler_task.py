@@ -511,6 +511,9 @@ def try_workshop_tasks(op_data, tasks):
     inventory_data = get_inventory_counts()
     if config.conf.workshop_settings and inventory_data:
         for item in config.conf.workshop_settings:
+            if not item.enabled:
+                logger.info(f"{item.operator}加工站任务被禁用，跳过")
+                continue
             valid = False
             if item.operator in op_data.operators.keys():
                 agent = op_data.operators[item.operator]
@@ -526,24 +529,27 @@ def try_workshop_tasks(op_data, tasks):
                 base_material_match = False
                 non_base_material_match = False
                 for material in item.items:
-                    name = material.item_name
-                    metadata = workshop_formula[name]
-                    if name.startswith("家具零件"):
-                        name = "家具零件"
-                    if (
-                        name in inventory_data
-                        and inventory_data[name] < material.self_upper_limit
-                        and all(
-                            child_name in inventory_data
-                            and inventory_data[child_name]
-                            > material.children_lower_limit
-                            for child_name in metadata["items"]
-                        )
-                    ):
-                        if metadata["apCost"] < 4 or metadata["tab"] == "基建材料":
-                            base_material_match = True
-                        elif metadata["apCost"] == 4 and metadata["tab"] != "基建材料":
-                            non_base_material_match = True
+                    for name in material.item_names:
+                        metadata = workshop_formula[name]
+                        if name.startswith("家具零件"):
+                            name = "家具零件"
+                        if (
+                            name in inventory_data
+                            and inventory_data[name] < material.self_upper_limit
+                            and all(
+                                child_name in inventory_data
+                                and inventory_data[child_name]
+                                > material.children_lower_limit
+                                for child_name in metadata["items"]
+                            )
+                        ):
+                            if metadata["apCost"] < 4 or metadata["tab"] == "基建材料":
+                                base_material_match = True
+                            elif (
+                                metadata["apCost"] == 4
+                                and metadata["tab"] != "基建材料"
+                            ):
+                                non_base_material_match = True
                 match = base_material_match and non_base_material_match
                 if not match:
                     logger.info(
@@ -551,22 +557,22 @@ def try_workshop_tasks(op_data, tasks):
                     )
             else:
                 for material in item.items:
-                    name = material.item_name
-                    metadata = workshop_formula[name]
-                    if name.startswith("家具零件"):
-                        name = "家具零件"
-                    if (
-                        name in inventory_data
-                        and inventory_data[name] < material.self_upper_limit
-                        and all(
-                            child_name in inventory_data
-                            and inventory_data[child_name]
-                            > material.children_lower_limit
-                            for child_name in metadata["items"]
-                        )
-                    ):
-                        match = True
-                        break
+                    for name in material.item_names:
+                        metadata = workshop_formula[name]
+                        if name.startswith("家具零件"):
+                            name = "家具零件"
+                        if (
+                            name in inventory_data
+                            and inventory_data[name] < material.self_upper_limit
+                            and all(
+                                child_name in inventory_data
+                                and inventory_data[child_name]
+                                > material.children_lower_limit
+                                for child_name in metadata["items"]
+                            )
+                        ):
+                            match = True
+                            break
                 if not match:
                     logger.info(f"{item.operator}材料设置不符合要求: 请检查合成数量")
             if match and valid:
@@ -769,7 +775,9 @@ class SchedulerTask:
     plan = {}
     meta_data = ""
 
-    def __init__(self, time=None, task_plan={}, task_type="", meta_data=""):
+    def __init__(
+        self, time=None, task_plan={}, task_type="", meta_data="", adjusted=False
+    ):
         if time is None:
             self.time = datetime.now()
         else:
@@ -777,7 +785,7 @@ class SchedulerTask:
         self.plan = task_plan
         self.type = set_type_enum(task_type)
         self.meta_data = meta_data
-        self.adjusted = False
+        self.adjusted = adjusted
 
     def format(self, time_offset=0):
         res = copy.deepcopy(self)
@@ -788,7 +796,7 @@ class SchedulerTask:
         return res
 
     def __str__(self):
-        return f"SchedulerTask(time='{self.time}',task_plan={self.plan},task_type={self.type},meta_data='{self.meta_data}')"
+        return f"SchedulerTask(time='{self.time}',task_plan={self.plan},task_type={self.type},meta_data='{self.meta_data}',adjusted={self.adjusted})"
 
     def __eq__(self, other):
         if isinstance(other, SchedulerTask):

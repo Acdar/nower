@@ -187,7 +187,7 @@ const workshop_setting_close = () => {
 }
 function createNewItem() {
   return {
-    item_name: '',
+    item_names: [''],
     children_lower_limit: 20,
     self_upper_limit: 20
   }
@@ -711,7 +711,7 @@ if (return_home_when_idle.value) {
                 type="primary"
                 @click="
                   () => {
-                    tempSetting = { operator: '', items: [] }
+                    tempSetting = { operator: '', items: [], enabled: true }
                     editingIndex = null
                     showSettingModal = true
                   }
@@ -722,10 +722,11 @@ if (return_home_when_idle.value) {
                 <n-list-item v-for="(setting, idx) in workshop_settings" :key="idx">
                   <div class="flex justify-between w-full">
                     <div>
-                      <strong>干员:</strong> {{ setting.operator }}<br />
+                      <strong>干员:</strong> {{ setting.operator }}, 启用: {{ setting.enabled
+                      }}<br />
                       <ul>
                         <li v-for="(item, i) in setting.items" :key="i">
-                          {{ item.item_name }} - 子项下限: {{ item.children_lower_limit }},
+                          {{ item.item_names }} - 子项下限: {{ item.children_lower_limit }},
                           自身上限: {{ item.self_upper_limit }}
                         </li>
                       </ul>
@@ -746,14 +747,19 @@ if (return_home_when_idle.value) {
               :mask-closable="false"
               @update:show="workshop_setting_close"
             >
-              <n-select
-                filterable
-                :options="operators"
-                class="operator-select"
-                v-model:value="tempSetting.operator"
-                :filter="(p, o) => pinyin_match(o.label, p)"
-                :render-label="render_op_label"
-              />
+              <div style="display: flex; align-items: center; gap: 12px">
+                <span style="font-size: 12px; white-space: nowrap">干员：</span>
+                <n-select
+                  filterable
+                  :options="operators"
+                  class="operator-select"
+                  v-model:value="tempSetting.operator"
+                  :filter="(p, o) => pinyin_match(o.label, p)"
+                  :render-label="render_op_label"
+                />
+                <span style="font-size: 12px; white-space: nowrap">启用：</span>
+                <n-switch v-model:value="tempSetting.enabled" />
+              </div>
               <n-form :model="tempSetting">
                 <n-dynamic-input v-model:value="tempSetting.items" :on-create="createNewItem">
                   <template #default="{ value }">
@@ -761,8 +767,10 @@ if (return_home_when_idle.value) {
                       <div style="display: flex; flex-direction: row; align-self: center">
                         <span style="white-space: nowrap; margin-top: 5px">合成材料： </span>
                         <n-select
+                          multiple
+                          tag
                           :options="item_list"
-                          v-model:value="value.item_name"
+                          v-model:value="value.item_names"
                           :filter="(p, o) => pinyin_match(o.label, p)"
                           filterable
                         />
