@@ -982,6 +982,29 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             group[workshop_formula[name]["tab"]][name] = item
                     else:
                         logger.debug(f"{agent}的加工站配置中材料{name}不满足条件，跳过")
+                for name in item.item_names:
+                    if name in seen:
+                        logger.warning(
+                            f"当前干员{agent}的加工站配置中存在重复材料{item.item_names}，以第一个设置为准"
+                        )
+                        continue
+                    seen.add(name)
+                    metadata = workshop_formula[name]
+                    if (
+                        name in inventory_data
+                        and inventory_data[name] < item.self_upper_limit
+                        and all(
+                            child_name in inventory_data
+                            and inventory_data[child_name] > item.children_lower_limit
+                            for child_name in metadata["items"]
+                        )
+                    ):
+                        if is_9colored and workshop_formula[name]["apCost"] > 4:
+                            logger.warning("跳过心情大于4消耗的材料")
+                        else:
+                            group[workshop_formula[name]["tab"]][name] = item
+                    else:
+                        logger.debug(f"{agent}的加工站配置中材料{name}不满足条件，跳过")
             tab_queue = deque(group.items())
             tab_pos = {
                 "基建材料": (self.recog.w * 0.1, self.recog.h * 0.18),
