@@ -197,10 +197,10 @@ if __name__ == "__main__":
         "ui\\dist",
     ]
     # 执行比较和更新
-    compare_all_subfolders(new_dir, old_dir, update_dir)
+    # compare_all_subfolders(new_dir, old_dir, update_dir)
 
-    remove_empty_folders(update_dir)
-    # process_files("F:\\Git\\arknights-mower")
+    # remove_empty_folders(update_dir)
+    process_files("F:\\Git\\arknights-mower")
 
     # 下载在线文档至本地
     download(BASE_URL)

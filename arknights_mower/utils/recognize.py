@@ -628,7 +628,7 @@ class Recognizer:
             self.scene = Scene.INFRA_MAIN
         elif self.find("train_main"):
             self.scene = Scene.TRAIN_MAIN
-        elif self.find("skill_collect_confirm", scope=((1142, 831), (1282, 932))):
+        elif self.find("skill_collect_confirm"):
             self.scene = Scene.TRAIN_FINISH
         elif self.find("training_support"):
             self.scene = Scene.TRAIN_SKILL_SELECT
@@ -711,7 +711,7 @@ class Recognizer:
             "arrange_confirm": (963, 969),
             "arrange_order_options": (1652, 23),
             ## "arrange_order_options_scene": (369, 199),
-            "clue": (1751, 900),
+            "clue": (1751, 750),
             "clue/daily": (526, 623),
             "clue/filter_all": (1297, 99),
             "clue/give_away": (25, 18),
@@ -846,6 +846,7 @@ class Recognizer:
             "main_theme": (283, 945),
             "main_theme_small": (321, 973),
             "materiel_ico": (892, 61),
+            "skill_collect_confirm": (1160, 835),
             "mission_daily_on": ((685, 15), (1910, 100)),
             "mission_weekly_on": ((685, 15), (1910, 100)),
             "navigation/collection/AP_entry": ((0, 170), (1920, 870)),

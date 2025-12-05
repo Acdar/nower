@@ -269,6 +269,7 @@ class Device:
                 except Exception as e:
                     logger.exception(e)
                     restart_simulator()
+                    self.control.mumu12IPC = MuMu12IPC(self.device)
         elif config.conf.droidcast.enable:
             session = config.droidcast.session
             while True:
@@ -433,7 +434,9 @@ class Device:
             return any(g in resolution for g in good_resolution)
 
         def show_error(resolution):
-            logger.error(f"Mower仅支持1920x1080分辨率，模拟器分辨率为{resolution}")
+            logger.error(
+                f"Mower仅支持模拟器1920x1080分辨率，当前模拟器分辨率为{resolution}，请调整模拟器的分辨率"
+            )
 
         def extract_resolution(output_str):
             return output_str.partition("size:")[2].strip()
