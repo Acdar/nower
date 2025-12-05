@@ -2044,8 +2044,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     elif ctm.task == "place":
                         if fast_place := self.find("clue/fast_place"):
                             logger.info("快速摆放线索")
-                            self.tap(fast_place)
-                            self.waiting_solver()
+                            self.tap(fast_place, interval=2)
                             if unlock_pos := detect_unlock():
                                 self.tap(unlock_pos)
                         ctm.complete("place")
