@@ -1166,7 +1166,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                         item_list.remove(item)
                             self.swipe_noinertia(
                                 (0.5 * self.recog.w, 0.9 * self.recog.h),
-                                (0, -800),
+                                (0, -700),
                                 interval=1,
                             )
 
