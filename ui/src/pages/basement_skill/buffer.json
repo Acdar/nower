@@ -323,6 +323,12 @@
     "description": "选中在场干员后，可以通过一定条件激活的额外效果",
     "buffer": []
   },
+  "ba_weaknessatk": {
+    "termId": "ba.weaknessatk",
+    "termName": "弱点伤害",
+    "description": "造成物理或法术伤害时，根据目标防御力和法术抗性变更伤害类型",
+    "buffer": []
+  },
   "cc_bd_A_1": {
     "termId": "cc.bd_A_1",
     "termName": "念力",
@@ -575,7 +581,7 @@
   "cc_g_rh": {
     "termId": "cc.g.rh",
     "termName": "莱茵生命",
-    "description": "包含以下干员\n赫默、伊芙利特、塞雷娅、白面鸮、梅尔、麦哲伦、多萝西、星源、缪尔赛思",
+    "description": "包含以下干员\n赫默、伊芙利特、塞雷娅、白面鸮、梅尔、麦哲伦、多萝西、星源、缪尔赛思、娜斯提",
     "buffer": []
   },
   "cc_g_sm": {
