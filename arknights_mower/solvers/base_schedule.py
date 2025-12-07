@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 import cv2
-import urllib.request
 
 from arknights_mower.data import (
     agent_list,
@@ -90,7 +89,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.credit_fight = None
         self.task_count = 0
         self.refresh_connecting = False
-        #self.recruit_time = None
+        self.recruit_time = None
         self.last_clue = None
         self.sleeping = False
         self.operators = {}
@@ -959,29 +958,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             seen = set()
             group = defaultdict(dict)
             for item in item_list:
-                for name in item.item_names:
-                    if name in seen:
-                        logger.warning(
-                            f"当前干员{agent}的加工站配置中存在重复材料{name}，以第一个设置为准"
-                        )
-                        continue
-                    seen.add(name)
-                    metadata = workshop_formula[name]
-                    if (
-                        name in inventory_data
-                        and inventory_data[name] < item.self_upper_limit
-                        and all(
-                            child_name in inventory_data
-                            and inventory_data[child_name] > item.children_lower_limit
-                            for child_name in metadata["items"]
-                        )
-                    ):
-                        if is_9colored and workshop_formula[name]["apCost"] > 4:
-                            logger.warning("跳过心情大于4消耗的材料")
-                        else:
-                            group[workshop_formula[name]["tab"]][name] = item
-                    else:
-                        logger.debug(f"{agent}的加工站配置中材料{name}不满足条件，跳过")
                 for name in item.item_names:
                     if name in seen:
                         logger.warning(
@@ -2000,6 +1976,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
             ctm = ClueTaskManager()
 
+            friend_clue = []
+
             clue_status = {}
 
             def place_index():
@@ -2066,13 +2044,26 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         else:
                             ctm.complete("receive")
                     elif ctm.task == "place":
-                        if fast_place := self.find("clue/fast_place"):
-                            logger.info("快速摆放线索")
-                            self.tap(fast_place)
-                            self.waiting_solver()
-                            if unlock_pos := detect_unlock():
-                                self.tap(unlock_pos)
-                        ctm.complete("place")
+                        if unlock_pos := detect_unlock():
+                            self.tap(unlock_pos)
+                            continue
+                        for i in range(1, 8):
+                            if is_orange(self.get_color(main_dots[i])):
+                                clue_status[i] = "available"
+                            elif clue_cls(i):
+                                hsv = cv2.cvtColor(self.recog.img, cv2.COLOR_RGB2HSV)
+                                if 160 < hsv[main_time[i][1]][main_time[i][0]][0] < 180:
+                                    clue_status[i] = "friend"
+                                else:
+                                    clue_status[i] = "self"
+                            else:
+                                clue_status[i] = None
+                        cl, st = place_index()
+                        if st in ["available", "self", "available_self_only"]:
+                            self.tap(main_scope[cl])
+                            continue
+                        else:
+                            ctm.complete("place")
                     elif ctm.task == "give_away":
                         self.ctap((1799, 578))
                     elif ctm.task == "party_time":
@@ -2214,18 +2205,60 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             clue_status[cl] = None
 
                 elif scene == Scene.CLUE_GIVE_AWAY:
+                    logger.info("CLUE_GIVE_AWAY")
                     give_away_true = self.leifeng_mode or (
                         not self.leifeng_mode
                         and self.clue_count > self.clue_count_limit
                     )
-                    if (
-                        fast_giveaway := self.find("clue/fast_giveaway")
-                        and give_away_true
-                    ):
-                        logger.info("快速送出线索")
-                        self.tap(fast_giveaway)
-                    ctm.complete("give_away")
-                    self.tap((1868, 54))
+                    if (c := clue_cls("give_away")) and give_away_true:
+                        if not friend_clue:
+                            if self.find(
+                                "clue/icon_notification", scope=((1400, 0), (1920, 400))
+                            ):
+                                self.sleep()
+                                continue
+                            for i in range(4):
+                                label_scope = (
+                                    (1450, 228 + i * 222),
+                                    (1580, 278 + i * 222),
+                                )
+                                if not self.find(
+                                    "clue/label_give_away", scope=label_scope
+                                ):
+                                    break
+                                name_top_left = (870, 127 + 222 * i)
+                                name_scope = (
+                                    name_top_left,
+                                    va(name_top_left, (383, 62)),
+                                )
+                                name = rapidocr.engine(
+                                    cropimg(self.recog.gray, name_scope),
+                                    use_det=True,
+                                    use_cls=False,
+                                    use_rec=True,
+                                )[0][0][1]
+                                if name:
+                                    name = name.strip()
+                                data = {"name": name}
+                                for j in range(1, 8):
+                                    pos = (1230 + j * 64, 142 + i * 222)
+                                    data[j] = self.get_color(pos)[0] < 137
+                                friend_clue.append(data)
+                        logger.debug(friend_clue)
+                        friend = None
+                        for idx, fc in enumerate(friend_clue):
+                            if not fc[c]:
+                                friend = idx
+                                fc[c] = True
+                                break
+                        friend = friend or 0
+                        logger.info(f"给{friend_clue[friend]['name']}送一张线索{c}")
+                        self.tap(clue_scope["give_away"])
+                        self.clue_count -= 1
+                        self.tap((1790, 200 + friend * 222))
+                    else:
+                        ctm.complete("give_away")
+                        self.tap((1868, 54))
 
                 elif scene == Scene.CLUE_SUMMARY:
                     logger.info("CLUE_SUMMARY")
