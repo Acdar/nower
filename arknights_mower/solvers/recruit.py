@@ -191,7 +191,8 @@ class RecruitSolver(SceneGraphSolver):
                 )
 
             if self.recruit_index in self.agent_choose.keys():
-                if self.agent_choose[self.recruit_index]["level"] == 3:
+                # 仅在存在待选标签时才执行刷新（避免在空标签/随机三星情况下循环）
+                if self.agent_choose[self.recruit_index]["level"] == 3 and self.agent_choose[self.recruit_index]["tags"]:
                     if pos := self.find("recruit/refresh"):
                         self.tap(pos)
                         del self.tags[self.recruit_index]
@@ -202,17 +203,28 @@ class RecruitSolver(SceneGraphSolver):
                 choose = self.agent_choose[self.recruit_index]["tags"]
                 tags = self.tags[self.recruit_index]
                 logger.info(f"选择标签:{choose}")
-                tag_all_choose = True
-                for x in choose:
-                    h, w, _ = tag_template[x].shape
-                    tag_img = cropimg(self.recog.img, [tags[x], va(tags[x], (w, h))])
 
-                    if self.tag_not_choosed(tag_img):
-                        tag_all_choose = False
-                        self.tap(tags[x])
+                # 如果标签列表为空（保持不选），使用默认招募时间 9:00，继续时间选择逻辑
+                if not choose:
+                    if self.ticket_number == 0:
+                        self.recruit_index = self.recruit_index + 1
+                        self.back()
+                        return
+                    logger.info("无需选择标签，使用默认招募时间 9:00（随机三星）")
+                    # 不直接开始招募，继续执行后续的时间选择逻辑
+                else:
+                    # Process tag selection when tags are present
+                    tag_all_choose = True
+                    for x in choose:
+                        h, w, _ = tag_template[x].shape
+                        tag_img = cropimg(self.recog.img, [tags[x], va(tags[x], (w, h))])
 
-                if tag_all_choose is False:
-                    return
+                        if self.tag_not_choosed(tag_img):
+                            tag_all_choose = False
+                            self.tap(tags[x])
+
+                    if tag_all_choose is False:
+                        return
 
                 if self.ticket_number == 0:
                     self.recruit_index = self.recruit_index + 1
@@ -372,6 +384,7 @@ class RecruitSolver(SceneGraphSolver):
             }
             return
 
+        # 保持不选：三星结果始终不选择标签，使用随机三星行为
         self.agent_choose[self.recruit_index] = {
             "tags": [],
             "result": [{"id": "", "name": "随机三星干员", "star": 3}],
