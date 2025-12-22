@@ -191,12 +191,13 @@ class RecruitSolver(SceneGraphSolver):
                 )
 
             if self.recruit_index in self.agent_choose.keys():
-                # 仅在存在待选标签时才执行刷新（避免在空标签/随机三星情况下循环）
-                if self.agent_choose[self.recruit_index]["level"] == 3 and self.agent_choose[self.recruit_index]["tags"]:
+                # 仅在识别到三星时才执行刷新
+                if self.agent_choose[self.recruit_index]["level"] == 3:
                     if pos := self.find("recruit/refresh"):
                         self.tap(pos)
-                        del self.tags[self.recruit_index]
-                        del self.agent_choose[self.recruit_index]
+                        # 删除已识别的标签和候选，标记为需要重新获取标签
+                        self.tags.pop(self.recruit_index, None)
+                        self.agent_choose.pop(self.recruit_index, None)
                         self.refresh = True
                         return
 
