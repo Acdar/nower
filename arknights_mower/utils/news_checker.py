@@ -40,9 +40,9 @@ class NewsChecker:
                 logger.debug("使用缓存的维护时间")
                 return cls.cached_st, cls.cached_et
 
-        # 2. 如果没到 9:00，不请求
-        if now_server.hour < 9 or now_server.hour > 18:
-            logger.debug("今天还没到 9:00，不请求维护时间")
+        # 2. 如果没到 6:00，不请求
+        if now_server.hour < 6 or now_server.hour > 12:
+            logger.debug("今天还没到 6:00，不请求维护时间")
             return cls.cached_st, cls.cached_et
 
         # 3. 请求网页

@@ -1,6 +1,7 @@
 import lzma
 import pickle
 from itertools import combinations
+import random
 
 import cv2
 import numpy as np
@@ -385,9 +386,19 @@ class RecruitSolver(SceneGraphSolver):
             }
             return
 
-        # 保持不选：三星结果始终不选择标签，使用随机三星行为
+        # 对于三星结果，默认不选可能导致循环无法前进；改为从已识别的候选标签中随机选择一个以避免卡住
+        candidate_tags = list(recruit_cal_result[-1]["tag"]) if recruit_cal_result else []
+        available_tags = [t for t in candidate_tags if t in self.tags.get(self.recruit_index, {})]
+        if available_tags:
+            chosen_tag = random.choice(available_tags)
+            chosen_tags = [chosen_tag]
+            logger.info(f"三星候选，随机选择标签{chosen_tags}")
+        else:
+            chosen_tags = []
+            logger.info("三星候选但未识别到对应标签，保持不选")
+
         self.agent_choose[self.recruit_index] = {
-            "tags": [],
+            "tags": chosen_tags,
             "result": [{"id": "", "name": "随机三星干员", "star": 3}],
             "level": recruit_result_level,
             "choosed": False,

@@ -13,6 +13,7 @@ from arknights_mower.utils.character_recognize import operator_list, operator_li
 from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.image import cropimg, loadres, thres2
 from arknights_mower.utils.log import logger
+from arknights_mower.utils.recognize import RecognizeError
 
 with lzma.open(f"{__rootdir__}/models/operator_room.model", "rb") as f:
     OP_ROOM = pickle.loads(f.read())
@@ -348,7 +349,9 @@ class BaseMixin:
                     self.sleep()
             if not pos:
                 self.back_to_infrastructure()
-        raise Exception("未成功进入房间")
+        # 进入房间失败：返回首页并抛出识别错误，由上层统一处理重试或退出
+        self.back_to_index()
+        raise RecognizeError("未成功进入房间")
 
     def double_read_time(self, cord, upperLimit=None, use_digit_reader=False):
         self.recog.update()

@@ -50,7 +50,7 @@ from arknights_mower.utils.log import logger
 from arknights_mower.utils.operators import Operator, Operators
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.plan import PlanTriggerTiming
-from arknights_mower.utils.recognize import Recognizer, Scene
+from arknights_mower.utils.recognize import Recognizer, Scene, RecognizeError
 from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
@@ -684,6 +684,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         )
         for room in need_read:
             error_count = 0
+            # 仅对识别失败做一次重试（返回首页后再试一次），其它异常按原逻辑重试多次
+            recognize_retry = 0
             # 由于训练室不纠错，如果训练室有干员且时间读取过就跳过
             current_working = [
                 value
@@ -722,6 +724,15 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     break
                 except MowerExit:
                     raise
+                except RecognizeError as e:
+                    save_exception(e)
+                    logger.exception(e)
+                    if recognize_retry > 0:
+                        # 已经重试过一次，则放弃并抛出
+                        raise e
+                    recognize_retry += 1
+                    logger.info(f"房间 {room} 识别失败，低级函数已返回首页，重试一次")
+                    continue
                 except Exception as e:
                     save_exception(e)
                     logger.exception(e)
@@ -2978,7 +2989,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 self.back_to_infrastructure()
             self.enter_room(room)
         self.reset_room_time(room)
-        raise Exception("未成功进入房间")
+        # 进入房间失败：返回首页并抛出识别错误，由上层统一处理重试或退出
+        self.back_to_index()
+        raise RecognizeError("未成功进入房间")
 
     def get_agent_from_room(self, room, read_time_index=None):
         if read_time_index is None:
