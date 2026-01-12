@@ -192,6 +192,12 @@ provide('show_name_editor', show_name_editor)
 const show_replace_dialog = ref(false)
 provide('show_replace_dialog', show_replace_dialog)
 
+const show_task = ref(false)
+provide('show_task', show_task)
+
+const add_task = ref(false)
+provide('add_task', add_task)
+
 const replace_source = ref('')
 const replace_target = ref('')
 
