@@ -50,7 +50,7 @@ from arknights_mower.utils.log import logger
 from arknights_mower.utils.operators import Operator, Operators
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.plan import PlanTriggerTiming
-from arknights_mower.utils.recognize import Recognizer, Scene, RecognizeError
+from arknights_mower.utils.recognize import Recognizer, Scene
 from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
@@ -686,8 +686,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         )
         for room in need_read:
             error_count = 0
-            # 仅对识别失败做一次重试（返回首页后再试一次），其它异常按原逻辑重试多次
-            recognize_retry = 0
             # 由于训练室不纠错，如果训练室有干员且时间读取过就跳过
             current_working = [
                 value
@@ -726,15 +724,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     break
                 except MowerExit:
                     raise
-                except RecognizeError as e:
-                    save_exception(e)
-                    logger.exception(e)
-                    if recognize_retry > 0:
-                        # 已经重试过一次，则放弃并抛出
-                        raise e
-                    recognize_retry += 1
-                    logger.info(f"房间 {room} 识别失败，低级函数已返回首页，重试一次")
-                    continue
                 except Exception as e:
                     save_exception(e)
                     logger.exception(e)
@@ -1989,8 +1978,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
             ctm = ClueTaskManager()
 
-            friend_clue = []
-
             clue_status = {}
 
             def place_index():
@@ -2057,26 +2044,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         else:
                             ctm.complete("receive")
                     elif ctm.task == "place":
-                        if unlock_pos := detect_unlock():
-                            self.tap(unlock_pos)
-                            continue
-                        for i in range(1, 8):
-                            if is_orange(self.get_color(main_dots[i])):
-                                clue_status[i] = "available"
-                            elif clue_cls(i):
-                                hsv = cv2.cvtColor(self.recog.img, cv2.COLOR_RGB2HSV)
-                                if 160 < hsv[main_time[i][1]][main_time[i][0]][0] < 180:
-                                    clue_status[i] = "friend"
-                                else:
-                                    clue_status[i] = "self"
-                            else:
-                                clue_status[i] = None
-                        cl, st = place_index()
-                        if st in ["available", "self", "available_self_only"]:
-                            self.tap(main_scope[cl])
-                            continue
-                        else:
-                            ctm.complete("place")
+                        if fast_place := self.find("clue/fast_place"):
+                            logger.info("快速摆放线索")
+                            self.tap(fast_place, interval=2)
+                            if unlock_pos := detect_unlock():
+                                self.tap(unlock_pos)
+                        ctm.complete("place")
                     elif ctm.task == "give_away":
                         self.ctap((1799, 578))
                     elif ctm.task == "party_time":
@@ -2218,60 +2191,17 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             clue_status[cl] = None
 
                 elif scene == Scene.CLUE_GIVE_AWAY:
-                    logger.info("CLUE_GIVE_AWAY")
                     give_away_true = self.leifeng_mode or (
                         not self.leifeng_mode
                         and self.clue_count > self.clue_count_limit
                     )
-                    if (c := clue_cls("give_away")) and give_away_true:
-                        if not friend_clue:
-                            if self.find(
-                                "clue/icon_notification", scope=((1400, 0), (1920, 400))
-                            ):
-                                self.sleep()
-                                continue
-                            for i in range(4):
-                                label_scope = (
-                                    (1450, 228 + i * 222),
-                                    (1580, 278 + i * 222),
-                                )
-                                if not self.find(
-                                    "clue/label_give_away", scope=label_scope
-                                ):
-                                    break
-                                name_top_left = (870, 127 + 222 * i)
-                                name_scope = (
-                                    name_top_left,
-                                    va(name_top_left, (383, 62)),
-                                )
-                                name = rapidocr.engine(
-                                    cropimg(self.recog.gray, name_scope),
-                                    use_det=True,
-                                    use_cls=False,
-                                    use_rec=True,
-                                )[0][0][1]
-                                if name:
-                                    name = name.strip()
-                                data = {"name": name}
-                                for j in range(1, 8):
-                                    pos = (1230 + j * 64, 142 + i * 222)
-                                    data[j] = self.get_color(pos)[0] < 137
-                                friend_clue.append(data)
-                        logger.debug(friend_clue)
-                        friend = None
-                        for idx, fc in enumerate(friend_clue):
-                            if not fc[c]:
-                                friend = idx
-                                fc[c] = True
-                                break
-                        friend = friend or 0
-                        logger.info(f"给{friend_clue[friend]['name']}送一张线索{c}")
-                        self.tap(clue_scope["give_away"])
-                        self.clue_count -= 1
-                        self.tap((1790, 200 + friend * 222))
-                    else:
-                        ctm.complete("give_away")
-                        self.tap((1868, 54))
+                    if give_away_true and (
+                        fast_giveaway := self.find("clue/fast_giveaway")
+                    ):
+                        logger.info("快速送出线索")
+                        self.tap(fast_giveaway)
+                    ctm.complete("give_away")
+                    self.tap((1868, 54))
 
                 elif scene == Scene.CLUE_SUMMARY:
                     logger.info("CLUE_SUMMARY")
@@ -3043,9 +2973,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 self.back_to_infrastructure()
             self.enter_room(room)
         self.reset_room_time(room)
-        # 进入房间失败：返回首页并抛出识别错误，由上层统一处理重试或退出
-        self.back_to_index()
-        raise RecognizeError("未成功进入房间")
+        raise Exception("未成功进入房间")
 
     def get_agent_from_room(self, room, read_time_index=None):
         if read_time_index is None:
@@ -3359,7 +3287,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                 self.back()
                                 self.turn_on_room_detail(room)
                         elif self.task.adjusted:
-                            pass
+                            self.back()
+                            self.turn_on_room_detail(room)
                         else:
                             logger.info("检测到漏单")
                             send_message("检测到漏单！", level="WARNING")
