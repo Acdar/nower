@@ -2195,11 +2195,55 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         not self.leifeng_mode
                         and self.clue_count > self.clue_count_limit
                     )
-                    if give_away_true and (
-                        fast_giveaway := self.find("clue/fast_giveaway")
-                    ):
-                        logger.info("快速送出线索")
-                        self.tap(fast_giveaway)
+                    if (c := clue_cls("give_away")) and give_away_true:
+                        if not friend_clue:
+                            if self.find(
+                                "clue/icon_notification", scope=((1400, 0), (1920, 400))
+                            ):
+                                self.sleep()
+                                continue
+                            for i in range(4):
+                                label_scope = (
+                                    (1450, 228 + i * 222),
+                                    (1580, 278 + i * 222),
+                                )
+                                if not self.find(
+                                    "clue/label_give_away", scope=label_scope
+                                ):
+                                    break
+                                name_top_left = (870, 127 + 222 * i)
+                                name_scope = (
+                                    name_top_left,
+                                    va(name_top_left, (383, 62)),
+                                )
+                                name = rapidocr.engine(
+                                    cropimg(self.recog.gray, name_scope),
+                                    use_det=True,
+                                    use_cls=False,
+                                    use_rec=True,
+                                )[0][0][1]
+                                if name:
+                                    name = name.strip()
+                                data = {"name": name}
+                                for j in range(1, 8):
+                                    pos = (1230 + j * 64, 142 + i * 222)
+                                    data[j] = self.get_color(pos)[0] < 137
+                                friend_clue.append(data)
+                        logger.debug(friend_clue)
+                        friend = None
+                        for idx, fc in enumerate(friend_clue):
+                            if not fc[c]:
+                                friend = idx
+                                fc[c] = True
+                                break
+                        friend = friend or 0
+                        logger.info(f"给{friend_clue[friend]['name']}送一张线索{c}")
+                        self.tap(clue_scope["give_away"])
+                        self.clue_count -= 1
+                        self.tap((1790, 200 + friend * 222))
+                    else:
+                        ctm.complete("give_away")
+                        self.tap((1868, 54))
                     ctm.complete("give_away")
                     self.tap((1868, 54))
 
