@@ -1979,6 +1979,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
             ctm = ClueTaskManager()
 
+            friend_clue = {}
+
             clue_status = {}
 
             def place_index():
