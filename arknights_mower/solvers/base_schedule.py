@@ -1979,7 +1979,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
             ctm = ClueTaskManager()
 
-            friend_clue = {}
+            friend_clue = []
 
             clue_status = {}
 
