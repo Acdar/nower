@@ -84,7 +84,6 @@ class SKLand:
                 for i in get_ef_binding_list(self.sign_token):
                     role = i.get('defaultRole') or (i.get('roles') and i['roles'][0])
                     body = {"gameId": 3, "sk-game-role": f"3_{role['roleId']}_{role['serverId']}"}
-                    headers = get_ef_sign_header(ef_sign_url, "post", body, self.sign_token, header)
                     resp = requests.post(
                         ef_sign_url,
                         headers=get_ef_sign_header(
@@ -92,26 +91,24 @@ class SKLand:
                         ),
                         json=body,
                     ).json()
-                    logger.info(headers)
-                    logger.info(resp)
                     if resp["code"] != 0:
                         self.reward_ef.append(
                             {"nickName": item.account, "reward": resp.get("message")}
                         )
-                        logger.info(f"{i.get('nickName')}：{resp.get('message')}")
+                        logger.info(f"{role.get('nickName')}：{resp.get('message')}")
                         continue
-                    awards = resp["data"]["awards"]
-                    for j in awards:
-                        res = j["resource"]
-                        self.reward_ef.append(
-                            {
-                                "nickName": item.account,
-                                "reward": "{}×{}".format(res["name"], j.get("count") or 1),
-                            }
-                        )
-                        logger.info(
-                            f"{i.get('nickName')}获得了{res['name']}×{j.get('count') or 1}"
-                        )
+                    awards_result = []
+                    result_data: dict = resp['data']
+                    result_info_map: dict = result_data['resourceInfoMap']
+                    for a in result_data['awardIds']:
+                        award_id = a['id']
+                        awards = result_info_map[award_id]
+                        award_name = awards['name']
+                        award_count = awards['count']
+                        awards_result.append(f'{award_name}×{award_count}')
+                    logger.info(
+                        f"{role.get('nickName')}获得了{awards_result}"
+                    )
         if len(self.reward) > 0 or len(self.reward_ef) > 0:
             return self.record_log()
         if self.all_recorded and self.all_recorded_ef:

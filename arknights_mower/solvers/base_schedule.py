@@ -3612,6 +3612,20 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             sys.path.append(asst_path)
         global Message
 
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("asst.") or mod == "asst":
+                try:
+                    old_Asst = getattr(sys.modules[mod], "Asst", None)
+                    if old_Asst and hasattr(old_Asst, "_Asst__lib") and old_Asst._Asst__lib:
+                        import _ctypes
+                        if sys.platform == "win32":
+                            _ctypes.FreeLibrary(old_Asst._Asst__lib._handle)
+                        else:
+                            _ctypes.dlclose(old_Asst._Asst__lib._handle)
+                except Exception:
+                    pass
+                del sys.modules[mod]
+
         try:
             from asst.asst import Asst
             from asst.utils import InstanceOptionType, Message

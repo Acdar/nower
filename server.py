@@ -398,6 +398,21 @@ def get_maa_adb_version():
         )
         if asst_path not in sys.path:
             sys.path.append(asst_path)
+
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("asst.") or mod == "asst":
+                try:
+                    old_Asst = getattr(sys.modules[mod], "Asst", None)
+                    if old_Asst and hasattr(old_Asst, "_Asst__lib") and old_Asst._Asst__lib:
+                        import _ctypes
+                        if sys.platform == "win32":
+                            _ctypes.FreeLibrary(old_Asst._Asst__lib._handle)
+                        else:
+                            _ctypes.dlclose(old_Asst._Asst__lib._handle)
+                except Exception:
+                    pass
+                del sys.modules[mod]
+
         from asst.asst import Asst
 
         Asst.load(config.conf.maa_path)
