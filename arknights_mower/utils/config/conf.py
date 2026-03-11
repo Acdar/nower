@@ -567,6 +567,8 @@ class SKLandPart(ConfModel):
         "官服签到"
         sign_in_official: bool = False
         "B服签到"
+        sign_in_endfield: bool = False
+        "终末地签到"
 
     skland_enable: bool = False
     "森空岛签到"

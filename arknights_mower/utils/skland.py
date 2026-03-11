@@ -11,8 +11,10 @@ from arknights_mower.utils.SecuritySm import get_d_id
 
 app_code = "4ca99fa6b56cc2ba"
 
-# 签到url
-sign_url = "https://zonai.skland.com/api/v1/game/attendance"
+# 明日方舟签到url
+ak_sign_url = "https://zonai.skland.com/api/v1/game/attendance"
+# 终末地签到url
+ef_sign_url = "https://zonai.skland.com/api/v1/game/endfield/attendance"
 # 绑定的角色url
 binding_url = "https://zonai.skland.com/api/v1/game/player/binding"
 # 验证码url
@@ -75,6 +77,25 @@ def get_sign_header(url: str, method, body, sign_token, old_header=header):
         h[i] = header_ca[i]
     return h
 
+def get_ef_sign_header(url: str, method, body, sign_token, old_header=header):
+    h = json.loads(json.dumps(old_header))
+    p = parse.urlparse(url)
+    if method.lower() == "get":
+        h["sign"], header_ca = generate_signature(sign_token, p.path, p.query)
+    else:
+        h["sign"], header_ca = generate_signature(sign_token, p.path, json.dumps(body))
+    for i in header_ca:
+        h[i] = header_ca[i]
+    
+    # 按照需求补充新的 Header 字段
+    h['sk-language'] = 'en'
+    h['Content-Type'] = 'application/json'
+    # role_str 可以直接从 body 中提取，因为 solvers/skland.py 已经在 body 传入了 sk-game-role
+    if isinstance(body, dict) and 'sk-game-role' in body:
+        h['sk-game-role'] = body['sk-game-role']
+        
+    return h
+
 
 def get_grant_code(token):
     response = requests.post(
@@ -108,7 +129,7 @@ def get_cred(grant):
     return resp["data"]
 
 
-def get_binding_list(sign_token):
+def get_ak_binding_list(sign_token):
     v = []
     resp = requests.get(
         binding_url,
@@ -132,6 +153,28 @@ def get_binding_list(sign_token):
         v.extend(i.get("bindingList"))
     return v
 
+def get_ef_binding_list(sign_token):
+    v = []
+    resp = requests.get(
+        binding_url,
+        headers=get_sign_header(
+            binding_url,
+            "get",
+            None,
+            sign_token,
+        ),
+        timeout=30,
+    ).json()
+    if resp["code"] != 0:
+        logger.info(f"请求角色列表出现问题：{resp['message']}")
+        if resp.get("message") == "用户未登录":
+            logger.warning("用户登录可能失效了，请重新运行此程序！")
+            return []
+    for i in resp["data"]["list"]:
+        if i.get("appCode") != "endfield":
+            continue
+        v.append(i.get("bindingList")[0])
+    return v
 
 def get_cred_by_token(token):
     return get_cred(get_grant_code(token))

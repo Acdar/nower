@@ -25,6 +25,9 @@ const { check_mail_enable, report_enable, sign_in, visit_friend, skland_info, sk
           <n-checkbox v-model:checked="account_info.sign_in_bilibili" style="margin-right: 12px">
             B服签到
           </n-checkbox>
+          <n-checkbox v-model:checked="account_info.sign_in_endfield" style="margin-right: 12px">
+            终末地签到
+          </n-checkbox>
         </n-flex>
       </div>
       <n-divider />

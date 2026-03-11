@@ -48,27 +48,25 @@ class Email:
         msg["To"] = ", ".join(conf.recipient)
 
         if attach_image is not None:
-            if not conf.server_push_enable:
-                attachment = img2bytes(attach_image)
-                image_content = MIMEImage(attachment.tobytes())
-                image_content.add_header(
-                    "Content-Disposition", "attachment", filename="image.jpg"
-                )
-                msg.attach(image_content)
+            attachment = img2bytes(attach_image)
+            image_content = MIMEImage(attachment.tobytes())
+            image_content.add_header(
+                "Content-Disposition", "attachment", filename="image.jpg"
+            )
+            msg.attach(image_content)
 
         if attach_files:
-            if not conf.server_push_enable:
-                for file_path in attach_files:
-                    if os.path.isfile(file_path):
-                        with open(file_path, "rb") as file:
-                            part = MIMEBase("application", "octet-stream")
-                            part.set_payload(file.read())
-                            encoders.encode_base64(part)
-                            part.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename={os.path.basename(file_path)}",
-                            )
-                            msg.attach(part)
+            for file_path in attach_files:
+                if os.path.isfile(file_path):
+                    with open(file_path, "rb") as file:
+                        part = MIMEBase("application", "octet-stream")
+                        part.set_payload(file.read())
+                        encoders.encode_base64(part)
+                        part.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename={os.path.basename(file_path)}",
+                        )
+                        msg.attach(part)
 
         self.msg = msg
 
@@ -121,25 +119,29 @@ def send_message(
     if conf.mail_enable:
         email = Email(body, subject, attach_image)
     if conf.server_push_enable:
-        send_key = conf.sendKey
-        url = f"https://sft.acdar.dev/message/push?pushkey={send_key}"
-        body = md(body)
-        if attach_image is not None:
-            image_url = upload_message(attach_image)
-            body += f'\n\n![Image]({image_url})'
+        def send_pushdeer_sync():
+            send_key = conf.sendKey
+            url = f"https://sft.acdar.dev/message/push?pushkey={send_key}"
+            push_body = md(body)
+            if attach_image is not None:
+                image_url = upload_message(attach_image)
+                if image_url:
+                    push_body += f'\n\n![Image]({image_url})'
 
-        try:
-            response = requests.post(
-                url,
-                json={
-                    "text": subject, 
-                    "desp": body,
-                }
-            ).json()
-            if response["code"] != 0:
-                logger.error(f"pushdeer通知发送失败：{response['message']}")
-        except Exception as e:
-            logger.exception("pushdeer通知发送失败：" + str(e))
+            try:
+                response = requests.post(
+                    url,
+                    json={
+                        "text": subject, 
+                        "desp": push_body,
+                    }
+                ).json()
+                if response["code"] != 0:
+                    logger.error(f"pushdeer通知发送失败：{response['message']}")
+            except Exception as e:
+                logger.exception("pushdeer通知发送失败：" + str(e))
+
+        Thread(target=send_pushdeer_sync).start()
     if email:
         def send_message_sync(email):
             for i in range(3):
@@ -155,7 +157,7 @@ def send_message(
 def upload_message(image):
     try:
         # 将图像转换为字节格式
-        _, image_buffer = cv2.imencode('.png', image)
+        _, image_buffer = cv2.imencode('.png', cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
         compressed_image = tinify.from_buffer(image_buffer.tobytes()).to_buffer()
         # 上传到服务器
         files = {
