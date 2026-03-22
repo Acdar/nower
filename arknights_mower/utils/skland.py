@@ -29,12 +29,12 @@ grant_code_url = "https://as.hypergryph.com/user/oauth2/v2/grant"
 cred_code_url = "https://zonai.skland.com/web/v1/user/auth/generate_cred_by_code"
 header = {
     "cred": "",
-    "User-Agent": "Skland/1.0.1 (com.hypergryph.skland; build:100001014; Android 31; ) Okhttp/4.11.0",
+    "User-Agent": "Skland/1.53.0 (com.hypergryph.skland; build:105300018; Android 31; ) Okhttp/4.11.0",
     "Accept-Encoding": "gzip",
     "Connection": "close",
 }
 header_login = {
-    "User-Agent": "Skland/1.0.1 (com.hypergryph.skland; build:100001014; Android 31; ) Okhttp/4.11.0",
+    "User-Agent": "Skland/1.53.0 (com.hypergryph.skland; build:105300018; Android 31; ) Okhttp/4.11.0",
     "Accept-Encoding": "gzip",
     "Connection": "close",
     "dId": get_d_id(),
@@ -88,7 +88,6 @@ def get_ef_sign_header(url: str, method, body, sign_token, old_header=header):
         h[i] = header_ca[i]
     
     # 按照需求补充新的 Header 字段
-    h['sk-language'] = 'en'
     h['Content-Type'] = 'application/json'
     # role_str 可以直接从 body 中提取，因为 solvers/skland.py 已经在 body 传入了 sk-game-role
     if isinstance(body, dict) and 'sk-game-role' in body:

@@ -3619,9 +3619,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     if old_Asst and hasattr(old_Asst, "_Asst__lib") and old_Asst._Asst__lib:
                         import _ctypes
                         if sys.platform == "win32":
-                            _ctypes.FreeLibrary(old_Asst._Asst__lib._handle)
+                            # _ctypes.FreeLibrary(old_Asst._Asst__lib._handle)
+                            pass
                         else:
-                            _ctypes.dlclose(old_Asst._Asst__lib._handle)
+                            # _ctypes.dlclose(old_Asst._Asst__lib._handle)
+                            pass
                 except Exception:
                     pass
                 del sys.modules[mod]
