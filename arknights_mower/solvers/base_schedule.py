@@ -3614,23 +3614,45 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
         for mod in list(sys.modules.keys()):
             if mod.startswith("asst.") or mod == "asst":
-                try:
-                    old_Asst = getattr(sys.modules[mod], "Asst", None)
-                    if old_Asst and hasattr(old_Asst, "_Asst__lib") and old_Asst._Asst__lib:
-                        import _ctypes
-                        if sys.platform == "win32":
-                            # _ctypes.FreeLibrary(old_Asst._Asst__lib._handle)
-                            pass
-                        else:
-                            # _ctypes.dlclose(old_Asst._Asst__lib._handle)
-                            pass
-                except Exception:
-                    pass
                 del sys.modules[mod]
 
+        patched = False
+        original_dll_loader = None
         try:
             from asst.asst import Asst
             from asst.utils import InstanceOptionType, Message
+            import ctypes
+            import shutil
+            import uuid
+            import glob
+
+            # 清理旧的临时 MAA 核心库
+            core_name = "MaaCore.dll" if sys.platform == "win32" else "libMaaCore.so"
+            temp_pattern = "MaaCore_temp_*.dll" if sys.platform == "win32" else "libMaaCore_temp_*.so"
+            for old_temp in glob.glob(os.path.join(path, temp_pattern)):
+                try:
+                    os.remove(old_temp)
+                except OSError:
+                    pass
+
+            # 复制新的临时 MAA 核心库以防占用报错和实现热重载
+            temp_name = f"MaaCore_temp_{uuid.uuid4().hex[:8]}.dll" if sys.platform == "win32" else f"libMaaCore_temp_{uuid.uuid4().hex[:8]}.so"
+            temp_path = os.path.join(path, temp_name)
+            
+            original_dll_loader = ctypes.WinDLL if sys.platform == "win32" else ctypes.CDLL
+            try:
+                shutil.copyfile(os.path.join(path, core_name), temp_path)
+                def mock_dll_loader(name, *args, **kwargs):
+                    if core_name in str(name):
+                        return original_dll_loader(temp_path, *args, **kwargs)
+                    return original_dll_loader(name, *args, **kwargs)
+                if sys.platform == "win32":
+                    ctypes.WinDLL = mock_dll_loader
+                else:
+                    ctypes.CDLL = mock_dll_loader
+                patched = True
+            except Exception as e:
+                logger.error(f"动态复制MAA核心库失败，将使用原库：{e}")
 
             logger.info("Maa Python模块导入成功")
         except Exception as e:
@@ -3658,7 +3680,15 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.error(f"Maa活动关卡导航更新失败：{str(e)}")
             save_exception(e)
 
-        Asst.load(path=path, incremental_path=path / "cache")
+        try:
+            Asst.load(path=path, incremental_path=path / "cache")
+        finally:
+            if patched and original_dll_loader:
+                import ctypes
+                if sys.platform == "win32":
+                    ctypes.WinDLL = original_dll_loader
+                else:
+                    ctypes.CDLL = original_dll_loader
 
         self.MAA = Asst(callback=self.log_maa)
         self.stages = []

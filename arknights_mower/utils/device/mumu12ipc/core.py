@@ -309,6 +309,12 @@ class MuMu12IPC:
         获取指定应用的 Display ID，并增加等待和重试机制。
         应用启动需要时间，因此需要轮询。
         """
+        # 第一次探测连接时先打开游戏
+        try:
+            self.device.launch()
+        except Exception as e:
+            logger.warning(f"尝试打开游戏失败: {e}")
+
         pkg_name = config.conf.APPNAME.encode("utf-8")
         timeout_seconds = 20  # 等待应用启动的总超时时间，可以根据需要调整
         start_time = time.time()
