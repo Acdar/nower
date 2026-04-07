@@ -1,11 +1,43 @@
 <script setup>
 import { useConfigStore } from '@/stores/config'
 import { storeToRefs } from 'pinia'
+import { inject, ref } from 'vue'
+const axios = inject('axios')
 
 const store = useConfigStore()
 
 const { check_mail_enable, report_enable, sign_in, visit_friend, skland_info, skland_enable } =
   storeToRefs(store)
+
+const sign_msg = ref('')
+
+async function test_sign() {
+  sign_msg.value = '正在测试签到……'
+  const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/check-skland-sign`)
+  sign_msg.value = response.data
+}
+
+// 复选框逻辑
+// 账号勾选时相当于全选
+const AllCheck = (item, status, game) => {
+  if (game == 'arknights') {
+    item.arknights_isCheck = status
+    item.sign_in_official = status
+    item.sign_in_bilibili = status
+  } else if (game == 'endfield') {
+    item.endfield_isCheck = status
+    item.sign_in_endfield_official = status
+    item.sign_in_endfield_bilibili = status
+  }
+}
+// 区服为空时同步账号为空
+const SyncStatus = (item, game) => {
+  if (game == 'arknights') {
+    item.arknights_isCheck = item.sign_in_official || item.sign_in_bilibili
+  } else if (game == 'endfield') {
+    item.endfield_isCheck = item.sign_in_endfield_official || item.sign_in_endfield_bilibili
+  }
+}
 </script>
 
 <template>

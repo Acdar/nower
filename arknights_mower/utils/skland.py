@@ -30,10 +30,12 @@ cred_code_url = "https://zonai.skland.com/web/v1/user/auth/generate_cred_by_code
 header = {
     "cred": "",
     "User-Agent": "Skland/1.53.0 (com.hypergryph.skland; build:105300018; Android 31; ) Okhttp/4.11.0",
+    "User-Agent": "Skland/1.53.0 (com.hypergryph.skland; build:105300018; Android 31; ) Okhttp/4.11.0",
     "Accept-Encoding": "gzip",
     "Connection": "close",
 }
 header_login = {
+    "User-Agent": "Skland/1.53.0 (com.hypergryph.skland; build:105300018; Android 31; ) Okhttp/4.11.0",
     "User-Agent": "Skland/1.53.0 (com.hypergryph.skland; build:105300018; Android 31; ) Okhttp/4.11.0",
     "Accept-Encoding": "gzip",
     "Connection": "close",
@@ -147,7 +149,7 @@ def get_ak_binding_list(sign_token):
             logger.warning("用户登录可能失效了，请重新运行此程序！")
             return []
     for i in resp["data"]["list"]:
-        if i.get("appCode") != "arknights":
+        if i.get("appCode") not in ("arknights", "endfield"):
             continue
         v.extend(i.get("bindingList"))
     return v

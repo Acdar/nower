@@ -130,6 +130,7 @@ class SKLand:
         return r["data"]["token"]
 
     def record_log(self):
+        self.test_writecsv = True
         date_str = datetime.datetime.now().strftime("%Y/%m/%d")
         if self.reward:
             logger.info(f"存入{date_str}的明日方舟数据{self.reward}")
@@ -159,6 +160,12 @@ class SKLand:
             df = pd.read_csv(
                 path, header=None, encoding="gbk", on_bad_lines="skip"
             )
+
+            sign_arknights_official = False
+            sign_arknights_bilbili = False
+            sign_endfield_official = False
+            sign_endfield_bilibili = False
+
             for item in df.iloc:
                 if item[0] == datetime.datetime.now().strftime("%Y/%m/%d"):
                     if item[1].astype(str) == phone:
@@ -170,10 +177,11 @@ class SKLand:
         except pd.errors.EmptyDataError:
             return False
 
+    # 用于测试连接
     def test_connect(self):
         res = []
         for item in config.conf.skland_info:
-            if item.isCheck:
+            if item.arknights_isCheck or item.endfield_isCheck:
                 try:
                     self.save_param(get_cred_by_token(log(item)))
                     for i in get_ak_binding_list(self.sign_token):
@@ -195,4 +203,35 @@ class SKLand:
                     msg = "{}无法连接-{}".format(item.account, e)
                     logger.exception(msg)
                     res.append(msg)
+        return res
+
+    # 用于测试签到
+    def test_sign(self):
+        res = []
+        try:
+            for item in config.conf.skland_info:
+                if (not item.account or not item.password) and (
+                    item.arknights_isCheck or item.endfield_isCheck
+                ):
+                    res.append("账号{}配置不完整，请检查".format(item.account))
+                    return res
+            if bool(self.start()):
+                for info in self.reward:
+                    res.append(
+                        "{}{}签到成功".format(
+                            info.get("nickname") or info.get("nickName"),
+                            info.get("game"),
+                        )
+                    )
+                if not self.test_writecsv:
+                    res.append(
+                        "签到数据写入失败，可能是根目录下的tmp文件夹不存在或tmp/skland.csv被占用"
+                    )
+                    self.test_writecsv = True
+                return res
+        except Exception as e:
+            msg = "测试出错-{}".format(e)
+            logger.exception(msg)
+            res.append(msg)
+        res.append("未勾选有效的账号或勾选的账号今天已签到~")
         return res
