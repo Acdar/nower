@@ -210,3 +210,6 @@ MAA
 
 *.ipynb
 .rgignore
+
+#vscode
+.vscode/*

@@ -3,6 +3,7 @@ import json
 import requests
 
 from arknights_mower.utils import config
+from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.skland import (
     get_ak_binding_list,
@@ -35,8 +36,11 @@ class cultivate:
                             ),
                             timeout=30,
                         ).json()
-                        with open(self.record_path, "w", encoding="utf-8") as file:
-                            json.dump(resp, file, ensure_ascii=False, indent=4)
+                        if resp.get("code") == 0:
+                            with open(self.record_path, "w", encoding="utf-8") as file:
+                                json.dump(resp, file, ensure_ascii=False, indent=4)
+                        else:
+                            logger.error(f"Failed to fetch cultivate data: {resp.get('message')}")
 
     def save_param(self, cred_resp):
         header["cred"] = cred_resp["cred"]

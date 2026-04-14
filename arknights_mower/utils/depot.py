@@ -18,7 +18,14 @@ def 读取仓库():
         创建json()
     with open(path, "r", encoding="utf-8") as f:
         depotinfo = json.load(f)
-    物品数量 = depotinfo["data"]["items"]
+    data = depotinfo.get("data", {})
+    # 兼容 SKLand API 的嵌套格式 (data -> inventory -> items) 以及本地创建的 dummy 格式 (data -> items)
+    物品数量 = data.get("items", [])
+    if not 物品数量 and "inventory" in data:
+        物品数量 = data.get("inventory", {}).get("items", [])
+    if not 物品数量 and "items" in depotinfo: # 容错
+        物品数量 = depotinfo.get("items", [])
+        
     新物品1 = {
         key_mapping[item["id"]][2]: int(item["count"])
         for item in 物品数量
