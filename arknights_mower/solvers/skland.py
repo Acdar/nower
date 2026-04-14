@@ -35,6 +35,7 @@ class SKLand:
         self.all_recorded_ef = True
 
     def start(self):
+
         for item in config.conf.skland_info:
             ak_recorded = self.has_record(item.account, self.record_path)
             ef_recorded = False
@@ -208,6 +209,7 @@ class SKLand:
     # 用于测试签到
     def test_sign(self):
         res = []
+
         try:
             for item in config.conf.skland_info:
                 if (not item.account or not item.password) and (
@@ -233,5 +235,6 @@ class SKLand:
             msg = "测试出错-{}".format(e)
             logger.exception(msg)
             res.append(msg)
-        res.append("未勾选有效的账号或勾选的账号今天已签到~")
+        res.append("勾选的账号今天均已签到~")
         return res
+
