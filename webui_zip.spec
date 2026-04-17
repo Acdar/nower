@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules
 
 import rapidocr_onnxruntime
 # tinify is optional in the build environment; import safely.
@@ -76,7 +77,7 @@ mower_a = Analysis(
         ("./ui/dist","./ui/dist"),
     ]
     + add_data,
-    hiddenimports=(["tinify"] if _tinify_installed else []),
+    hiddenimports=(["tinify"] if _tinify_installed else []) + collect_submodules("psutil"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

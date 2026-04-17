@@ -27,11 +27,9 @@ const enable_test = computed(() => {
 // 账号勾选时相当于全选
 const AllCheck = (item, status, game) => {
   if (game == 'arknights') {
-  if (game == 'arknights') {
     item.arknights_isCheck = status
     item.sign_in_official = status
     item.sign_in_bilibili = status
-  } else if (game == 'endfield') {
   } else if (game == 'endfield') {
     item.endfield_isCheck = status
     item.sign_in_endfield_official = status
@@ -44,6 +42,7 @@ const SyncStatus = (item, game) => {
     item.arknights_isCheck = item.sign_in_official || item.sign_in_bilibili
   } else if (game == 'endfield') {
     item.endfield_isCheck = item.sign_in_endfield_official || item.sign_in_endfield_bilibili
+  }
   if (game == 'arknights') {
     item.arknights_isCheck = item.sign_in_official || item.sign_in_bilibili
   } else if (game == 'endfield') {
