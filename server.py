@@ -549,6 +549,28 @@ def getwatermark():
     return __version__
 
 
+@app.route("/update-notice")
+@require_token
+def get_update_notice():
+    from arknights_mower.utils.update_notice import UpdateNoticeManager
+
+    return UpdateNoticeManager().get_notice()
+
+
+@app.route("/update-notice/ack", methods=["POST"])
+@require_token
+def ack_update_notice():
+    from arknights_mower.utils.update_notice import UpdateNoticeManager
+
+    version = str((request.json or {}).get("version", "")).strip()
+    if not version:
+        return {"ok": False, "message": "missing version"}, 400
+    try:
+        return UpdateNoticeManager().acknowledge(version)
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}, 400
+
+
 def str2date(target: str):
     try:
         return datetime.datetime.strptime(target, "%Y-%m-%d").date()
@@ -751,9 +773,9 @@ def test_serverJang_push():
 @app.route("/check-skland")
 @require_token
 def test_skland():
-    from arknights_mower.solvers.skland import SKLand
+    from arknights_mower.solvers.player_info import PlayerInfoClient
 
-    return SKLand().test_connect()
+    return PlayerInfoClient().probe_accounts()
 
 
 @app.route("/check-skland-sign")
@@ -946,7 +968,7 @@ def ws_chat(ws):
                 logger.debug(f"收到llm请求：{user_input}")
                 # 用流式生成器
                 for reply in ask_llm(
-                    user_input, context=context, api_key=config.conf.ai_key
+                    user_input, context=context, api_key=config.conf.resolved_ai_key
                 ):
                     ws.send(json.dumps({"reply": reply}))
                     last_reply = reply
