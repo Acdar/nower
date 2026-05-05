@@ -8,7 +8,7 @@ import requests
 from arknights_mower.utils import config
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.skland import (
-    get_binding_list,
+    get_ak_binding_list,
     get_sign_header,
     header,
     player_info_url,
@@ -109,7 +109,7 @@ class PlayerInfoClient:
     def _get_binding_list_with_retry(self, item):
         self._ensure_session(item)
         try:
-            bindings = get_binding_list(self.sign_token)
+            bindings = get_ak_binding_list(self.sign_token)
             if bindings:
                 return bindings
         except Exception as exc:
@@ -119,7 +119,7 @@ class PlayerInfoClient:
                 exc,
             )
         self._ensure_session(item, force_refresh=True)
-        return get_binding_list(self.sign_token)
+        return get_ak_binding_list(self.sign_token)
 
     @staticmethod
     def get_recover_time(resp: dict, max_ap: int = 180):
