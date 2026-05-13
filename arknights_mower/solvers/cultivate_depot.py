@@ -35,11 +35,9 @@ class cultivate:
                     headers=get_sign_header(ingame, "get", body, self.sign_token),
                     timeout=30,
                 ).json()
-                if resp.get("code") == 0:
-                    with open(self.record_path, "w", encoding="utf-8") as file:
-                        json.dump(resp, file, ensure_ascii=False, indent=4)
-                else:
-                    logger.error(f"Failed to fetch cultivate data: {resp.get('message')}")
+                self.record_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.record_path, "w", encoding="utf-8") as file:
+                    json.dump(resp, file, ensure_ascii=False, indent=4)
 
     def save_param(self, cred_resp):
         header["cred"] = cred_resp["cred"]

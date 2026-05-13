@@ -35,6 +35,10 @@ mimetypes.add_type("application/javascript", ".js")
 app = Flask(__name__, static_folder="ui/dist", static_url_path="")
 sock = Sock(app)
 CORS(app)
+
+tmp_dir = get_path("@app/tmp")
+tmp_dir.mkdir(parents=True, exist_ok=True)
+
 if token := config.conf.webview.token:
     app.token = token
 
@@ -149,9 +153,21 @@ def item_list():
 
 @app.route("/depot/readdepot")
 def read_depot():
+    from datetime import datetime as _dt
+
     from arknights_mower.utils import depot
 
-    return depot.读取仓库()
+    cultivate_ok = False
+    cultivate_msg = "未同步"
+    cultivate_json = get_path("@app/tmp/cultivate.json")
+    if os.path.exists(cultivate_json):
+        cultivate_ok = True
+        cultivate_msg = _dt.fromtimestamp(os.path.getmtime(cultivate_json)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+    data = depot.读取仓库()
+    return {"depot": data, "cultivate_ok": cultivate_ok, "cultivate_msg": cultivate_msg}
 
 
 @app.route("/status")
@@ -784,6 +800,463 @@ def test_skland_sign():
     from arknights_mower.solvers.skland import SKLand
 
     return SKLand().test_sign()
+
+
+@app.route("/mastery-recommendation-debug")
+def mastery_recommendation_debug():
+    import json
+    import os
+
+    from arknights_mower.utils.mastery_recommendation import (
+        _find_skill_data,
+        get_mastery_recommendations,
+    )
+    from arknights_mower.utils.path import _install_dir, _internal_dir, get_path
+
+    cultivate_path = get_path("@app/tmp/cultivate.json")
+    skill_data_path = _find_skill_data()
+
+    debug_info = {
+        "install_dir": str(_install_dir),
+        "internal_dir": str(_internal_dir),
+        "cultivate_path": str(cultivate_path),
+        "cultivate_exists": os.path.exists(cultivate_path),
+        "skill_data_path": str(skill_data_path),
+        "skill_data_exists": os.path.exists(skill_data_path),
+    }
+
+    if os.path.exists(cultivate_path):
+        try:
+            with open(cultivate_path, "r", encoding="utf-8") as f:
+                cultivate_data = json.load(f)
+            debug_info["cultivate_keys"] = list(cultivate_data.keys())
+            data = cultivate_data.get("data", {})
+            debug_info["data_keys"] = (
+                list(data.keys()) if isinstance(data, dict) else str(type(data))
+            )
+            chars = data.get("characters", []) if isinstance(data, dict) else []
+            items = data.get("items", []) if isinstance(data, dict) else []
+            debug_info["chars_count"] = (
+                len(chars) if isinstance(chars, list) else "not_list"
+            )
+            debug_info["items_count"] = (
+                len(items) if isinstance(items, list) else "not_list"
+            )
+            if isinstance(chars, list) and len(chars) > 0:
+                debug_info["first_char_keys"] = list(chars[0].keys())
+                debug_info["first_char"] = {
+                    k: chars[0][k]
+                    for k in [
+                        "id",
+                        "level",
+                        "evolvePhase",
+                        "mainSkillLevel",
+                        "potentialRank",
+                    ]
+                    if k in chars[0]
+                }
+                skills = chars[0].get("skills", [])
+                debug_info["first_char_skills_count"] = (
+                    len(skills) if isinstance(skills, list) else "not_list"
+                )
+        except Exception as e:
+            debug_info["cultivate_read_error"] = str(e)
+
+    if os.path.exists(skill_data_path):
+        try:
+            with open(skill_data_path, "r", encoding="utf-8") as f:
+                sd = json.load(f)
+            debug_info["skill_data_meta"] = sd.get("_meta", {})
+        except Exception as e:
+            debug_info["skill_data_read_error"] = str(e)
+
+    result = get_mastery_recommendations()
+    debug_info["result_error"] = result.get("error")
+    debug_info["result_has_data"] = result.get("has_data")
+    debug_info["result_ops_count"] = len(result.get("operators", []))
+
+    return debug_info
+
+
+@app.route("/mastery-recommendation")
+def mastery_recommendation():
+    from arknights_mower.utils.mastery_recommendation import get_mastery_recommendations
+
+    return get_mastery_recommendations()
+
+
+@app.route("/workshop-auto-config", methods=["POST"])
+def workshop_auto_config():
+    import json as _json
+    from collections import defaultdict
+
+    from arknights_mower.data import workshop_formula
+    from arknights_mower.utils.mastery_recommendation import (
+        _find_skill_data,
+        get_mastery_recommendations,
+    )
+
+    req = request.json or {}
+    planned_keys = req.get("planned_skills", [])
+    t5_operator = req.get("t5_operator", "年")
+    book_operator = req.get("book_operator", "司霆惊蛰")
+
+    skill_data_path = _find_skill_data()
+    with open(skill_data_path, "r", encoding="utf-8") as f:
+        skill_data = _json.load(f)
+    items = skill_data.get("items", {})
+    skill_data.get("composite", {})
+
+    def item_rarity(name):
+        for iid, info in items.items():
+            if info.get("name") == name:
+                return info.get("rarity", 0)
+        return 0
+
+    def decompose_to_t3(item_list):
+        result = defaultdict(int)
+        queue = [(name, cnt) for name, cnt in item_list]
+        while queue:
+            name, cnt = queue.pop(0)
+            r = item_rarity(name)
+            if r <= 3:
+                result[name] += cnt
+                continue
+            formula = workshop_formula.get(name)
+            if not formula or not formula.get("items"):
+                result[name] += cnt
+                continue
+            for child in formula["items"]:
+                queue.append((child, cnt))
+        return dict(result)
+
+    fodder_list = ["碳素", "碳素组", "家具零件_碳素组"]
+    fodder_items = [
+        {"item_names": [f], "children_lower_limit": 0, "self_upper_limit": 9999}
+        for f in fodder_list
+        if f in workshop_formula
+    ]
+
+    t4_names = {
+        n: e
+        for n, e in workshop_formula.items()
+        if e.get("tab") == "精英材料" and e.get("apCost") == 4.0
+    }
+    t5_names = {
+        n: e
+        for n, e in workshop_formula.items()
+        if e.get("tab") == "精英材料" and e.get("apCost") == 8.0
+    }
+
+    if not planned_keys:
+        default_t4 = [
+            {"item_names": [n], "children_lower_limit": 20, "self_upper_limit": 20}
+            for n in sorted(t4_names)
+        ]
+        default_t5 = [
+            {"item_names": [n], "children_lower_limit": 20, "self_upper_limit": 20}
+            for n in sorted(t5_names)
+        ]
+        default_book = [
+            {
+                "item_names": ["技巧概要·卷3"],
+                "children_lower_limit": 20,
+                "self_upper_limit": 20,
+            }
+        ]
+        return {
+            "workshop_settings": [
+                {
+                    "operator": "九色鹿",
+                    "enabled": True,
+                    "items": fodder_items + default_t4,
+                },
+                {"operator": t5_operator, "enabled": True, "items": default_t5},
+                {"operator": book_operator, "enabled": True, "items": default_book},
+            ],
+            "t3_summary": [],
+        }
+
+    result = get_mastery_recommendations()
+    operators = result.get("operators", [])
+
+    plan_set = set()
+    for key in planned_keys:
+        parts = key.rsplit("_", 1)
+        if len(parts) == 2:
+            try:
+                plan_set.add((parts[0], int(parts[1])))
+            except ValueError:
+                pass
+
+    # ── 步骤1：读取计划内所有需求材料 ──
+    raw_demand = defaultdict(int)
+    for op in operators:
+        for rec in op.get("recommendations", []):
+            if (op["char_id"], rec["skill_index"]) not in plan_set:
+                continue
+            for mat in rec.get("chain_needed_materials", []):
+                raw_demand[mat["name"]] += mat["count"]
+
+    # ── 步骤2,3：分类 T5/T4/T3 ──
+    demand_t5_raw = {n: c for n, c in raw_demand.items() if n in t5_names}
+    demand_t4_raw = {n: c for n, c in raw_demand.items() if n in t4_names}
+    demand_t3_plus = {
+        n: c for n, c in raw_demand.items() if n not in t4_names and n not in t5_names
+    }
+
+    # 加载仓库库存
+    cultivate_path = get_path("@app/tmp/cultivate.json")
+    inventory = defaultdict(int)
+    if os.path.exists(cultivate_path):
+        with open(cultivate_path, "r", encoding="utf-8") as f:
+            cdata = _json.load(f)
+        for item in cdata.get("data", {}).get("items", []):
+            cnt = int(item.get("count", 0))
+            if cnt > 0:
+                inventory[item.get("id", "")] = cnt
+
+    id_by_name = {}
+    for iid, info in items.items():
+        id_by_name[info.get("name", "")] = iid
+
+    def inv_of(name):
+        return inventory.get(id_by_name.get(name, ""), 0)
+
+    # ── 步骤4：T5 缺失 → 拆解为 T4 间接缺失 ──
+    t4_indirect = defaultdict(int)
+    for t5_name, t5_demand in demand_t5_raw.items():
+        t5_missing = max(0, t5_demand - inv_of(t5_name))
+        formula = t5_names.get(t5_name, {})
+        for child in formula.get("items", []):
+            if child in t4_names:
+                t4_indirect[child] += t5_missing
+
+    # ── 步骤5：T4 总缺失 → 拆解为 T3 间接缺失 ──
+    t4_total_demand = defaultdict(int)
+    for name in set(list(demand_t4_raw.keys()) + list(t4_indirect.keys())):
+        t4_total_demand[name] = demand_t4_raw.get(name, 0) + t4_indirect.get(name, 0)
+
+    t4_missing_all = {}
+    t4_missing_entries = []
+    for name, demand in t4_total_demand.items():
+        missing = max(0, demand - inv_of(name))
+        if missing > 0:
+            t4_missing_all[name] = missing
+            t4_missing_entries.append((name, missing))
+
+    t3_indirect = decompose_to_t3(t4_missing_entries) if t4_missing_entries else {}
+
+    # ── 步骤6：T3 总缺失 ──
+    t3_total_need = defaultdict(int)
+    for name, count in demand_t3_plus.items():
+        t3_total_need[name] += count
+    for name, count in t3_indirect.items():
+        t3_total_need[name] += count
+
+    t3_summary = []
+    for name, need in sorted(t3_total_need.items(), key=lambda x: -x[1]):
+        owned = inv_of(name)
+        shortage = max(0, need - owned)
+        if shortage > 0:
+            iid = id_by_name.get(name, name)
+            t3_summary.append(
+                {
+                    "id": iid,
+                    "name": name,
+                    "count": shortage,
+                    "total": need,
+                    "owned": owned,
+                }
+            )
+
+    # ── 排合成配方 ──
+    t5_items = []
+    for name, demand in sorted(demand_t5_raw.items()):
+        if demand > 0:
+            t5_items.append(
+                {
+                    "item_names": [name],
+                    "children_lower_limit": 0,
+                    "self_upper_limit": demand,
+                }
+            )
+
+    t4_items = []
+    for name, demand in sorted(demand_t4_raw.items()):
+        if demand > 0:
+            t4_items.append(
+                {
+                    "item_names": [name],
+                    "children_lower_limit": 0,
+                    "self_upper_limit": demand,
+                }
+            )
+
+    book_count = demand_t3_plus.get("技巧概要·卷3", 0)
+    book_items = (
+        [
+            {
+                "item_names": ["技巧概要·卷3"],
+                "children_lower_limit": 0,
+                "self_upper_limit": book_count,
+            }
+        ]
+        if book_count > 0
+        else []
+    )
+
+    return {
+        "workshop_settings": [
+            {"operator": "九色鹿", "enabled": True, "items": fodder_items + t4_items},
+            {"operator": t5_operator, "enabled": True, "items": t5_items},
+            {"operator": book_operator, "enabled": True, "items": book_items},
+        ],
+        "t3_summary": t3_summary,
+    }
+
+    result = get_mastery_recommendations()
+    operators = result.get("operators", [])
+
+    plan_set = set()
+    for key in planned_keys:
+        parts = key.rsplit("_", 1)
+        if len(parts) == 2:
+            try:
+                plan_set.add((parts[0], int(parts[1])))
+            except ValueError:
+                pass
+
+    direct_t4 = defaultdict(int)
+    direct_t5 = defaultdict(int)
+    direct_t3_plus = defaultdict(int)
+    for op in operators:
+        for rec in op.get("recommendations", []):
+            if (op["char_id"], rec["skill_index"]) not in plan_set:
+                continue
+            for mat in rec.get("chain_needed_materials", []):
+                name, count = mat["name"], mat["count"]
+                r = item_rarity(name)
+                if r == 5:
+                    direct_t5[name] += count
+                elif r == 4:
+                    direct_t4[name] += count
+                else:
+                    direct_t3_plus[name] += count
+
+    indirect_t4 = defaultdict(int)
+    for t5_name, t5_count in direct_t5.items():
+        formula = workshop_formula.get(t5_name, {})
+        for child in formula.get("items", []):
+            if item_rarity(child) == 4:
+                indirect_t4[child] += t5_count
+
+    total_t4 = defaultdict(int)
+    for name in set(list(direct_t4.keys()) + list(indirect_t4.keys())):
+        total_t4[name] = direct_t4.get(name, 0) + indirect_t4.get(name, 0)
+
+    cultivate_path = get_path("@app/tmp/cultivate.json")
+    inventory = defaultdict(int)
+    if os.path.exists(cultivate_path):
+        with open(cultivate_path, "r", encoding="utf-8") as f:
+            cdata = _json.load(f)
+        for item in cdata.get("data", {}).get("items", []):
+            cnt = int(item.get("count", 0))
+            if cnt > 0:
+                inventory[item.get("id", "")] = cnt
+
+    id_by_name = {}
+    for iid, info in items.items():
+        id_by_name[info.get("name", "")] = iid
+
+    t3_from_all_t4 = defaultdict(int)
+    for t4_name, t4_total in total_t4.items():
+        formula = workshop_formula.get(t4_name, {})
+        for child in formula.get("items", []):
+            t3_from_all_t4[child] += t4_total
+
+    total_t3_need = defaultdict(int)
+    for name, count in direct_t3_plus.items():
+        if item_rarity(name) <= 3:
+            total_t3_need[name] += count
+    for name, count in t3_from_all_t4.items():
+        total_t3_need[name] += count
+
+    t3_summary = []
+    for name, need in sorted(total_t3_need.items(), key=lambda x: -x[1]):
+        owned = inventory.get(id_by_name.get(name, ""), 0)
+        shortage = max(0, need - owned)
+        if shortage > 0:
+            iid = id_by_name.get(name, name)
+            t3_summary.append(
+                {
+                    "id": iid,
+                    "name": name,
+                    "count": shortage,
+                    "total": need,
+                    "owned": owned,
+                }
+            )
+
+    t4_items = [
+        {"item_names": [name], "children_lower_limit": 0, "self_upper_limit": count}
+        for name, count in sorted(total_t4.items())
+        if name not in t5_names
+    ]
+    t5_items = [
+        {"item_names": [name], "children_lower_limit": 0, "self_upper_limit": count}
+        for name, count in sorted(direct_t5.items())
+        if name in t5_names
+    ]
+
+    return {
+        "workshop_settings": [
+            {"operator": "九色鹿", "enabled": True, "items": fodder_items + t4_items},
+            {"operator": t5_operator, "enabled": True, "items": t5_items},
+        ],
+        "t3_summary": t3_summary,
+        "debug": {
+            "plan_count": len(plan_set),
+            "direct_t4": dict(direct_t4),
+            "direct_t5": dict(direct_t5),
+            "indirect_t4": dict(indirect_t4),
+            "total_t4": dict(total_t4),
+            "t4_item_count": len(t4_items),
+            "t5_item_count": len(t5_items),
+        },
+    }
+
+
+@app.route("/mastery-plan", methods=["GET", "POST"])
+def mastery_plan():
+    import json as _json
+
+    plan_path = get_path("@app/tmp/matery_plan.json")
+    if request.method == "GET":
+        if os.path.exists(plan_path):
+            try:
+                with open(plan_path, "r", encoding="utf-8") as f:
+                    return _json.load(f)
+            except Exception:
+                pass
+        return {}
+    else:
+        data = request.json or {}
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(plan_path, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False)
+        return {"success": True}
+
+
+@app.route("/cultivate-fetch")
+def cultivate_fetch():
+    from arknights_mower.solvers.cultivate_depot import cultivate
+
+    try:
+        cultivate().start()
+        return {"success": True, "message": "数据拉取成功"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 
 @app.route("/task", methods=["GET", "POST"])
