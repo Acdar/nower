@@ -1,3 +1,4 @@
+import atexit
 import copy
 import json
 import math
@@ -79,6 +80,18 @@ from arknights_mower.utils.trading_order import TradingOrder
 
 # 赤金交易订单干员常量
 TRADE_ORDER_AGENTS = ["但书", "龙舌兰", "佩佩", "可露希尔"]
+
+# 追踪 MAA 临时核心库文件，进程退出时自动清理
+_maa_temp_files = set()
+
+
+@atexit.register
+def _cleanup_maa_temp_files():
+    for f in list(_maa_temp_files):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
 
 
 class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
@@ -3682,7 +3695,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             # 复制新的临时 MAA 核心库以防占用报错和实现热重载
             temp_name = f"MaaCore_temp_{uuid.uuid4().hex[:8]}.dll" if sys.platform == "win32" else f"libMaaCore_temp_{uuid.uuid4().hex[:8]}.so"
             temp_path = os.path.join(path, temp_name)
-            
+            _maa_temp_files.add(temp_path)
+
             original_dll_loader = ctypes.WinDLL if sys.platform == "win32" else ctypes.CDLL
             try:
                 shutil.copyfile(os.path.join(path, core_name), temp_path)

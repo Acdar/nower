@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import atexit
 import datetime
 import json
 import mimetypes
@@ -45,6 +46,18 @@ if token := config.conf.webview.token:
 mower_thread = None
 log_lines = []
 ws_connections = []
+
+# 追踪 MAA 临时核心库文件，进程退出时自动清理
+_maa_temp_files = set()
+
+
+@atexit.register
+def _cleanup_maa_temp_files():
+    for f in list(_maa_temp_files):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
 
 
 def read_log():
@@ -460,7 +473,8 @@ def get_maa_adb_version():
             # 复制新的临时 MAA 核心库以防占用报错和实现热重载
             temp_name = f"MaaCore_temp_{uuid.uuid4().hex[:8]}.dll" if sys.platform == "win32" else f"libMaaCore_temp_{uuid.uuid4().hex[:8]}.so"
             temp_path = os.path.join(path, temp_name)
-            
+            _maa_temp_files.add(temp_path)
+
             original_dll_loader = ctypes.WinDLL if sys.platform == "win32" else ctypes.CDLL
             try:
                 shutil.copyfile(os.path.join(path, core_name), temp_path)
