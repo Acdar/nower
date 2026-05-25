@@ -336,7 +336,7 @@ const start_options = [
   bottom: 0;
   right: 5vw;
   margin: 2em 0;
-  height: 65vh;
+  height: 75vh;
   width: 90vw;
   content: '';
   opacity: v-bind(bg_opacity);

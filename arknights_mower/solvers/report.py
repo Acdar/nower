@@ -267,6 +267,13 @@ class ReportSolver(SceneGraphSolver):
             score = []
             for i in range(10):
                 im = noto_sans[i]
+                # 确保模板不大于待匹配图像，否则 matchTemplate 会断言失败
+                if im.shape[0] > digit.shape[0] or im.shape[1] > digit.shape[1]:
+                    im = cv2.resize(
+                        im,
+                        (digit.shape[1], digit.shape[0]),
+                        interpolation=cv2.INTER_AREA,
+                    )
                 result = cv2.matchTemplate(digit, im, cv2.TM_SQDIFF_NORMED)
                 min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
                 score.append(min_val)
