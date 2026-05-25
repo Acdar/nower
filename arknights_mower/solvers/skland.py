@@ -8,16 +8,16 @@ from arknights_mower.utils import config
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.skland import (
+    ak_sign_url,
+    ef_sign_url,
     get_ak_binding_list,
-    get_ef_binding_list,
     get_cred_by_token,
+    get_ef_binding_list,
     get_ef_sign_header,
     get_sign_header,
     header,
     header_login,
     log,
-    ak_sign_url,
-    ef_sign_url,
     token_password_url,
 )
 
@@ -39,19 +39,19 @@ class SKLand:
         for item in config.conf.skland_info:
             ak_recorded = self.has_record(item.account, self.record_path)
             ef_recorded = False
-            if hasattr(item, 'sign_in_endfield') and item.sign_in_endfield:
+            if hasattr(item, "sign_in_endfield") and item.sign_in_endfield:
                 ef_recorded = self.has_record(item.account, self.record_path_ef)
             else:
                 ef_recorded = True
 
             if ak_recorded and ef_recorded:
                 continue
-                
+
             self.all_recorded = self.all_recorded and ak_recorded
             self.all_recorded_ef = self.all_recorded_ef and ef_recorded
 
             self.save_param(get_cred_by_token(log(item)))
-            
+
             if not ak_recorded:
                 for i in get_ak_binding_list(self.sign_token):
                     body = {"gameId": 1, "uid": i.get("uid")}
@@ -74,17 +74,26 @@ class SKLand:
                         self.reward.append(
                             {
                                 "nickName": item.account,
-                                "reward": "{}×{}".format(res["name"], j.get("count") or 1),
+                                "reward": "{}×{}".format(
+                                    res["name"], j.get("count") or 1
+                                ),
                             }
                         )
                         logger.info(
                             f"{i.get('nickName')}获得了{res['name']}×{j.get('count') or 1}"
                         )
-                        
-            if hasattr(item, 'sign_in_endfield') and item.sign_in_endfield and not ef_recorded:
+
+            if (
+                hasattr(item, "sign_in_endfield")
+                and item.sign_in_endfield
+                and not ef_recorded
+            ):
                 for i in get_ef_binding_list(self.sign_token):
-                    role = i.get('defaultRole') or (i.get('roles') and i['roles'][0])
-                    body = {"gameId": 3, "sk-game-role": f"3_{role['roleId']}_{role['serverId']}"}
+                    role = i.get("defaultRole") or (i.get("roles") and i["roles"][0])
+                    body = {
+                        "gameId": 3,
+                        "sk-game-role": f"3_{role['roleId']}_{role['serverId']}",
+                    }
                     resp = requests.post(
                         ef_sign_url,
                         headers=get_ef_sign_header(
@@ -99,17 +108,15 @@ class SKLand:
                         logger.info(f"{role.get('nickName')}：{resp.get('message')}")
                         continue
                     awards_result = []
-                    result_data: dict = resp['data']
-                    result_info_map: dict = result_data['resourceInfoMap']
-                    for a in result_data['awardIds']:
-                        award_id = a['id']
+                    result_data: dict = resp["data"]
+                    result_info_map: dict = result_data["resourceInfoMap"]
+                    for a in result_data["awardIds"]:
+                        award_id = a["id"]
                         awards = result_info_map[award_id]
-                        award_name = awards['name']
-                        award_count = awards['count']
-                        awards_result.append(f'{award_name}×{award_count}')
-                    logger.info(
-                        f"{role.get('nickName')}获得了{awards_result}"
-                    )
+                        award_name = awards["name"]
+                        award_count = awards["count"]
+                        awards_result.append(f"{award_name}×{award_count}")
+                    logger.info(f"{role.get('nickName')}获得了{awards_result}")
         if len(self.reward) > 0 or len(self.reward_ef) > 0:
             return self.record_log()
         if self.all_recorded and self.all_recorded_ef:
@@ -138,7 +145,9 @@ class SKLand:
             try:
                 for item in self.reward:
                     res_df = pd.DataFrame(item, index=[date_str])
-                    res_df.to_csv(self.record_path, mode="a", header=False, encoding="gbk")
+                    res_df.to_csv(
+                        self.record_path, mode="a", header=False, encoding="gbk"
+                    )
             except Exception as e:
                 logger.exception(e)
 
@@ -147,10 +156,12 @@ class SKLand:
             try:
                 for item in self.reward_ef:
                     res_df = pd.DataFrame(item, index=[date_str])
-                    res_df.to_csv(self.record_path_ef, mode="a", header=False, encoding="gbk")
+                    res_df.to_csv(
+                        self.record_path_ef, mode="a", header=False, encoding="gbk"
+                    )
             except Exception as e:
                 logger.exception(e)
-                
+
         return True
 
     def has_record(self, phone: str, path: str):
@@ -158,9 +169,7 @@ class SKLand:
             if os.path.exists(path) is False:
                 logger.debug(f"无森空岛记录 {path}")
                 return False
-            df = pd.read_csv(
-                path, header=None, encoding="gbk", on_bad_lines="skip"
-            )
+            df = pd.read_csv(path, header=None, encoding="gbk", on_bad_lines="skip")
 
             sign_arknights_official = False
             sign_arknights_bilbili = False
@@ -192,12 +201,13 @@ class SKLand:
                                     i["nickName"] + "({})".format(i["channelName"])
                                 )
                             )
-                    if hasattr(item, 'sign_in_endfield') and item.sign_in_endfield:
+                    if hasattr(item, "sign_in_endfield") and item.sign_in_endfield:
                         for ef in get_ef_binding_list(self.sign_token):
                             if ef["uid"]:
                                 res.append(
                                     "{}终末地连接成功".format(
-                                        ef['defaultRole']["nickname"] + "({})".format(ef["channelName"])
+                                        ef["defaultRole"]["nickname"]
+                                        + "({})".format(ef["channelName"])
                                     )
                                 )
                 except Exception as e:
@@ -237,4 +247,3 @@ class SKLand:
             res.append(msg)
         res.append("勾选的账号今天均已签到~")
         return res
-

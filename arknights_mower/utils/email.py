@@ -10,21 +10,16 @@ from time import sleep
 from typing import Literal, Optional
 
 import cv2
+import requests
+import tinify
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-from arknights_mower.utils import config
-from arknights_mower.utils import typealias as tp
-from arknights_mower.utils.log import logger
+from markdownify import markdownify as md
 
 from arknights_mower.utils import config
 from arknights_mower.utils import typealias as tp
 from arknights_mower.utils.image import img2bytes
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
-
-from markdownify import markdownify as md
-import requests
-import tinify
 
 tinify.key = "7mPMFzdQw7CNNwv51QCc4QdgrgYHvb7h"
 template_dir = get_path("@internal/arknights_mower/templates")
@@ -88,7 +83,9 @@ class Email:
         conf = config.conf
         if conf.mail_enable:
             s.login(conf.account, conf.pass_code)
-            recipient = (conf.recipient or [conf.account]) if not recipient else recipient
+            recipient = (
+                (conf.recipient or [conf.account]) if not recipient else recipient
+            )
             s.send_message(self.msg, conf.account, recipient)
             s.quit()
 
@@ -119,6 +116,7 @@ def send_message(
     if conf.mail_enable:
         email = Email(body, subject, attach_image)
     if conf.server_push_enable:
+
         def send_pushdeer_sync():
             send_key = conf.sendKey
             url = f"https://sft.acdar.dev/message/push?pushkey={send_key}"
@@ -126,15 +124,15 @@ def send_message(
             if attach_image is not None:
                 image_url = upload_message(attach_image)
                 if image_url:
-                    push_body += f'\n\n![Image]({image_url})'
+                    push_body += f"\n\n![Image]({image_url})"
 
             try:
                 response = requests.post(
                     url,
                     json={
-                        "text": subject, 
+                        "text": subject,
                         "desp": push_body,
-                    }
+                    },
                 ).json()
                 if response["code"] != 0:
                     logger.error(f"pushdeer通知发送失败：{response['message']}")
@@ -143,6 +141,7 @@ def send_message(
 
         Thread(target=send_pushdeer_sync).start()
     if email:
+
         def send_message_sync(email):
             for i in range(3):
                 try:
@@ -154,17 +153,16 @@ def send_message(
 
         Thread(target=send_message_sync, args=(email,)).start()
 
+
 def upload_message(image):
     try:
         # 将图像转换为字节格式
-        _, image_buffer = cv2.imencode('.png', cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        _, image_buffer = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
         compressed_image = tinify.from_buffer(image_buffer.tobytes()).to_buffer()
         # 上传到服务器
-        files = {
-            'file': ('image.png', compressed_image, 'image/png')
-        }
+        files = {"file": ("image.png", compressed_image, "image/png")}
         response = requests.post("https://photo.acdar.dev/upload", files=files)
         if response.status_code == 200:
-            return "https://photo.acdar.dev"+response.json()[0]["src"]
+            return "https://photo.acdar.dev" + response.json()[0]["src"]
     except Exception as e:
-            logger.exception("图片上传失败" + str(e))
+        logger.exception("图片上传失败" + str(e))

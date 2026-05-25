@@ -1,7 +1,7 @@
 import lzma
 import pickle
-from itertools import combinations
 import random
+from itertools import combinations
 
 import cv2
 import numpy as np
@@ -223,7 +223,9 @@ class RecruitSolver(SceneGraphSolver):
                     tag_all_choose = True
                     for x in choose:
                         h, w, _ = tag_template[x].shape
-                        tag_img = cropimg(self.recog.img, [tags[x], va(tags[x], (w, h))])
+                        tag_img = cropimg(
+                            self.recog.img, [tags[x], va(tags[x], (w, h))]
+                        )
 
                         if self.tag_not_choosed(tag_img):
                             tag_all_choose = False
@@ -396,8 +398,12 @@ class RecruitSolver(SceneGraphSolver):
             return
 
         # 对于三星结果，默认不选可能导致循环无法前进；改为从已识别的候选标签中随机选择一个以避免卡住
-        candidate_tags = list(recruit_cal_result[-1]["tag"]) if recruit_cal_result else []
-        available_tags = [t for t in candidate_tags if t in self.tags.get(self.recruit_index, {})]
+        candidate_tags = (
+            list(recruit_cal_result[-1]["tag"]) if recruit_cal_result else []
+        )
+        available_tags = [
+            t for t in candidate_tags if t in self.tags.get(self.recruit_index, {})
+        ]
         if available_tags:
             chosen_tag = random.choice(available_tags)
             chosen_tags = [chosen_tag]

@@ -3,7 +3,6 @@ import json
 import requests
 
 from arknights_mower.utils import config
-from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.skland import (
     get_ak_binding_list,

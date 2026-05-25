@@ -91,13 +91,17 @@ class NewsChecker:
 
                     # 安全检查：确保 hour 在有效范围内
                     if not (0 <= start_h <= 23 and 0 <= end_h <= 23):
-                        logger.debug(f"无效的维护时间: start_h={start_h}, end_h={end_h}, 跳过")
+                        logger.debug(
+                            f"无效的维护时间: start_h={start_h}, end_h={end_h}, 跳过"
+                        )
                         continue
 
                     start_dt = datetime(
                         year, month, day, start_h, start_m, tzinfo=news_tz
                     )
-                    end_dt = datetime(year, month, end_day, end_h, end_m, tzinfo=news_tz)
+                    end_dt = datetime(
+                        year, month, end_day, end_h, end_m, tzinfo=news_tz
+                    )
                     start_dt_local = start_dt.astimezone(local_tz).replace(tzinfo=None)
                     end_dt_local = end_dt.astimezone(local_tz).replace(tzinfo=None)
 

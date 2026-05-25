@@ -96,7 +96,9 @@ class MuMu12IPC:
     def __init__(self, device):
         self.device = device
         # Normalize emulator folder from config (compatible with your project layout)
-        sim_folder_from_config = os.path.normpath(config.conf.simulator.simulator_folder)
+        sim_folder_from_config = os.path.normpath(
+            config.conf.simulator.simulator_folder
+        )
         self.manager_path = os.path.join(sim_folder_from_config, "MuMuManager.exe")
         self._emu_root = os.path.dirname(sim_folder_from_config)
 
@@ -210,26 +212,25 @@ class MuMu12IPC:
         ]
         self._dll.nemu_input_event_key_up.restype = ctypes.c_int
 
-
     def _manager_json(self, subcmd: str) -> dict:
-        """ 封装执行 MuMuManager.exe 命令的通用逻辑 """
+        """封装执行 MuMuManager.exe 命令的通用逻辑"""
         cmd = [self._manager, subcmd, "-v", str(self._index), "-a"]
-        
+
         # 为 Windows 设置 creationflags 以隐藏窗口
         creation_flags = 0
         if sys.platform == "win32":
             creation_flags = subprocess.CREATE_NO_WINDOW
-        
+
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 check=True,
-                encoding='utf-8', # 明确指定编码
-                creationflags=creation_flags
+                encoding="utf-8",  # 明确指定编码
+                creationflags=creation_flags,
             )
-            
+
             # 优先使用 stdout，如果为空则尝试 stderr
             output = result.stdout.strip()
             if not output and result.stderr:
@@ -239,21 +240,33 @@ class MuMu12IPC:
             if not output:
                 # 命令成功执行但没有输出
                 logger.warning(f"命令 {' '.join(cmd)} 成功执行，但没有输出。")
-                return {} # 返回一个空字典以避免后续错误
-            
+                return {}  # 返回一个空字典以避免后续错误
+
             return json.loads(output)
-        
+
         except subprocess.CalledProcessError as e:
             # 安全地获取错误信息，处理 stdout/stderr 可能为 None 的情况
             error_output = e.stderr if e.stderr else e.stdout
-            error_message = error_output.strip() if error_output else "[命令执行失败，且没有任何输出]"
-        
-            logger.error(f"执行 MuMuManager 命令失败，返回码: {e.returncode}，错误: {error_message}")
+            error_message = (
+                error_output.strip()
+                if error_output
+                else "[命令执行失败，且没有任何输出]"
+            )
+
+            logger.error(
+                f"执行 MuMuManager 命令失败，返回码: {e.returncode}，错误: {error_message}"
+            )
             raise
         except json.JSONDecodeError as e:
             # 输出不是有效的 JSON
-            raw_output = result.stdout.strip() if 'result' in locals() and result.stdout else "N/A"
-            logger.error(f"解析 MuMuManager 的 JSON 输出失败: {e}。原始输出: {raw_output}")
+            raw_output = (
+                result.stdout.strip()
+                if "result" in locals() and result.stdout
+                else "N/A"
+            )
+            logger.error(
+                f"解析 MuMuManager 的 JSON 输出失败: {e}。原始输出: {raw_output}"
+            )
             raise
         except FileNotFoundError:
             logger.error(f"无法找到 MuMuManager.exe，请检查路径: {self._manager}")
@@ -331,11 +344,15 @@ class MuMu12IPC:
                 return  # 成功获取，退出函数
 
             # 如果获取失败，记录返回码并等待后重试
-            logger.debug(f"获取 Display ID 失败 (返回码: {self._display_id})，将在 1 秒后重试...")
+            logger.debug(
+                f"获取 Display ID 失败 (返回码: {self._display_id})，将在 1 秒后重试..."
+            )
             time.sleep(1)
 
         # 如果循环结束（超时），仍未获取成功，则抛出最终的异常
-        logger.error(f"在 {timeout_seconds} 秒内未能获取到 Display ID，应用可能未能正常启动或置于前台。")
+        logger.error(
+            f"在 {timeout_seconds} 秒内未能获取到 Display ID，应用可能未能正常启动或置于前台。"
+        )
         raise RuntimeError("获取Display ID失败")
 
     @retry_wrapper(3)  # type: ignore

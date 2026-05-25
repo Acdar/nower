@@ -8,8 +8,6 @@ from pyzbar import pyzbar
 from qrcode.constants import ERROR_CORRECT_L
 from qrcode.main import QRCode
 
-from arknights_mower.utils.log import logger
-
 QRCODE_SIZE = 215
 GAP_SIZE = 16
 BLACK = (0, 0, 0)

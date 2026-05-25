@@ -23,9 +23,9 @@ def 读取仓库():
     物品数量 = data.get("items", [])
     if not 物品数量 and "inventory" in data:
         物品数量 = data.get("inventory", {}).get("items", [])
-    if not 物品数量 and "items" in depotinfo: # 容错
+    if not 物品数量 and "items" in depotinfo:  # 容错
         物品数量 = depotinfo.get("items", [])
-        
+
     新物品1 = {
         key_mapping[item["id"]][2]: int(item["count"])
         for item in 物品数量

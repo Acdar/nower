@@ -82,6 +82,7 @@ def get_sign_header(url: str, method, body, sign_token, old_header=header):
         h[i] = header_ca[i]
     return h
 
+
 def get_ef_sign_header(url: str, method, body, sign_token, old_header=header):
     h = json.loads(json.dumps(old_header))
     p = parse.urlparse(url)
@@ -91,13 +92,13 @@ def get_ef_sign_header(url: str, method, body, sign_token, old_header=header):
         h["sign"], header_ca = generate_signature(sign_token, p.path, json.dumps(body))
     for i in header_ca:
         h[i] = header_ca[i]
-    
+
     # 按照需求补充新的 Header 字段
-    h['Content-Type'] = 'application/json'
+    h["Content-Type"] = "application/json"
     # role_str 可以直接从 body 中提取，因为 solvers/skland.py 已经在 body 传入了 sk-game-role
-    if isinstance(body, dict) and 'sk-game-role' in body:
-        h['sk-game-role'] = body['sk-game-role']
-        
+    if isinstance(body, dict) and "sk-game-role" in body:
+        h["sk-game-role"] = body["sk-game-role"]
+
     return h
 
 
@@ -157,6 +158,7 @@ def get_ak_binding_list(sign_token):
         v.extend(i.get("bindingList"))
     return v
 
+
 def get_ef_binding_list(sign_token):
     v = []
     resp = requests.get(
@@ -179,6 +181,7 @@ def get_ef_binding_list(sign_token):
             continue
         v.append(i.get("bindingList")[0])
     return v
+
 
 def get_cred_by_token(token):
     return get_cred(get_grant_code(token))

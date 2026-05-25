@@ -7,7 +7,6 @@ import os
 import pathlib
 import sys
 import time
-from copy import deepcopy
 from functools import wraps
 from io import BytesIO
 from threading import Thread
@@ -454,16 +453,21 @@ def get_maa_adb_version():
         patched = False
         original_dll_loader = None
         try:
-            from asst.asst import Asst
             import ctypes
+            import glob
             import shutil
             import uuid
-            import glob
+
+            from asst.asst import Asst
 
             # 清理旧的临时 MAA 核心库
             path = config.conf.maa_path
             core_name = "MaaCore.dll" if sys.platform == "win32" else "libMaaCore.so"
-            temp_pattern = "MaaCore_temp_*.dll" if sys.platform == "win32" else "libMaaCore_temp_*.so"
+            temp_pattern = (
+                "MaaCore_temp_*.dll"
+                if sys.platform == "win32"
+                else "libMaaCore_temp_*.so"
+            )
             for old_temp in glob.glob(os.path.join(path, temp_pattern)):
                 try:
                     os.remove(old_temp)
@@ -471,17 +475,25 @@ def get_maa_adb_version():
                     pass
 
             # 复制新的临时 MAA 核心库以防占用报错和实现热重载
-            temp_name = f"MaaCore_temp_{uuid.uuid4().hex[:8]}.dll" if sys.platform == "win32" else f"libMaaCore_temp_{uuid.uuid4().hex[:8]}.so"
+            temp_name = (
+                f"MaaCore_temp_{uuid.uuid4().hex[:8]}.dll"
+                if sys.platform == "win32"
+                else f"libMaaCore_temp_{uuid.uuid4().hex[:8]}.so"
+            )
             temp_path = os.path.join(path, temp_name)
             _maa_temp_files.add(temp_path)
 
-            original_dll_loader = ctypes.WinDLL if sys.platform == "win32" else ctypes.CDLL
+            original_dll_loader = (
+                ctypes.WinDLL if sys.platform == "win32" else ctypes.CDLL
+            )
             try:
                 shutil.copyfile(os.path.join(path, core_name), temp_path)
+
                 def mock_dll_loader(name, *args, **kwargs):
                     if core_name in str(name):
                         return original_dll_loader(temp_path, *args, **kwargs)
                     return original_dll_loader(name, *args, **kwargs)
+
                 if sys.platform == "win32":
                     ctypes.WinDLL = mock_dll_loader
                 else:
@@ -497,6 +509,7 @@ def get_maa_adb_version():
         finally:
             if patched and original_dll_loader:
                 import ctypes
+
                 if sys.platform == "win32":
                     ctypes.WinDLL = original_dll_loader
                 else:
