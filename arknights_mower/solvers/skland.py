@@ -171,11 +171,6 @@ class SKLand:
                 return False
             df = pd.read_csv(path, header=None, encoding="gbk", on_bad_lines="skip")
 
-            sign_arknights_official = False
-            sign_arknights_bilbili = False
-            sign_endfield_official = False
-            sign_endfield_bilibili = False
-
             for item in df.iloc:
                 if item[0] == datetime.datetime.now().strftime("%Y/%m/%d"):
                     if item[1].astype(str) == phone:

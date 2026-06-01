@@ -1,26 +1,25 @@
-
 import sys
 
 from arknights_mower.utils import path
 
 if len(sys.argv) == 2:
-        path.global_space = sys.argv[1]
+    path.global_space = sys.argv[1]
 
-from arknights_mower.utils import config
+from arknights_mower.utils import config  # noqa: E402
 
 conf = config.conf
 tray = conf.webview.tray
 token = conf.webview.token
 host = "0.0.0.0" if token else "127.0.0.1"
 
-from arknights_mower.utils.email import send_message
+from arknights_mower.utils.email import send_message  # noqa: E402
 
 send_message(
-                "textarknights-mower推送测试",
-                "基建报告",
-                "INFO",
-                None,
-            )
+    "textarknights-mower推送测试",
+    "基建报告",
+    "INFO",
+    None,
+)
 # response = requests.get(
 #             "http://sft.acdar.dev/message/push?pushkey=PDU1TAn8qbi7q3bEKnylNp0cFPPWhmBB9BwbN",
 #             params={
