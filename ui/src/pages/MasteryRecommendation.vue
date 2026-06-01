@@ -21,6 +21,8 @@
           <template #icon><n-icon :component="HammerIcon" /></template>
           自动合成配置
         </n-button>
+        <n-button size="small" @click="savePreset">保存合成配置</n-button>
+        <n-button size="small" @click="restorePreset">还原合成配置</n-button>
         <n-select
           v-model:value="t5Operator"
           :options="operatorOptions"
@@ -361,6 +363,18 @@
             <n-checkbox v-model:checked="routeSettings[prof].optimal">最优协助干员</n-checkbox>
             <n-checkbox v-model:checked="routeSettings[prof].half_off">有减半加成</n-checkbox>
           </div>
+          <n-divider />
+          <n-text depth="2">中枢干员加成</n-text>
+          <n-radio-group v-model:value="controlCenter" style="margin-top: 4px">
+            <n-space vertical>
+              <n-radio v-for="opt in controlCenterOptions" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </n-radio>
+            </n-space>
+          </n-radio-group>
+          <n-text v-if="controlCenterBonus > 0" depth="2" style="font-size: 12px; margin-top: 4px">
+            中枢加成: +{{ controlCenterBonus }}%
+          </n-text>
         </n-tab-pane>
       </n-tabs>
       <template #footer>
@@ -461,6 +475,8 @@ import {
   NText,
   NThing,
   NDynamicInput,
+  NRadio,
+  NRadioGroup,
   useMessage
 } from 'naive-ui'
 import { Settings, List } from '@vicons/carbon'
@@ -598,6 +614,33 @@ const filteredPlanOperators = computed(() => {
   return list
 })
 
+async function savePreset() {
+  try {
+    await axios.post(
+      `${import.meta.env.VITE_HTTP_URL}/workshop-preset`,
+      configStore.workshop_settings
+    )
+    message.success('当前合成配置已保存为默认')
+  } catch (e) {
+    message.error('保存失败: ' + e.message)
+  }
+}
+async function restorePreset() {
+  try {
+    const r = await axios.get(`${import.meta.env.VITE_HTTP_URL}/workshop-preset`)
+    if (r.data && r.data.length) {
+      configStore.workshop_settings = r.data
+      await new Promise((res) => setTimeout(res, 100))
+      await axios.post(`${import.meta.env.VITE_HTTP_URL}/conf`, configStore.build_config())
+      message.success('合成配置已还原')
+    } else {
+      message.warning('暂无已保存的合成配置')
+    }
+  } catch (e) {
+    message.error('还原失败: ' + e.message)
+  }
+}
+
 async function autoWorkshop() {
   workshopLoading.value = true
   try {
@@ -683,120 +726,78 @@ const level_list = [
   { value: 2, label: '专二' },
   { value: 3, label: '专三' }
 ]
+const controlCenterOptions = [
+  { label: '无加成', value: 'none' },
+  { label: '阿斯卡纶 (+5%)', value: 'ascalon' },
+  { label: '烛煌 (+5%)', value: 'zhuhuang' },
+  { label: '斩业星熊 (+5%)', value: 'star_bear' }
+]
+const controlCenter = ref('none')
+const controlCenterBonus = computed(() => (controlCenter.value === 'none' ? 0 : 5))
 
-const t60 = {
-  先锋: { name: '嵯峨', speed: 60 },
-  近卫: { name: '史尔特尔', speed: 60 },
-  重装: { name: '星熊', speed: 60 },
-  狙击: { name: '黑', speed: 60 },
-  术师: { name: '卡涅利安', speed: 60 },
-  医疗: { name: '阿', speed: 60 },
-  辅助: { name: '铃兰', speed: 60 },
-  特种: { name: '傀影', speed: 60 }
-}
-const t1 = {
-  先锋: { name: '夜半', speed: 75 },
-  近卫: { name: '赤冬', speed: 75 },
-  重装: { name: '极光', speed: 75 },
-  狙击: { name: '假日威龙陈', speed: 95 },
-  术师: { name: '特米米', speed: 75 },
-  医疗: { name: '阿', speed: 60 },
-  辅助: { name: '铃兰', speed: 60 },
-  特种: { name: '罗宾', speed: 75 }
-}
-const t2 = {
-  先锋: { name: '缄默德克萨斯', speed: 80 },
-  近卫: { name: '燧石', speed: 75 },
-  重装: { name: '暴雨', speed: 75 },
-  狙击: { name: '埃拉托', speed: 75 },
-  术师: { name: '薄绿', speed: 75 },
-  医疗: { name: '濯尘芙蓉', speed: 75 },
-  辅助: { name: '铃兰', speed: 60 },
-  特种: { name: '缄默德克萨斯', speed: 80 }
-}
-const t3 = {
-  先锋: { name: '嵯峨', speed: 60 },
-  近卫: { name: '百炼嘉维尔', speed: 95 },
-  重装: { name: '星熊', speed: 60 },
-  狙击: { name: 'W', speed: 95 },
-  术师: { name: '死芒', speed: 95 },
-  医疗: { name: '阿', speed: 60 },
-  辅助: { name: '浊心斯卡蒂', speed: 95 },
-  特种: { name: '归溟幽灵鲨', speed: 95 }
-}
+const defaultsCache = ref(null)
 
-const defaultRoute = (p) => ({
-  supports: [
-    {
-      name: t1[p].name,
-      skill_level: 1,
-      efficiency: t1[p].speed,
-      swap: true,
-      swap_name: ['近卫', '狙击'].includes(p) ? '艾丽妮' : '逻各斯',
-      match: ['近卫', '狙击', '术师', '辅助'].includes(p)
-    },
-    {
-      name: t2[p].name,
-      skill_level: 2,
-      efficiency: t2[p].speed,
-      swap: true,
-      swap_name: ['近卫', '狙击'].includes(p) ? '艾丽妮' : '逻各斯',
-      match: ['近卫', '狙击', '术师', '辅助'].includes(p)
-    },
-    {
-      name: t3[p].name,
-      skill_level: 3,
-      efficiency: t3[p].speed,
-      swap: true,
-      swap_name: ['近卫', '狙击'].includes(p) ? '艾丽妮' : '逻各斯',
-      match: ['近卫', '狙击', '术师', '辅助'].includes(p)
-    }
-  ],
-  optimal: false,
-  half_off: true
-})
-const copyR = (r) => ({
-  supports: r.supports.map((s) => ({ ...s })),
-  optimal: r.optimal,
-  half_off: r.half_off
-})
-const routeSettings = reactive(Object.fromEntries(profKeys.map((p) => [p, copyR(defaultRoute(p))])))
+const routeSettings = reactive(
+  Object.fromEntries(profKeys.map((p) => [p, { supports: [], half_off: true }]))
+)
 
 function newSupport(p) {
   const n = routeSettings[p].supports.length
   if (n >= 3) return null
-  const i = n + 1,
-    opt = routeSettings[p].optimal
-  const s = opt ? (i === 1 ? t1[p] : i === 2 ? t2[p] : t3[p]) : i === 3 ? t3[p] : t60[p]
-  return {
-    name: s.name,
-    skill_level: i,
-    efficiency: s.speed,
-    swap: true,
-    swap_name: ['近卫', '狙击'].includes(p) ? '艾丽妮' : '逻各斯',
-    match: ['近卫', '狙击', '术师', '辅助'].includes(p)
+  const i = n + 1
+  const def = defaultsCache.value
+  if (!def) return null
+  if (!routeSettings[p].optimal) {
+    const backups = def._backups || {}
+    const name = backups[p] || ''
+    if (!name) return null
+    return { name, skill_level: i, efficiency: 60, swap: true, swap_name: name, match: false }
   }
+  const ref = def[p]?.supports?.find((s) => s.skill_level === i)
+  if (!ref) return null
+  return { ...ref, swap: true }
 }
 
-function loadRoute() {
-  try {
-    const d = JSON.parse(localStorage.getItem(ROUTE_KEY) || '{}')
-    for (const p of profKeys) {
-      if (d[p]) {
-        routeSettings[p].supports = d[p].supports || routeSettings[p].supports
-        routeSettings[p].optimal = !!d[p].optimal
-        routeSettings[p].half_off = d[p].half_off !== undefined ? d[p].half_off : true
-      }
+function applyRoute(d) {
+  for (const p of profKeys) {
+    if (d[p]) {
+      routeSettings[p].supports = d[p].supports || routeSettings[p].supports
+      routeSettings[p].optimal = !!d[p].optimal
+      routeSettings[p].half_off = d[p].half_off !== undefined ? d[p].half_off : true
     }
+  }
+  if (d.controlCenter) controlCenter.value = d.controlCenter
+}
+
+async function loadRoute() {
+  try {
+    const local = JSON.parse(localStorage.getItem(ROUTE_KEY) || '{}')
+    applyRoute(local)
+  } catch {}
+  try {
+    const r = await axios.get(`${import.meta.env.VITE_HTTP_URL}/mastery-route`)
+    const data = r.data || {}
+    defaultsCache.value = data
+    applyRoute(data)
   } catch {}
 }
 function saveRoute() {
-  localStorage.setItem(ROUTE_KEY, JSON.stringify(routeSettings))
+  const toSave = { ...routeSettings, controlCenter: controlCenter.value }
+  localStorage.setItem(ROUTE_KEY, JSON.stringify(toSave))
+  axios.post(`${import.meta.env.VITE_HTTP_URL}/mastery-route`, toSave).catch(() => {})
   message.success('已保存')
   showSettings.value = false
 }
 function resetRoute() {
-  for (const p of profKeys) Object.assign(routeSettings[p], copyR(defaultRoute(p)))
+  const def = defaultsCache.value
+  if (!def) return
+  for (const p of profKeys) {
+    if (def[p]?.supports) {
+      routeSettings[p].supports = def[p].supports.map((s) => ({ ...s }))
+      routeSettings[p].half_off = def[p].half_off !== undefined ? def[p].half_off : true
+      routeSettings[p].optimal = !!def[p].optimal
+    }
+  }
   message.info('已恢复默认')
 }
 
@@ -829,7 +830,31 @@ function visibleRecs(op) {
   return op.recommendations
 }
 
-const plannedT3Summary = computed(() => workshopT3Summary.value)
+const plannedT3Summary = ref([])
+
+async function refreshT3Summary() {
+  const keys = Object.keys(plan.value).filter((k) => plan.value[k])
+  if (!keys.length) {
+    plannedT3Summary.value = []
+    return
+  }
+  try {
+    const r = await axios.post(`${import.meta.env.VITE_HTTP_URL}/mastery-t3-summary`, {
+      planned_skills: keys
+    })
+    plannedT3Summary.value = r.data?.t3_summary || []
+  } catch {
+    plannedT3Summary.value = []
+  }
+}
+
+watch(
+  plan,
+  () => {
+    if (store.recommendations.length) refreshT3Summary()
+  },
+  { deep: true }
+)
 
 // ─── 工具函数 ───
 function chainHas(rec, matId) {
@@ -866,13 +891,14 @@ function buildSupports(op) {
   const p = profMap[op.profession] || '近卫'
   const s = routeSettings[p]
   if (!s?.supports?.length) return []
+  const bonus = controlCenterBonus.value
   return s.supports.map((sup) => ({
     name: sup.name,
     swap_name: sup.swap ? sup.swap_name || sup.name : sup.name,
     skill_level: sup.skill_level,
-    efficiency: sup.efficiency || 45,
+    efficiency: Math.min(100, (sup.efficiency || 45) + bonus),
     match: sup.swap ? !!sup.match : false,
-    half_off: sup.skill_level === 1 ? s.half_off : false
+    half_off: s.half_off
   }))
 }
 
@@ -936,6 +962,7 @@ onMounted(async () => {
     profession: op.profession,
     recommendations: op.recommendations
   }))
+  await refreshT3Summary()
 })
 
 async function loadOperators() {

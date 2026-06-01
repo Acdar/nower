@@ -16,6 +16,21 @@ def _find_skill_data():
     return candidates[0]
 
 
+_skill_data_cache = None
+
+
+def get_skill_data():
+    global _skill_data_cache
+    if _skill_data_cache is None:
+        path = _find_skill_data()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                _skill_data_cache = json.load(f)
+        else:
+            _skill_data_cache = {}
+    return _skill_data_cache
+
+
 def _decompose_to_t3(materials, composite, item_table, inventory):
     """将 T4/T5 材料拆解为 T3 级别材料，并与仓库库存对比"""
     raw = {}
@@ -23,6 +38,12 @@ def _decompose_to_t3(materials, composite, item_table, inventory):
     def _expand(mat_id, count):
         comp = composite.get(mat_id)
         if not comp:
+            rarity = (item_table.get(mat_id, {}) or {}).get("rarity", 0)
+            if rarity == 3:
+                raw[mat_id] = raw.get(mat_id, 0) + count
+            return
+        rarity = comp.get("rarity", 0)
+        if rarity <= 3:
             raw[mat_id] = raw.get(mat_id, 0) + count
             return
         for p in comp.get("pathway", []):
@@ -256,3 +277,373 @@ def get_mastery_recommendations():
     result["operators"] = operators
     result["has_data"] = True
     return result
+
+
+def compute_workshop_config(t5_operator="年", book_operator="司霆惊蛰"):
+    """根据当前专精计划和仓库库存，计算合成配置（与前端自动合成配置逻辑一致）"""
+    from collections import defaultdict
+
+    from arknights_mower.data import workshop_formula
+
+    plan_path = get_path("@app/tmp/matery_plan.json")
+    planned_keys = []
+    if os.path.exists(plan_path):
+        try:
+            with open(plan_path, "r", encoding="utf-8") as f:
+                plan = json.load(f)
+            planned_keys = [k for k, v in plan.items() if v]
+        except Exception:
+            pass
+
+    skill_data_path = _find_skill_data()
+    with open(skill_data_path, "r", encoding="utf-8") as f:
+        skill_data = json.load(f)
+    items = skill_data.get("items", {})
+
+    def item_rarity(name):
+        for iid, info in items.items():
+            if info.get("name") == name:
+                return info.get("rarity", 0)
+        return 0
+
+    fodder_list = ["碳素", "碳素组", "家具零件_碳素组"]
+    fodder_items = [
+        {"item_names": [f], "children_lower_limit": 0, "self_upper_limit": 9999}
+        for f in fodder_list
+        if f in workshop_formula
+    ]
+
+    t4_names = {
+        n: e
+        for n, e in workshop_formula.items()
+        if e.get("tab") == "精英材料" and e.get("apCost") == 4.0
+    }
+    t5_names = {
+        n: e
+        for n, e in workshop_formula.items()
+        if e.get("tab") == "精英材料" and e.get("apCost") == 8.0
+    }
+
+    if not planned_keys:
+        default_t4 = [
+            {"item_names": [n], "children_lower_limit": 20, "self_upper_limit": 20}
+            for n in sorted(t4_names)
+        ]
+        default_t5 = [
+            {"item_names": [n], "children_lower_limit": 20, "self_upper_limit": 20}
+            for n in sorted(t5_names)
+        ]
+        default_book = [
+            {
+                "item_names": ["技巧概要·卷3"],
+                "children_lower_limit": 20,
+                "self_upper_limit": 20,
+            }
+        ]
+        return [
+            {"operator": "九色鹿", "enabled": True, "items": fodder_items + default_t4},
+            {"operator": t5_operator, "enabled": True, "items": default_t5},
+            {"operator": book_operator, "enabled": True, "items": default_book},
+        ]
+
+    t4_names = {
+        n: e
+        for n, e in workshop_formula.items()
+        if e.get("tab") == "精英材料" and e.get("apCost") == 4.0
+    }
+    t5_names = {
+        n: e
+        for n, e in workshop_formula.items()
+        if e.get("tab") == "精英材料" and e.get("apCost") == 8.0
+    }
+
+    if not planned_keys:
+        default_t4 = [
+            {"item_names": [n], "children_lower_limit": 20, "self_upper_limit": 20}
+            for n in sorted(t4_names)
+        ]
+        default_t5 = [
+            {"item_names": [n], "children_lower_limit": 20, "self_upper_limit": 20}
+            for n in sorted(t5_names)
+        ]
+        default_book = [
+            {
+                "item_names": ["技巧概要·卷3"],
+                "children_lower_limit": 20,
+                "self_upper_limit": 20,
+            }
+        ]
+        return [
+            {"operator": "九色鹿", "enabled": True, "items": fodder_items + default_t4},
+            {"operator": "年", "enabled": True, "items": default_t5},
+            {"operator": "司霆惊蛰", "enabled": True, "items": default_book},
+        ]
+
+    rec_result = get_mastery_recommendations()
+    operators = rec_result.get("operators", [])
+
+    plan_set = set()
+    for key in planned_keys:
+        parts = key.rsplit("_", 1)
+        if len(parts) == 2:
+            try:
+                plan_set.add((parts[0], int(parts[1])))
+            except ValueError:
+                pass
+
+    raw_demand = defaultdict(int)
+    for op in operators:
+        for rec in op.get("recommendations", []):
+            if (op["char_id"], rec["skill_index"]) not in plan_set:
+                continue
+            for mat in rec.get("chain_needed_materials", []):
+                raw_demand[mat["name"]] += mat["count"]
+
+    demand_t5_raw = {n: c for n, c in raw_demand.items() if n in t5_names}
+    demand_t4_raw = {n: c for n, c in raw_demand.items() if n in t4_names}
+    demand_t3_plus = {
+        n: c for n, c in raw_demand.items() if n not in t4_names and n not in t5_names
+    }
+
+    cultivate_path = get_path("@app/tmp/cultivate.json")
+    inventory = defaultdict(int)
+    if os.path.exists(cultivate_path):
+        with open(cultivate_path, "r", encoding="utf-8") as f:
+            cdata = json.load(f)
+        for item in cdata.get("data", {}).get("items", []):
+            cnt = int(item.get("count", 0))
+            if cnt > 0:
+                inventory[item.get("id", "")] = cnt
+
+    id_by_name = {}
+    for iid, info in items.items():
+        id_by_name[info.get("name", "")] = iid
+
+    def inv_of(name):
+        return inventory.get(id_by_name.get(name, ""), 0)
+
+    t4_indirect = defaultdict(int)
+    for t5_name, t5_demand in demand_t5_raw.items():
+        t5_missing = max(0, t5_demand - inv_of(t5_name))
+        formula = t5_names.get(t5_name, {})
+        for child in formula.get("items", []):
+            if child in t4_names:
+                t4_indirect[child] += t5_missing
+
+    t4_total = defaultdict(int)
+    for name in set(list(demand_t4_raw.keys()) + list(t4_indirect.keys())):
+        t4_total[name] = demand_t4_raw.get(name, 0) + t4_indirect.get(name, 0)
+
+    t4_items = []
+    for name, demand in sorted(t4_total.items()):
+        if demand > 0:
+            t4_items.append(
+                {
+                    "item_names": [name],
+                    "children_lower_limit": 0,
+                    "self_upper_limit": demand,
+                }
+            )
+
+    t5_items = []
+    for name, demand in sorted(demand_t5_raw.items()):
+        if demand > 0:
+            t5_items.append(
+                {
+                    "item_names": [name],
+                    "children_lower_limit": 0,
+                    "self_upper_limit": demand,
+                }
+            )
+
+    book_count = demand_t3_plus.get("技巧概要·卷3", 0)
+    book_items = (
+        [
+            {
+                "item_names": ["技巧概要·卷3"],
+                "children_lower_limit": 0,
+                "self_upper_limit": book_count,
+            }
+        ]
+        if book_count > 0
+        else []
+    )
+
+    return [
+        {"operator": "九色鹿", "enabled": True, "items": fodder_items + t4_items},
+        {"operator": "年", "enabled": True, "items": t5_items},
+        {"operator": "司霆惊蛰", "enabled": True, "items": book_items},
+    ]
+
+
+_default_route_cache = None
+
+
+def _load_default_route():
+    global _default_route_cache
+    if _default_route_cache is not None:
+        return _default_route_cache
+    path = get_path("@internal/arknights_mower/data/training_route.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                _default_route_cache = json.load(f)
+        except Exception:
+            _default_route_cache = {}
+    else:
+        _default_route_cache = {}
+    return _default_route_cache
+
+
+def _build_route_supports(profession, control_center="none"):
+    defaults = _load_default_route()
+    prof_cn = PROF_MAP.get(profession, "近卫")
+    route_path = get_path("@app/tmp/matery_route.json")
+    if os.path.exists(route_path):
+        try:
+            with open(route_path, "r", encoding="utf-8") as f:
+                route = json.load(f)
+        except Exception:
+            route = {}
+    else:
+        route = {}
+    prof_default = defaults.get(prof_cn, {})
+    prof_route = route.get(prof_cn, prof_default)
+    supports_data = prof_route.get("supports", []) or prof_default.get("supports", [])
+    half_off = prof_route.get("half_off", prof_default.get("half_off", True))
+    cc = control_center or prof_route.get(
+        "controlCenter", prof_default.get("controlCenter", "none")
+    )
+    bonus = 0 if cc == "none" else 5
+    supports = []
+    for s in supports_data:
+        supports.append(
+            {
+                "name": s["name"],
+                "skill_level": s["skill_level"],
+                "efficiency": min(100, s["efficiency"] + bonus),
+                "match": s.get("match", False),
+                "swap_name": s.get("swap_name") if s.get("swap") else s["name"],
+                "half_off": half_off,
+            }
+        )
+    return supports
+
+
+def _supports_from_dicts(supports_data):
+    from arknights_mower.utils.operators import SkillUpgradeSupport
+
+    supports = []
+    for s in supports_data:
+        sup = SkillUpgradeSupport(
+            name=s["name"],
+            skill_level=s["skill_level"],
+            efficiency=s["efficiency"],
+            match=s.get("match", False),
+            swap_name=s.get("swap_name", s["name"]),
+        )
+        sup.half_off = s.get("half_off", True)
+        supports.append(sup)
+    return supports
+
+
+def auto_schedule_mastery_tasks():
+    """仓库扫描后：检测计划内未满M3的技能，直接需求全部满足则返回待安排列表"""
+    result = {"scheduled": [], "skipped": []}
+
+    plan_path = get_path("@app/tmp/matery_plan.json")
+    if not os.path.exists(plan_path):
+        return result
+    try:
+        with open(plan_path, "r", encoding="utf-8") as f:
+            plan = json.load(f)
+    except Exception:
+        return result
+    if not plan:
+        return result
+
+    plan_set = set()
+    for key in plan:
+        if not plan[key]:
+            continue
+        parts = key.rsplit("_", 1)
+        if len(parts) == 2:
+            try:
+                plan_set.add((parts[0], int(parts[1])))
+            except ValueError:
+                pass
+
+    if not plan_set:
+        return result
+
+    rec_result = get_mastery_recommendations()
+    if not rec_result.get("has_data"):
+        return result
+
+    operators = rec_result.get("operators", [])
+
+    cultivate_path = get_path("@app/tmp/cultivate.json")
+    inventory = {}
+    if os.path.exists(cultivate_path):
+        try:
+            with open(cultivate_path, "r", encoding="utf-8") as f:
+                cdata = json.load(f)
+            for item in cdata.get("data", {}).get("items", []):
+                cnt = int(item.get("count", 0))
+                if cnt > 0:
+                    inventory[item.get("id", "")] = cnt
+        except Exception:
+            pass
+
+    skill_data_path = _find_skill_data()
+    name_to_id = {}
+    if os.path.exists(skill_data_path):
+        try:
+            with open(skill_data_path, "r", encoding="utf-8") as f:
+                items_table = json.load(f).get("items", {})
+            for iid, info in items_table.items():
+                name_to_id[info.get("name", "")] = iid
+        except Exception:
+            pass
+
+    for op in operators:
+        for rec in op.get("recommendations", []):
+            if (op["char_id"], rec["skill_index"]) not in plan_set:
+                continue
+            if rec.get("current_level", 0) >= 3:
+                continue
+
+            all_materials_sufficient = True
+            for mat in rec.get("chain_needed_materials", []):
+                mat_id = name_to_id.get(mat["name"], "")
+                owned = inventory.get(mat_id, 0)
+                if owned < mat["count"]:
+                    all_materials_sufficient = False
+                    break
+
+            entry = {
+                "char_id": op["char_id"],
+                "name": op["name"],
+                "profession": op["profession"],
+                "skill_index": rec["skill_index"],
+                "skill_name": rec["skill_name"],
+                "achievable": all_materials_sufficient,
+            }
+            if all_materials_sufficient:
+                result["scheduled"].append(entry)
+            else:
+                result["skipped"].append(entry)
+
+    return result
+
+
+PROF_MAP = {
+    "WARRIOR": "近卫",
+    "SNIPER": "狙击",
+    "TANK": "重装",
+    "MEDIC": "医疗",
+    "SUPPORT": "辅助",
+    "CASTER": "术师",
+    "SPECIAL": "特种",
+    "PIONEER": "先锋",
+}
