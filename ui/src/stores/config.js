@@ -3,6 +3,8 @@ import { defineStore } from 'pinia'
 import { inject, ref, watch, watchEffect } from 'vue'
 
 export const useConfigStore = defineStore('config', () => {
+  const defaultLaunchCommand =
+    'input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard; am start -n {package}/{activity}'
   const weeklyPlanWeekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
   const adb = ref('')
   const drone_count_limit = ref(0)
@@ -14,6 +16,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_adb_path = ref('')
   const maa_enable = ref(false)
   const maa_path = ref('')
+  const maa_startup_check = ref(false)
   const maa_expiring_medicine = ref(true)
   const maa_weekly_plan = ref([])
   const maa_weekly_plan_options = ref([])
@@ -49,7 +52,13 @@ export const useConfigStore = defineStore('config', () => {
   const t5_operators = ref(['年'])
   const book_operators = ref(['司霆惊蛰'])
   const theme = ref('light')
-  const tap_to_launch_game = ref(false)
+  const tap_to_launch_game = ref({
+    enable: false,
+    mode: 'adb',
+    x: 0,
+    y: 0,
+    command: defaultLaunchCommand
+  })
   const exit_game_when_idle = ref(true)
   const return_home_when_idle = ref(false)
   const close_simulator_when_idle = ref(false)
@@ -61,6 +70,8 @@ export const useConfigStore = defineStore('config', () => {
   const maa_credit_fight = ref(true)
   const maa_depot_enable = ref(false)
   const maa_rg_theme = ref('Mizuki')
+  const maa_rcl_theme = ref('Tales')
+  const rcl = ref({})
   const rogue = ref({})
   const sss = ref({})
   const screenshot = ref(0)
@@ -89,6 +100,7 @@ export const useConfigStore = defineStore('config', () => {
   const free_room = ref(false)
   const merge_interval = ref(10)
   const fia_fool = ref(true)
+  const refresh_backup_plan_after_mood = ref(false)
   const assistant_follows_schedule = ref(false)
   const sign_in = ref({ enable: true })
   const droidcast = ref({})
@@ -230,6 +242,18 @@ export const useConfigStore = defineStore('config', () => {
     }
   }
 
+  function normalizeLaunchConfig(config = {}) {
+    const modeOptions = ['adb', 'tap', 'custom']
+    const mode = modeOptions.includes(config.mode) ? config.mode : config.enable ? 'tap' : 'adb'
+    return {
+      enable: mode == 'tap',
+      mode,
+      x: config.x ?? 0,
+      y: config.y ?? 0,
+      command: config.command || defaultLaunchCommand
+    }
+  }
+
   async function load_config() {
     const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/conf`)
     adb.value = response.data.adb
@@ -243,6 +267,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_adb_path.value = response.data.maa_adb_path
     maa_enable.value = response.data.maa_enable != 0
     maa_path.value = response.data.maa_path
+    maa_startup_check.value = response.data.maa_startup_check
     maa_rg_enable.value = response.data.maa_rg_enable == 1
     maa_long_task_type.value = response.data.maa_long_task_type
     maa_expiring_medicine.value = response.data.maa_expiring_medicine
@@ -271,8 +296,7 @@ export const useConfigStore = defineStore('config', () => {
     rescue_threshold.value = response.data.rescue_threshold * 100
     favorite.value = response.data.favorite == '' ? [] : response.data.favorite.split(',')
     theme.value = response.data.theme
-    tap_to_launch_game.value = response.data.tap_to_launch_game
-    tap_to_launch_game.value.enable = tap_to_launch_game.value.enable ? 'tap' : 'adb'
+    tap_to_launch_game.value = normalizeLaunchConfig(response.data.tap_to_launch_game)
     exit_game_when_idle.value = response.data.exit_game_when_idle
     return_home_when_idle.value = response.data.return_home_when_idle
     close_simulator_when_idle.value = response.data.close_simulator_when_idle
@@ -284,6 +308,8 @@ export const useConfigStore = defineStore('config', () => {
     maa_credit_fight.value = response.data.maa_credit_fight
     maa_depot_enable.value = response.data.maa_depot_enable
     maa_rg_theme.value = response.data.maa_rg_theme
+    maa_rcl_theme.value = response.data.maa_rcl_theme
+    rcl.value = response.data.rcl
     rogue.value = response.data.rogue
     sss.value = response.data.sss
     screenshot.value = response.data.screenshot
@@ -315,6 +341,7 @@ export const useConfigStore = defineStore('config', () => {
     free_room.value = response.data.free_room
     merge_interval.value = response.data.merge_interval
     fia_fool.value = response.data.fia_fool
+    refresh_backup_plan_after_mood.value = response.data.refresh_backup_plan_after_mood ?? false
     assistant_follows_schedule.value = response.data.assistant_follows_schedule
     sign_in.value = response.data.sign_in
     droidcast.value = response.data.droidcast
@@ -351,6 +378,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_adb_path: maa_adb_path.value,
       maa_enable: maa_enable.value ? 1 : 0,
       maa_path: maa_path.value,
+      maa_startup_check: maa_startup_check.value,
       maa_rg_enable: maa_rg_enable.value ? 1 : 0,
       maa_long_task_type: maa_long_task_type.value,
       maa_expiring_medicine: maa_expiring_medicine.value,
@@ -377,9 +405,11 @@ export const useConfigStore = defineStore('config', () => {
       rescue_threshold: rescue_threshold.value / 100,
       favorite: favorite.value.join(','),
       tap_to_launch_game: {
-        enable: tap_to_launch_game.value.enable == 'tap',
+        enable: tap_to_launch_game.value.mode == 'tap',
+        mode: tap_to_launch_game.value.mode,
         x: tap_to_launch_game.value.x,
-        y: tap_to_launch_game.value.y
+        y: tap_to_launch_game.value.y,
+        command: tap_to_launch_game.value.command || defaultLaunchCommand
       },
       exit_game_when_idle: exit_game_when_idle.value,
       return_home_when_idle: return_home_when_idle.value,
@@ -392,6 +422,8 @@ export const useConfigStore = defineStore('config', () => {
       maa_credit_fight: maa_credit_fight.value,
       maa_depot_enable: maa_depot_enable.value,
       maa_rg_theme: maa_rg_theme.value,
+      maa_rcl_theme: maa_rcl_theme.value,
+      rcl: rcl.value,
       rogue: rogue.value,
       sss: sss.value,
       screenshot: screenshot.value,
@@ -424,6 +456,7 @@ export const useConfigStore = defineStore('config', () => {
       free_room: free_room.value,
       merge_interval: merge_interval.value,
       fia_fool: fia_fool.value,
+      refresh_backup_plan_after_mood: refresh_backup_plan_after_mood.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
       sign_in: sign_in.value,
       droidcast: droidcast.value,
@@ -486,6 +519,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_adb_path,
     maa_enable,
     maa_path,
+    maa_startup_check,
     maa_rg_enable,
     maa_long_task_type,
     maa_expiring_medicine,
@@ -513,6 +547,7 @@ export const useConfigStore = defineStore('config', () => {
     item_list,
     maa_gap,
     build_config,
+    defaultLaunchCommand,
     simulator,
     resting_threshold,
     fia_threshold,
@@ -535,6 +570,8 @@ export const useConfigStore = defineStore('config', () => {
     maa_credit_fight,
     maa_depot_enable,
     maa_rg_theme,
+    maa_rcl_theme,
+    rcl,
     rogue,
     sss,
     screenshot,
@@ -563,6 +600,7 @@ export const useConfigStore = defineStore('config', () => {
     free_room,
     merge_interval,
     fia_fool,
+    refresh_backup_plan_after_mood,
     assistant_follows_schedule,
     sign_in,
     droidcast,

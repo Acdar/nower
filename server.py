@@ -4,8 +4,7 @@ import datetime
 import json
 import mimetypes
 import os
-import pathlib
-import sys
+import subprocess
 import time
 from functools import wraps
 from io import BytesIO
@@ -25,8 +24,15 @@ from arknights_mower.solvers.record import clear_data, load_state, save_state
 from arknights_mower.utils import config
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.log import logger
+from arknights_mower.utils.maa_check import (
+    MAA_CHECK_TIMEOUT,
+    maa_check_command,
+    maa_check_timeout_result,
+    parse_maa_check_output,
+)
 from arknights_mower.utils.operators import Operators, build_global_plan
 from arknights_mower.utils.path import get_path
+from arknights_mower.views.mastery import mastery_bp
 
 mimetypes.add_type("text/html", ".html")
 mimetypes.add_type("text/css", ".css")
@@ -53,6 +59,64 @@ if token := config.conf.webview.token:
 mower_thread = None
 log_lines = []
 ws_connections = []
+maa_check_job = {
+    "id": None,
+    "process": None,
+    "status": "idle",
+    "message": "",
+    "started_at": None,
+}
+
+
+def _collect_maa_check_result():
+    process = maa_check_job.get("process")
+    if process is None:
+        return
+
+    if process.poll() is None:
+        started_at = maa_check_job.get("started_at")
+        if started_at and time.monotonic() - started_at > MAA_CHECK_TIMEOUT:
+            process.kill()
+            try:
+                process.communicate(timeout=1)
+            except Exception:
+                pass
+            result = maa_check_timeout_result(MAA_CHECK_TIMEOUT)
+            maa_check_job.update(
+                {
+                    "process": None,
+                    "status": result["status"],
+                    "message": result["message"],
+                    "started_at": None,
+                }
+            )
+        return
+
+    stdout, stderr = process.communicate()
+    result = parse_maa_check_output(stdout, stderr, process.returncode)
+
+    maa_check_job.update(
+        {
+            "process": None,
+            "status": result["status"],
+            "message": result["message"],
+            "started_at": None,
+        }
+    )
+
+
+# 追踪 MAA 临时核心库文件，进程退出时自动清理
+_maa_temp_files = set()
+
+
+@atexit.register
+def _cleanup_maa_temp_files():
+    for f in list(_maa_temp_files):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
 
 # 追踪 MAA 临时核心库文件，进程退出时自动清理
 _maa_temp_files = set()
@@ -242,9 +306,14 @@ def start(start_type):
         saved_state = {}
     if start_type == "1":
         saved_state["tasks"] = []
+    restart_after_mood_read = (
+        start_type == "2" and config.conf.refresh_backup_plan_after_mood
+    )
     from arknights_mower.__main__ import main
 
-    mower_thread = Thread(target=main, args=(saved_state,), daemon=True)
+    mower_thread = Thread(
+        target=main, args=(saved_state, restart_after_mood_read), daemon=True
+    )
     mower_thread.start()
 
     log_lines = []
@@ -447,92 +516,40 @@ def validate_backup_plans_route():
 @app.route("/check-maa")
 @require_token
 def get_maa_adb_version():
-    try:
-        asst_path = os.path.dirname(
-            pathlib.Path(config.conf.maa_path) / "Python" / "asst"
-        )
-        if asst_path not in sys.path:
-            sys.path.append(asst_path)
+    _collect_maa_check_result()
+    if maa_check_job["status"] == "running":
+        return {
+            "status": "running",
+            "message": maa_check_job["message"] or "正在测试……",
+        }
 
-        for mod in list(sys.modules.keys()):
-            if mod.startswith("asst.") or mod == "asst":
-                del sys.modules[mod]
+    process = subprocess.Popen(
+        maa_check_command(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if __system__ == "windows" else 0,
+    )
+    maa_check_job.update(
+        {
+            "id": time.time_ns(),
+            "process": process,
+            "status": "running",
+            "message": "正在测试……",
+            "started_at": time.monotonic(),
+        }
+    )
+    return {"status": "running", "message": "正在测试……"}
 
-        patched = False
-        original_dll_loader = None
-        try:
-            import ctypes
-            import glob
-            import shutil
-            import uuid
 
-            from asst.asst import Asst
-
-            # 清理旧的临时 MAA 核心库
-            path = config.conf.maa_path
-            core_name = "MaaCore.dll" if sys.platform == "win32" else "libMaaCore.so"
-            temp_pattern = (
-                "MaaCore_temp_*.dll"
-                if sys.platform == "win32"
-                else "libMaaCore_temp_*.so"
-            )
-            for old_temp in glob.glob(os.path.join(path, temp_pattern)):
-                try:
-                    os.remove(old_temp)
-                except OSError:
-                    pass
-
-            # 复制新的临时 MAA 核心库以防占用报错和实现热重载
-            temp_name = (
-                f"MaaCore_temp_{uuid.uuid4().hex[:8]}.dll"
-                if sys.platform == "win32"
-                else f"libMaaCore_temp_{uuid.uuid4().hex[:8]}.so"
-            )
-            temp_path = os.path.join(path, temp_name)
-            _maa_temp_files.add(temp_path)
-
-            original_dll_loader = (
-                ctypes.WinDLL if sys.platform == "win32" else ctypes.CDLL
-            )
-            try:
-                shutil.copyfile(os.path.join(path, core_name), temp_path)
-
-                def mock_dll_loader(name, *args, **kwargs):
-                    if core_name in str(name):
-                        return original_dll_loader(temp_path, *args, **kwargs)
-                    return original_dll_loader(name, *args, **kwargs)
-
-                if sys.platform == "win32":
-                    ctypes.WinDLL = mock_dll_loader
-                else:
-                    ctypes.CDLL = mock_dll_loader
-                patched = True
-            except Exception as e:
-                logger.error(f"动态复制MAA核心库失败，将使用原库：{e}")
-        except Exception:
-            from asst.asst import Asst
-
-        try:
-            Asst.load(config.conf.maa_path)
-        finally:
-            if patched and original_dll_loader:
-                import ctypes
-
-                if sys.platform == "win32":
-                    ctypes.WinDLL = original_dll_loader
-                else:
-                    ctypes.CDLL = original_dll_loader
-        asst = Asst()
-        version = asst.get_version()
-        asst.set_instance_option(2, config.conf.maa_touch_option)
-        if asst.connect(config.conf.maa_adb_path, config.conf.adb):
-            maa_msg = f"Maa {version} 加载成功"
-        else:
-            maa_msg = "连接失败，请检查Maa日志！"
-    except Exception as e:
-        maa_msg = "Maa加载失败：" + str(e)
-        logger.exception(maa_msg)
-    return maa_msg
+@app.route("/check-maa/status")
+@require_token
+def get_maa_check_status():
+    _collect_maa_check_result()
+    return {
+        "status": maa_check_job["status"],
+        "message": maa_check_job["message"],
+    }
 
 
 @app.route("/maa-conn-preset")
@@ -1091,27 +1108,6 @@ def mastery_t3_summary():
     return {"t3_summary": t3_summary}
 
 
-@app.route("/mastery-plan", methods=["GET", "POST"])
-def mastery_plan():
-    import json as _json
-
-    plan_path = get_path("@app/tmp/matery_plan.json")
-    if request.method == "GET":
-        if os.path.exists(plan_path):
-            try:
-                with open(plan_path, "r", encoding="utf-8") as f:
-                    return _json.load(f)
-            except Exception:
-                pass
-        return {}
-    else:
-        data = request.json or {}
-        plan_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(plan_path, "w", encoding="utf-8") as f:
-            _json.dump(data, f, ensure_ascii=False)
-        return {"success": True}
-
-
 @app.route("/mastery-t3-debug", methods=["POST"])
 def mastery_t3_debug():
 
@@ -1154,34 +1150,6 @@ def workshop_preset():
         return {"success": True}
 
 
-@app.route("/mastery-route", methods=["GET", "POST"])
-def mastery_route():
-    import json as _json
-
-    route_path = get_path("@app/tmp/matery_route.json")
-    if request.method == "GET":
-        if os.path.exists(route_path):
-            try:
-                with open(route_path, "r", encoding="utf-8") as f:
-                    return _json.load(f)
-            except Exception:
-                pass
-        default_path = get_path("@internal/arknights_mower/data/training_route.json")
-        if os.path.exists(default_path):
-            try:
-                with open(default_path, "r", encoding="utf-8") as f:
-                    return _json.load(f)
-            except Exception:
-                pass
-        return {}
-    else:
-        data = request.json or {}
-        route_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(route_path, "w", encoding="utf-8") as f:
-            _json.dump(data, f, ensure_ascii=False)
-        return {"success": True}
-
-
 @app.route("/cultivate-fetch")
 def cultivate_fetch():
     from arknights_mower.solvers.cultivate_depot import cultivate
@@ -1196,8 +1164,7 @@ def cultivate_fetch():
 @app.route("/task", methods=["GET", "POST"])
 def add_task():
     from arknights_mower.__main__ import base_scheduler
-    from arknights_mower.data import agent_list
-    from arknights_mower.utils.operators import SkillUpgradeSupport
+    from arknights_mower.utils.mastery_db import get_route, has_train_group_plan
     from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
 
     if request.method == "POST":
@@ -1228,26 +1195,44 @@ def add_task():
                     ):
                         raise Exception("找到同时间任务请勿重复添加")
                     if new_task.type == TaskTypes.SKILL_UPGRADE:
-                        supports = []
-                        for s in req.get("upgrade_support", []):
-                            if (
-                                s["name"] not in agent_list
-                                or s["swap_name"] not in agent_list
-                            ):
-                                raise Exception("干员名不正确")
-                            sup = SkillUpgradeSupport(
-                                name=s["name"],
-                                skill_level=s["skill_level"],
-                                efficiency=s["efficiency"],
-                                match=s["match"],
-                                swap_name=s["swap_name"],
+                        if has_train_group_plan():
+                            raise Exception("训练室已设置小组轮换，无法添加专精任务")
+                        pk = task.get("plan_key", "")
+                        if not pk:
+                            raise Exception("专精任务缺少 plan_key")
+                        parts = pk.rsplit("_", 1)
+                        if len(parts) != 2:
+                            raise Exception("plan_key 格式错误")
+                        char_id = parts[0]
+                        from arknights_mower.utils.mastery_recommendation import (
+                            PROF_MAP,
+                            _supports_from_dicts,
+                            get_skill_data,
+                        )
+
+                        char_table = get_skill_data().get("characters", {})
+                        prof_en = char_table.get(char_id, {}).get("profession", "")
+                        if not prof_en:
+                            raise Exception(f"未找到干员 {char_id} 的职业信息")
+                        prof_cn = PROF_MAP.get(prof_en, prof_en)
+                        route = get_route(prof_cn)
+                        if not route:
+                            raise Exception(
+                                f"未配置 {prof_cn} 的专精路线，请先在专精路线设置中保存"
                             )
-                            sup.half_off = s["half_off"]
-                            supports.append(sup)
-                        if len(supports) == 0:
-                            raise Exception("请添加专精工具人")
+                        import json as _json
+
+                        parsed = _json.loads(route["supports"])
+                        supports_list = (
+                            parsed.get("supports", [])
+                            if isinstance(parsed, dict)
+                            else parsed
+                        )
+                        if not supports_list:
+                            raise Exception(f"{prof_cn} 的专精路线为空")
+                        supports = _supports_from_dicts(supports_list)
                         base_scheduler.op_data.skill_upgrade_supports = supports
-                        logger.info("更新专精工具人完毕")
+                        logger.info(f"从数据库加载 {prof_cn} 专精路线完毕")
                     base_scheduler.tasks.append(new_task)
                     logger.debug(f"成功：{str(new_task)}")
                     return "添加任务成功！"
@@ -1384,3 +1369,6 @@ def ws_chat(ws):
         except Exception as e:
             logger.exception(f"WebSocket处理错误：{str(e)}")
             ws.send(json.dumps({"error": str(e)}))
+
+
+app.register_blueprint(mastery_bp)

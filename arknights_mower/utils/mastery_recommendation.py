@@ -6,9 +6,9 @@ from arknights_mower.utils.path import _install_dir, _internal_dir, get_path
 
 def _find_skill_data():
     candidates = [
-        _internal_dir / "arknights_mower" / "resources" / "skill_data.json",
-        _install_dir / "arknights_mower" / "resources" / "skill_data.json",
-        _install_dir / "resources" / "skill_data.json",
+        _internal_dir / "arknights_mower" / "data" / "skill_data.json",
+        _install_dir / "arknights_mower" / "data" / "skill_data.json",
+        _install_dir / "data" / "skill_data.json",
     ]
     for p in candidates:
         if os.path.exists(p):
@@ -303,6 +303,21 @@ def compute_workshop_config(
         except Exception:
             pass
 
+    if planned_keys:
+        try:
+            cultivate_path = get_path("@app/tmp/cultivate.json")
+            if os.path.exists(cultivate_path):
+                with open(cultivate_path, "r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                m3 = set()
+                for char in cdata.get("data", {}).get("characters", []):
+                    for idx, s in enumerate(char.get("skills", [])):
+                        if s.get("level", 0) >= 3:
+                            m3.add(f"{char.get('id')}_{idx}")
+                planned_keys = [k for k in planned_keys if k not in m3]
+        except Exception:
+            pass
+
     skill_data_path = _find_skill_data()
     with open(skill_data_path, "r", encoding="utf-8") as f:
         skill_data = json.load(f)
@@ -521,22 +536,33 @@ def _load_default_route():
 
 
 def _build_route_supports(profession, control_center="none"):
-    defaults = _load_default_route()
-    prof_cn = PROF_MAP.get(profession, "近卫")
-    route_path = get_path("@app/tmp/matery_route.json")
-    if os.path.exists(route_path):
-        try:
-            with open(route_path, "r", encoding="utf-8") as f:
-                route = json.load(f)
-        except Exception:
-            route = {}
-    else:
-        route = {}
-    prof_default = defaults.get(prof_cn, {})
-    prof_route = route.get(prof_cn, prof_default)
-    supports_data = prof_route.get("supports", []) or prof_default.get("supports", [])
-    half_off = prof_route.get("half_off", prof_default.get("half_off", True))
-    cc = control_center or route.get("controlCenter", "none")
+    prof_cn = PROF_MAP.get(profession, "???")
+    supports_data = None
+    cc = control_center
+    try:
+        from arknights_mower.utils.mastery_db import get_route
+
+        route = get_route(prof_cn)
+        if route:
+            import json as _json
+
+            route_data = _json.loads(route["supports"])
+            supports_data = (
+                route_data.get("supports")
+                if isinstance(route_data, dict)
+                else route_data
+            )
+            cc = cc or (
+                route_data.get("controlCenter", "none")
+                if isinstance(route_data, dict)
+                else "none"
+            )
+    except Exception:
+        pass
+    if supports_data is None:
+        defaults = _load_default_route()
+        prof_default = defaults.get(prof_cn, {})
+        supports_data = prof_default.get("supports", [])
     bonus = 0 if cc == "none" else 5
     supports = []
     for s in supports_data:
@@ -547,7 +573,6 @@ def _build_route_supports(profession, control_center="none"):
                 "efficiency": min(100, s["efficiency"] + bonus),
                 "match": s.get("match", False),
                 "swap_name": s.get("swap_name") if s.get("swap") else s["name"],
-                "half_off": half_off,
             }
         )
     return supports
@@ -565,7 +590,6 @@ def _supports_from_dicts(supports_data):
             match=s.get("match", False),
             swap_name=s.get("swap_name", s["name"]),
         )
-        sup.half_off = s.get("half_off", True)
         supports.append(sup)
     return supports
 
