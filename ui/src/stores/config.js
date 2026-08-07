@@ -19,6 +19,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_startup_check = ref(false)
   const maa_expiring_medicine = ref(true)
   const ap_fallback = ref(0)
+  const ap_fallback = ref(0)
   const maa_weekly_plan = ref([])
   const maa_weekly_plan_options = ref([])
   const maa_weekly_plan_active = ref('')
