@@ -1,6 +1,98 @@
 #!/usr/bin/env python3
 import multiprocessing as mp
+import os
+import platform
+import sys
 from urllib.parse import quote
+
+# Linux 版独立包运行期需要宿主提供 GTK/WebKit2 原生库与 typelib，PyInstaller 只把
+# pywebview 的 Python 依赖打进包。这份提示在窗口后端初始化失败时展示，直接给出
+# 三个发行版的安装命令，避免用户对着裸 ImportError 无从下手。
+_LINUX_WEBVIEW_INSTALL_HINT = (
+    "Linux 版 mower 需要宿主安装 GTK/WebKit2 原生库，窗口后端无法初始化。\n\n"
+    "Debian / Ubuntu：\n"
+    "    sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 gir1.2-gtk-3.0 gir1.2-soup-3.0\n"
+    "Fedora：\n"
+    "    sudo dnf install webkit2gtk4.1 gi-girepository libgtk-3\n"
+    "Arch Linux：\n"
+    "    sudo pacman -S webkit2gtk-4.1 gobject-introspection\n\n"
+    "安装完成后重新运行 mower。更完整的说明见 README 的 Linux 打包一节。"
+)
+
+
+def linux_webview_backend_error() -> str | None:
+    """Linux 上检查 pywebview 的窗口后端能否初始化；缺失时返回中文安装指引。"""
+    if platform.system() not in ("Linux", "OpenBSD"):
+        return None
+
+    # 复刻 pywebview 5.1 guilib.initialize 的调度：PYWEBVIEW_GUI 优先，其次
+    # KDE_FULL_SESSION 触发 Qt，否则默认 GTK 优先。
+    requested_gui = os.environ.get("PYWEBVIEW_GUI", "").strip().lower()
+    if requested_gui not in ("qt", "gtk"):
+        requested_gui = "qt" if "KDE_FULL_SESSION" in os.environ else None
+    candidates = (
+        ["webview.platforms.qt", "webview.platforms.gtk"]
+        if requested_gui == "qt"
+        else ["webview.platforms.gtk", "webview.platforms.qt"]
+    )
+    for module in candidates:
+        # GTK 后端还会因宿主缺 typelib 抛 ValueError，Qt 后端只抛 ImportError，
+        # 与 guilib 的 import_gtk / import_qt 保持一致。
+        errors = (
+            (ImportError, ValueError) if module.endswith(".gtk") else (ImportError,)
+        )
+        try:
+            __import__(module)
+            return None  # 有一个后端可用即可，无需提示
+        except errors:
+            continue
+
+    return _LINUX_WEBVIEW_INSTALL_HINT
+
+
+def exit_if_webview_backend_missing():
+    """Linux 上窗口后端缺失时输出安装指引并退出；其它平台直接返回。"""
+    backend_error = linux_webview_backend_error()
+    if backend_error is None:
+        return
+    print(backend_error, file=sys.stderr)
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("arknights-mower", backend_error)
+        root.destroy()
+    except Exception:
+        pass  # 无显示环境（如 headless）时 stderr 已足够
+    sys.exit(1)
+
+
+# 托盘开关窗口是杀进程重建（见 webview_window / start_tray），新窗口尺寸读
+# gui.yml。Windows WebView2 在窗口初始化/销毁路径会触发极小/零尺寸 resized，
+# 若当成立即写回配置，下次打开就缩成一团——下限钳制挡住这些残留事件。
+MIN_WINDOW_SIZE = 100
+# 仅在 gui.yml 缺失或内容损坏（极小/零/非数字）时兜底，避免坏尺寸被读进创建
+# 并再次持久化。窗口尺寸唯一落在 GUI 进程专属的 gui.yml，不再进共享的 conf.yml。
+DEFAULT_WINDOW_SIZE = (1450, 850)
+
+
+def sanitize_window_size(width, height, min_size=MIN_WINDOW_SIZE):
+    """返回合法的窗口尺寸；极小/零/非数字视为销毁路径的残留事件，返回 None。"""
+    try:
+        w = int(width)
+        h = int(height)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if w < min_size or h < min_size:
+        return None
+    return (w, h)
+
+
+def resolve_window_size(width, height, min_size=MIN_WINDOW_SIZE):
+    """校验并返回合法的初始尺寸；损坏（极小/零/非数字）时兜底到默认启动尺寸。"""
+    return sanitize_window_size(width, height, min_size) or DEFAULT_WINDOW_SIZE
 
 
 def splash_screen(queue: mp.Queue):
@@ -130,22 +222,24 @@ def webview_window(child_conn, global_space, instance_name, host, port, url, tra
     webview.settings["ALLOW_DOWNLOADS"] = True
 
     from arknights_mower.__init__ import __version__
-    from arknights_mower.utils import config, path
+    from arknights_mower.utils import path
 
     path.global_space = global_space
+
+    from arknights_mower.utils.config.gui import load_window_size, save_window_size
 
     global width
     global height
 
-    config.load_conf()
-    width = config.conf.webview.width
-    height = config.conf.webview.height
+    size = load_window_size()
+    width, height = resolve_window_size(*size) if size else DEFAULT_WINDOW_SIZE
 
     def window_size(w, h):
         global width
         global height
-        width = w
-        height = h
+        size = sanitize_window_size(w, h)
+        if size is not None:
+            width, height = size
 
     window = webview.create_window(
         f"arknights-mower {__version__} - {build_window_title(instance_name, port)}",
@@ -186,10 +280,9 @@ def webview_window(child_conn, global_space, instance_name, host, port, url, tra
     try:
         webview.start()
 
-        config.load_conf()
-        config.conf.webview.width = width
-        config.conf.webview.height = height
-        config.save_conf()
+        size = sanitize_window_size(width, height)
+        if size is not None:
+            save_window_size(size)
         sys.exit()
     except Exception:
         import webbrowser
@@ -199,6 +292,10 @@ def webview_window(child_conn, global_space, instance_name, host, port, url, tra
 
 if __name__ == "__main__":
     mp.freeze_support()
+
+    # 先检查窗口后端是否可用。Linux 独立包若宿主缺 GTK/WebKit2 原生库，在这里给出
+    # 中文安装指引并退出，而不是让 webview 子进程走到裸 ImportError 后悄悄开浏览器。
+    exit_if_webview_backend_missing()
 
     splash_queue = mp.Queue()
     splash_process = mp.Process(target=splash_screen, args=(splash_queue,), daemon=True)
@@ -314,6 +411,9 @@ if __name__ == "__main__":
                     )
                     config.webview_process.start()
             elif msg == "exit":
+                # 退出前先让 mower 线程停止：否则 daemon 线程仍在跑 adb 操作，
+                # 会占着 DroidCast/scrcpy 连接（需关模拟器才释放），且影响进程退出
+                config.stop_mower.set()
                 config.parent_conn.send("exit")
                 if config.webview_process.join(3) is None:
                     config.webview_process.terminate()
