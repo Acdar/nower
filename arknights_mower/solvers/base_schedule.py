@@ -4613,7 +4613,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     def sign_in_plan_solver(self):
         if not config.conf.sign_in.enable:
             return
-        # hot_update.update()
         try:
             import sign_in
 
