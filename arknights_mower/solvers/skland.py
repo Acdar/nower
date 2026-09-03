@@ -1,7 +1,7 @@
+import csv
 import datetime
 import os
 
-import pandas as pd
 import requests
 
 from arknights_mower.utils import config
@@ -143,43 +143,45 @@ class SKLand:
         if self.reward:
             logger.info(f"存入{date_str}的明日方舟数据{self.reward}")
             try:
-                for item in self.reward:
-                    res_df = pd.DataFrame(item, index=[date_str])
-                    res_df.to_csv(
-                        self.record_path, mode="a", header=False, encoding="gbk"
-                    )
+                self._write_records(self.record_path, date_str, self.reward)
             except Exception as e:
                 logger.exception(e)
 
         if self.reward_ef:
             logger.info(f"存入{date_str}的终末地数据{self.reward_ef}")
             try:
-                for item in self.reward_ef:
-                    res_df = pd.DataFrame(item, index=[date_str])
-                    res_df.to_csv(
-                        self.record_path_ef, mode="a", header=False, encoding="gbk"
-                    )
+                self._write_records(self.record_path_ef, date_str, self.reward_ef)
             except Exception as e:
                 logger.exception(e)
 
         return True
+
+    @staticmethod
+    def _write_records(path: str, date_str: str, records: list) -> None:
+        """将签到记录以 日期,昵称,奖励 的格式追加写入 csv"""
+        with open(path, "a", encoding="gbk", newline="") as f:
+            writer = csv.writer(f, lineterminator="\n")
+            for item in records:
+                writer.writerow([date_str, item.get("nickName"), item.get("reward")])
 
     def has_record(self, phone: str, path: str):
         try:
             if os.path.exists(path) is False:
                 logger.debug(f"无森空岛记录 {path}")
                 return False
-            df = pd.read_csv(path, header=None, encoding="gbk", on_bad_lines="skip")
-
-            for item in df.iloc:
-                if item[0] == datetime.datetime.now().strftime("%Y/%m/%d"):
-                    if item[1].astype(str) == phone:
+            today = datetime.datetime.now().strftime("%Y/%m/%d")
+            with open(path, encoding="gbk", newline="") as f:
+                for row in csv.reader(f):
+                    if len(row) < 2:
+                        continue
+                    if row[0] == today and str(row[1]) == phone:
                         logger.info(f"{phone}在{path}今天签到过了")
                         return True
             return False
         except PermissionError:
             logger.info(f"{path}正在被占用")
-        except pd.errors.EmptyDataError:
+            return False
+        except (csv.Error, UnicodeDecodeError, OSError):
             return False
 
     # 用于测试连接

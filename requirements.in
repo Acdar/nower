@@ -1,9 +1,6 @@
 ﻿# 图像处理
 opencv-python==4.9.0.80
 numpy==1.26.4
-scipy==1.13.0
-scikit-image==0.23.2
-scikit-learn==1.4.2
 pillow==10.3.0
 
 # OCR
@@ -26,9 +23,6 @@ pystray==0.19.5
 PyYAML==6.0.1
 yamlcore==0.0.2
 pydantic==2.8.2
-
-# CSV
-pandas==2.2.2
 
 # 日志
 colorlog==6.8.2
@@ -65,4 +59,5 @@ cryptography==43.0.1
 langchain-core==0.3.66
 langchain-openai==0.3.24
 langgraph==0.5.1
-jieba>=0.42.1
+# Rust 实现的中文分词，替代 jieba（体积更小、性能更快）
+rjieba>=0.2.0

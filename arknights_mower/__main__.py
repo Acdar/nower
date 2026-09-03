@@ -6,6 +6,7 @@ from arknights_mower.solvers.reclamation_algorithm import ReclamationAlgorithm
 from arknights_mower.solvers.secret_front import SecretFront
 from arknights_mower.utils import config, path, rapidocr
 from arknights_mower.utils.csleep import MowerExit
+from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.depot import 创建csv, 创建json
 from arknights_mower.utils.device.adb_client.session import Session
@@ -19,6 +20,14 @@ from arknights_mower.utils.path import get_path
 from arknights_mower.utils.simulator import restart_simulator
 
 base_scheduler = None
+
+
+def _read_depot_scan_timestamp(path):
+    try:
+        _, rows = read_csv_rows(path)
+        return int(rows[-1][0])
+    except (EmptyDataError, IndexError, ValueError):
+        return None
 
 
 # 执行自动排班
@@ -147,9 +156,6 @@ def simulate(saved, restart_after_mood_read=False):
             base_scheduler.daily_skland = saved["daily_skland"]
             base_scheduler.daily_mail = saved["daily_mail"]
             base_scheduler.task_count = saved["task_count"]
-            base_scheduler.op_data.skill_upgrade_supports = saved[
-                "skill_upgrade_supports"
-            ]
             base_scheduler.tasks = tasks
             if len(base_scheduler.op_data.backup_plans) > 0:
                 # 启动的时候按照条件触发副表
@@ -206,13 +212,17 @@ def simulate(saved, restart_after_mood_read=False):
 
                     # 应该在maa任务之后
                     def _is_depotscan():
-                        import pandas as pd
-
                         path = get_path("@app/tmp/depotresult.csv")
                         if os.path.exists(path):
-                            depotinfo = pd.read_csv(path)
-                            仓库识别时间戳 = depotinfo.iloc[-1, 0]
-                            return int(仓库识别时间戳)
+                            timestamp = _read_depot_scan_timestamp(path)
+                            if timestamp is not None:
+                                return timestamp
+                            logger.warning(f"{path} 没有有效仓库记录，重新初始化")
+                            创建csv()
+                            return (
+                                int(datetime.now().timestamp())
+                                - config.conf.maa_gap * 3600
+                            )
                         else:
                             logger.info(f"{path} 不存在,新建一个存储仓库物品的csv")
                             now_time = (
@@ -309,14 +319,18 @@ def simulate(saved, restart_after_mood_read=False):
             reconnect_tries += 1
             if reconnect_tries < reconnect_max_tries:
                 logger.warning("出现错误.尝试重启Mower")
-                connected = False
-                while not connected:
+                # #84：内层重连循环加次数上限，最后失败抛错而非无限重启
+                retry = 0
+                while retry < reconnect_max_tries:
+                    retry += 1
                     try:
                         base_scheduler = initialize([], base_scheduler)
                         break
                     except MowerExit:
                         raise
                     except Exception as e:
+                        if retry >= reconnect_max_tries:
+                            raise
                         logger.exception(e)
                         restart_simulator()
                         base_scheduler.device.client.check_server_alive()
@@ -327,7 +341,6 @@ def simulate(saved, restart_after_mood_read=False):
                             base_scheduler.device.control.scrcpy = Scrcpy(
                                 base_scheduler.device.client
                             )
-                        continue
                 continue
             else:
                 raise e

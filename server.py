@@ -10,18 +10,16 @@ from functools import wraps
 from io import BytesIO
 from threading import RLock, Thread
 
-import pytz
 from flask import Flask, abort, request, send_file, send_from_directory
 from flask_cors import CORS
 from flask_sock import Sock
-from tzlocal import get_localzone
 from werkzeug.exceptions import NotFound
+from werkzeug.security import safe_join
 
 from arknights_mower import __system__
-from arknights_mower.agent.agent import ask_llm
-from arknights_mower.agent.tools.submit_issue import submit_issue
 from arknights_mower.solvers.record import clear_data, load_state, save_state
 from arknights_mower.utils import config
+from arknights_mower.utils.csv_utils import parse_cell_num, read_dicts
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.maa_check import (
@@ -32,7 +30,9 @@ from arknights_mower.utils.maa_check import (
 )
 from arknights_mower.utils.operators import Operators, build_global_plan
 from arknights_mower.utils.path import get_path
+from arknights_mower.views.db_admin import db_admin_bp
 from arknights_mower.views.mastery import mastery_bp
+from arknights_mower.views.task import set_mower_thread, task_bp
 
 mimetypes.add_type("text/html", ".html")
 mimetypes.add_type("text/css", ".css")
@@ -165,6 +165,45 @@ def require_token(f):
 @app.route("/<path:path>")
 def serve_index(path):
     return send_from_directory("ui/dist", path)
+
+
+@app.after_request
+def gzip_static(response):
+    # ui/dist 里的文本类静态资源由 Flask 静态路由直接服务，
+    # 通过 after_request 统一对支持 gzip 的客户端返回预压缩 .gz 文件。
+    path = request.path.lstrip("/")
+    # 根入口 / 对应 index.html，同样预压缩
+    if not path:
+        path = "index.html"
+    if not path.endswith((".js", ".css", ".html", ".json", ".svg", ".map")):
+        return response
+    static_path = safe_join(app.static_folder, path)
+    if (
+        response.status_code != 200
+        or static_path is None
+        or not os.path.isfile(static_path)
+    ):
+        return response
+    gz_path = static_path + ".gz"
+    if not os.path.isfile(gz_path):
+        return response
+
+    # 同一 URL 有 gzip 与 identity 两种表示，两类响应都必须声明 Vary。
+    response.vary.add("Accept-Encoding")
+    if request.accept_encodings["gzip"] <= 0:
+        return response
+
+    # send_from_directory 可能返回 direct_passthrough 响应；替换内容前先关闭。
+    response.direct_passthrough = False
+    with open(gz_path, "rb") as f:
+        response.set_data(f.read())
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Type"] = mimetypes.guess_type(path)[0] or (
+        "application/octet-stream"
+    )
+    # ETag 基于原始文件，压缩表示不能复用。
+    response.headers.pop("ETag", None)
+    return response
 
 
 @app.errorhandler(404)
@@ -316,6 +355,8 @@ def start(start_type):
     mower_thread = Thread(
         target=main, args=(saved_state, restart_after_mood_read), daemon=True
     )
+    # /task 路由（views/task.py）独立判定「mower 正在运行」，须与本模块同步
+    set_mower_thread(mower_thread)
     mower_thread.start()
 
     log_lines = []
@@ -341,6 +382,7 @@ def stop():
     else:
         logger.info("成功停止mower线程")
         mower_thread = None
+        set_mower_thread(None)
         return "true"
 
 
@@ -668,16 +710,18 @@ def date2str(target: datetime.date):
 
 @app.route("/report/getReportData")
 def get_report_data():
-    import pandas as pd
-
     record_path = get_path("@app/tmp/report.csv")
     try:
         format_data = []
         if os.path.exists(record_path) is False:
             logger.debug("基报不存在")
             return False
-        df = pd.read_csv(record_path, encoding="gbk")
-        data = df.to_dict("records")
+        data = read_dicts(record_path, encoding="gbk")
+        for row in data:
+            row["赤金"] = parse_cell_num(row["赤金"])
+            row["作战录像"] = parse_cell_num(row["作战录像"])
+            row["龙门币订单"] = parse_cell_num(row["龙门币订单"])
+            row["龙门币订单数"] = parse_cell_num(row["龙门币订单数"])
         earliest_date = str2date(data[0]["Unnamed: 0"])
 
         for item in data:
@@ -688,11 +732,23 @@ def get_report_data():
                     ),
                     "作战录像": item["作战录像"],
                     "赤金": item["赤金"],
-                    "制造总数": int(item["赤金"] + item["作战录像"]),
+                    "制造总数": (
+                        item["赤金"] + item["作战录像"]
+                        if item["赤金"] is not None and item["作战录像"] is not None
+                        else None
+                    ),
                     "龙门币订单": item["龙门币订单"],
-                    "反向作战录像": -item["作战录像"],
+                    "反向作战录像": (
+                        -item["作战录像"] if item["作战录像"] is not None else None
+                    ),
                     "龙门币订单数": item["龙门币订单数"],
-                    "每单获取龙门币": int(item["龙门币订单"] / item["龙门币订单数"]),
+                    "每单获取龙门币": (
+                        int(item["龙门币订单"] / item["龙门币订单数"])
+                        if item["龙门币订单"] is not None
+                        and item["龙门币订单数"]
+                        and item["龙门币订单数"] != 0
+                        else None
+                    ),
                 }
             )
 
@@ -719,36 +775,52 @@ def get_report_data():
 
 @app.route("/report/getOrundumData")
 def get_orundum_data():
-    import pandas as pd
-
     record_path = get_path("@app/tmp/report.csv")
     try:
         format_data = []
         if os.path.exists(record_path) is False:
             logger.debug("基报不存在")
             return False
-        df = pd.read_csv(record_path, encoding="gbk")
-        data = df.to_dict("records")
+        data = read_dicts(record_path, encoding="gbk")
         earliest_date = datetime.datetime.now()
 
         begin_make_orundum = (earliest_date + datetime.timedelta(days=1)).date()
-        print(begin_make_orundum)
+        for item in data:
+            # 脏数据（读取失败为 None）保留行但置空，避免被当作 0 污染累计总量
+            item["合成玉"] = parse_cell_num(item["合成玉"])
+            item["合成玉订单数量"] = parse_cell_num(item["合成玉订单数量"])
+            if item["合成玉"] is None:
+                logger.debug("合成玉读取失败：{}".format(item.get("Unnamed: 0")))
         if len(data) >= 15:
             for i in range(len(data) - 1, -1, -1):
                 if 0 < i < len(data) - 15:
                     data.pop(i)
                 else:
                     logger.debug("合成玉{}".format(data[i]["合成玉"]))
-                    if data[i]["合成玉"] > 0:
+                    if data[i]["合成玉"] is not None and data[i]["合成玉"] > 0:
                         begin_make_orundum = str2date(data[i]["Unnamed: 0"])
         else:
             for item in data:
-                if item["合成玉"] > 0:
+                if item["合成玉"] is not None and item["合成玉"] > 0:
                     begin_make_orundum = str2date(item["Unnamed: 0"])
         if begin_make_orundum > earliest_date.date():
             return format_data
         total_orundum = 0
         for item in data:
+            if item["合成玉"] is None:
+                # 脏行保留、累计值断开，与赤金等字段的 null 表现一致
+                format_data.append(
+                    {
+                        "日期": date2str(
+                            str2date(item["Unnamed: 0"]) - datetime.timedelta(days=1)
+                        ),
+                        "合成玉": None,
+                        "合成玉订单数量": None,
+                        "抽数": None,
+                        "累计制造合成玉": None,
+                    }
+                )
+                continue
             total_orundum = total_orundum + item["合成玉"]
             format_data.append(
                 {
@@ -1174,102 +1246,6 @@ def cultivate_fetch():
         return {"success": False, "message": str(e)}
 
 
-@app.route("/task", methods=["GET", "POST"])
-def add_task():
-    from arknights_mower.__main__ import base_scheduler
-    from arknights_mower.utils.mastery_db import get_route, has_train_group_plan
-    from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
-
-    if request.method == "POST":
-        try:
-            req = request.json
-            task = req["task"]
-            logger.debug(f"收到新增任务请求：{req}")
-            if base_scheduler and mower_thread.is_alive():
-                # if not base_scheduler.sleeping:
-                #     raise Exception("只能在休息时间添加")
-                if task:
-                    utc_time = datetime.datetime.strptime(
-                        task["time"], "%Y-%m-%dT%H:%M:%S.%f%z"
-                    )
-                    task_time = (
-                        utc_time.replace(tzinfo=pytz.utc)
-                        .astimezone(get_localzone())
-                        .replace(tzinfo=None)
-                    )
-                    new_task = SchedulerTask(
-                        time=task_time,
-                        task_plan=task["plan"],
-                        task_type=task["task_type"],
-                        meta_data=task["meta_data"],
-                    )
-                    if base_scheduler.find_next_task(
-                        compare_time=task_time, compare_type="="
-                    ):
-                        raise Exception("找到同时间任务请勿重复添加")
-                    if new_task.type == TaskTypes.SKILL_UPGRADE:
-                        if has_train_group_plan():
-                            raise Exception("训练室已设置小组轮换，无法添加专精任务")
-                        pk = task.get("plan_key", "")
-                        if not pk:
-                            raise Exception("专精任务缺少 plan_key")
-                        parts = pk.rsplit("_", 1)
-                        if len(parts) != 2:
-                            raise Exception("plan_key 格式错误")
-                        char_id = parts[0]
-                        from arknights_mower.utils.mastery_recommendation import (
-                            PROF_MAP,
-                            _supports_from_dicts,
-                            get_skill_data,
-                        )
-
-                        char_table = get_skill_data().get("characters", {})
-                        prof_en = char_table.get(char_id, {}).get("profession", "")
-                        if not prof_en:
-                            raise Exception(f"未找到干员 {char_id} 的职业信息")
-                        prof_cn = PROF_MAP.get(prof_en, prof_en)
-                        route = get_route(prof_cn)
-                        if not route:
-                            raise Exception(
-                                f"未配置 {prof_cn} 的专精路线，请先在专精路线设置中保存"
-                            )
-                        import json as _json
-
-                        parsed = _json.loads(route["supports"])
-                        supports_list = (
-                            parsed.get("supports", [])
-                            if isinstance(parsed, dict)
-                            else parsed
-                        )
-                        if not supports_list:
-                            raise Exception(f"{prof_cn} 的专精路线为空")
-                        supports = _supports_from_dicts(supports_list)
-                        base_scheduler.op_data.skill_upgrade_supports = supports
-                        logger.info(f"从数据库加载 {prof_cn} 专精路线完毕")
-                    base_scheduler.tasks.append(new_task)
-                    logger.debug(f"成功：{str(new_task)}")
-                    return "添加任务成功！"
-            raise Exception("添加任务失败！！请确保Mower正在运行")
-        except Exception as e:
-            logger.exception(f"添加任务失败：{str(e)}")
-            return str(e)
-    else:
-        if base_scheduler and mower_thread and mower_thread.is_alive():
-            from jsonpickle import encode
-
-            return [
-                json.loads(
-                    encode(
-                        i,
-                        unpicklable=False,
-                    )
-                )
-                for i in base_scheduler.tasks
-            ]
-        else:
-            return []
-
-
 @app.route("/weekly-plans", methods=["GET"])
 @require_token
 def get_weekly_plans():
@@ -1352,6 +1328,8 @@ def submit_feedback():
     start_time = ts_to_str(req.get("startTime"))
     end_time = ts_to_str(req.get("endTime"))
 
+    from arknights_mower.agent.tools.submit_issue import submit_issue
+
     return submit_issue(
         req.get("description", ""), req.get("type", ""), start_time, end_time
     )
@@ -1372,6 +1350,8 @@ def ws_chat(ws):
                 context.append({"role": "user", "content": user_input})
                 logger.debug(f"收到llm请求：{user_input}")
                 # 用流式生成器
+                from arknights_mower.agent.agent import ask_llm
+
                 for reply in ask_llm(
                     user_input, context=context, api_key=config.conf.resolved_ai_key
                 ):
@@ -1385,3 +1365,5 @@ def ws_chat(ws):
 
 
 app.register_blueprint(mastery_bp)
+app.register_blueprint(task_bp)
+app.register_blueprint(db_admin_bp)

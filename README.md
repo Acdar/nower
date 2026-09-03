@@ -59,12 +59,40 @@ pip install -r requirements.in
 pip install Flask flask-cors flask-sock pywebview
 ```
 
+### 识别等价测试与模型重训
+
+scipy、scikit-image、scikit-learn 仅用于开发期 golden 对照与模型重训，不属于运行依赖：
+
+```bash
+pip install -r requirements-dev.txt
+python -m unittest arknights_mower.tests.vision_np_tests
+```
+
+这些用例在上述三个库缺失时会整体跳过，因此 CI 的 `recognition-equivalence` 任务会安装开发依赖真正执行它们。
+
+识别层加载的是不含 sklearn 对象的 numpy 字典，而 `auto_get_res_new.py` 重新训练仓库识别模型（`NORMAL.pkl`、`CONSUME.pkl`）后写出的仍是 sklearn 对象，需要再折叠一次才能被加载：
+
+```bash
+python scripts/collapse_recognition_models.py
+```
+
+折叠脚本会先用 sklearn 原模型逐样本校验折叠结果，校验通过才原地替换；模型已经是折叠格式时会跳过并提示。
+
+运行依赖与开发依赖的锁文件必须由 Python 3.12 统一生成，避免环境 marker 与交付运行时不一致：
+
+```bash
+python -m pip install pip==25.3 pip-tools==7.6.0
+python scripts/compile_requirements.py
+```
+
+两份锁文件必须成对生成，`scripts/tests/requirements_sync_tests.py` 会校验它们的公共依赖版本一致。
+
 ### 打包（Windows）
 
 ```bash
 pip install pyinstaller
+python scripts/prune_opencv.py
 pyinstaller webui_zip.spec
-python scripts/fix_runtime_dlls.py
 ```
 
 生成的 `mower.exe` 在 `dist` 文件夹中，到此打包完成，已可使用。
@@ -73,12 +101,52 @@ python scripts/fix_runtime_dlls.py
 
 ```bash
 pip install pyinstaller
+python scripts/prune_opencv.py
 pyinstaller webui_zip_for_linux.spec
 ```
 
 生成的 `mower` 在 `dist` 文件夹中，到此打包完成，已可使用。
 
 注：Linux 下运行时，shell 会显示如 `Running on http://127.0.0.1:53703` 的输出，本地浏览器访问 `http://127.0.0.1:53703` 即进入 Mower 页面。
+
+> Linux 独立包仍依赖宿主机的部分系统动态库，并非完全便携。产物在 Ubuntu 24.04
+> 上构建，运行时要求 glibc >= 2.39，且需安装：`libzbar0`（二维码识别）、
+> `libgl1` 与 `libglib2.0-0`（OpenCV）、`libgtk-3-0` 与 `libwebkit2gtk-4.1-0`
+> （WebView 界面，Ubuntu 24.04 对应包名）。
+
+### 打包（macOS）
+
+```bash
+pip install pyinstaller
+brew install zbar
+python scripts/prune_opencv.py
+pyinstaller webui_zip_for_macos.spec
+```
+
+生成的 `mower.app` 在 `dist` 文件夹中，包含主程序与多开管理器。macOS 产物为
+**unsigned experimental build**（PyInstaller 仅做 ad-hoc 签名，非 Developer ID
+签名、未经 notarization），首次运行若被 Gatekeeper 拦截，需在「隐私与安全性」
+中手动允许；二维码识别依赖宿主机 `zbar`（`brew install zbar`）。
+
+### 正式版与 alpha 的产物和签名说明
+
+正式版与 alpha 共用跨平台发布流水线，为五个平台生成统一命名的独立包，并附带
+统一的 SHA-256 清单（SHA256SUMS）：
+
+```text
+arknights-mower_<version>_windows_x64.zip
+arknights-mower_<version>_linux_x64.tar.gz
+arknights-mower_<version>_linux_arm64.tar.gz
+arknights-mower_<version>_macos_x64.zip
+arknights-mower_<version>_macos_arm64.zip
+```
+
+发布入口、版本格式、构建检查和系统依赖见
+[跨平台发布流水线](doc/release-platforms.md)。
+
+Windows 与 macOS 产物均未签名：Windows 首次运行可能出现 SmartScreen 提示，请
+选择「更多信息 -> 仍要运行」；macOS 为 unsigned experimental build，可能需要在
+「隐私与安全性」中手动允许。建议下载后先核对 SHA256SUMS 再使用。
 
 ## Docker 部署
 
