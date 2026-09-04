@@ -16,7 +16,9 @@ export const useConfigStore = defineStore('config', () => {
   const maa_adb_path = ref('')
   const maa_enable = ref(false)
   const maa_path = ref('')
-  const maa_startup_check = ref(false)
+  const maa_mirrorchyan_token = ref('')
+  const maa_update_channel = ref('stable')
+  const maa_auto_check_update = ref(false)
   const maa_expiring_medicine = ref(true)
   const ap_fallback = ref(0)
   const maa_weekly_plan = ref([])
@@ -111,6 +113,7 @@ export const useConfigStore = defineStore('config', () => {
   const credit_fight = ref({})
   const custom_screenshot = ref({})
   const hot_update_enable = ref(false)
+  const hot_update_auto_update = ref(false)
   const notification_level = ref('INFO')
   const waiting_scene = ref({})
   const exipring_medicine_on_weekend = ref(false)
@@ -269,7 +272,9 @@ export const useConfigStore = defineStore('config', () => {
     maa_adb_path.value = response.data.maa_adb_path
     maa_enable.value = response.data.maa_enable != 0
     maa_path.value = response.data.maa_path
-    maa_startup_check.value = response.data.maa_startup_check
+    maa_mirrorchyan_token.value = response.data.maa_mirrorchyan_token || ''
+    maa_update_channel.value = response.data.maa_update_channel === 'beta' ? 'beta' : 'stable'
+    maa_auto_check_update.value = response.data.maa_auto_check_update ?? false
     maa_rg_enable.value = response.data.maa_rg_enable == 1
     maa_long_task_type.value = response.data.maa_long_task_type
     maa_expiring_medicine.value = response.data.maa_expiring_medicine
@@ -358,6 +363,7 @@ export const useConfigStore = defineStore('config', () => {
     t5_operators.value = response.data.t5_operators || ['年']
     book_operators.value = response.data.book_operators || ['司霆惊蛰']
     hot_update_enable.value = response.data.hot_update?.enable ?? false
+    hot_update_auto_update.value = response.data.hot_update?.auto_update ?? false
     notification_level.value = response.data.notification_level
     waiting_scene.value = response.data.waiting_scene
     exipring_medicine_on_weekend.value = response.data.exipring_medicine_on_weekend
@@ -382,7 +388,9 @@ export const useConfigStore = defineStore('config', () => {
       maa_adb_path: maa_adb_path.value,
       maa_enable: maa_enable.value ? 1 : 0,
       maa_path: maa_path.value,
-      maa_startup_check: maa_startup_check.value,
+      maa_mirrorchyan_token: maa_mirrorchyan_token.value,
+      maa_update_channel: maa_update_channel.value,
+      maa_auto_check_update: maa_auto_check_update.value,
       maa_rg_enable: maa_rg_enable.value ? 1 : 0,
       maa_long_task_type: maa_long_task_type.value,
       maa_expiring_medicine: maa_expiring_medicine.value,
@@ -474,7 +482,10 @@ export const useConfigStore = defineStore('config', () => {
       fodder_operators: fodder_operators.value,
       t5_operators: t5_operators.value,
       book_operators: book_operators.value,
-      hot_update: { enable: hot_update_enable.value },
+      hot_update: {
+        enable: hot_update_enable.value,
+        auto_update: hot_update_auto_update.value
+      },
       notification_level: notification_level.value,
       waiting_scene: waiting_scene.value,
       exipring_medicine_on_weekend: exipring_medicine_on_weekend.value,
@@ -525,7 +536,9 @@ export const useConfigStore = defineStore('config', () => {
     maa_adb_path,
     maa_enable,
     maa_path,
-    maa_startup_check,
+    maa_mirrorchyan_token,
+    maa_update_channel,
+    maa_auto_check_update,
     maa_rg_enable,
     maa_long_task_type,
     maa_expiring_medicine,
@@ -617,6 +630,7 @@ export const useConfigStore = defineStore('config', () => {
     credit_fight,
     custom_screenshot,
     hot_update_enable,
+    hot_update_auto_update,
     notification_level,
     waiting_scene,
     exipring_medicine_on_weekend,

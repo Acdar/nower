@@ -60,10 +60,6 @@ from arknights_mower.utils.email import maa_template, send_message, task_templat
 from arknights_mower.utils.graph import SceneGraphSolver
 from arknights_mower.utils.image import cropimg, loadres, thres2
 from arknights_mower.utils.log import logger
-from arknights_mower.utils.maa_check import (
-    is_maa_connectivity_check_enabled,
-    run_maa_connectivity_check,
-)
 from arknights_mower.utils.operators import (
     TRADE_ORDER_AGENTS,
     Operator,
@@ -106,6 +102,22 @@ def _cleanup_maa_temp_files():
             os.remove(f)
         except OSError:
             pass
+
+
+def _add_group_to_fix_plan(fix_plan: dict, op_data: Operators, group: str) -> None:
+    """把组内真正不在岗的成员写进 fix_plan；已在静态槽位的成员跳过。
+
+    已在岗成员写进去只是 no-op：arrange 逐房间对比后「任务与当前房间相同，
+    跳过」。当唯一真实修复项（如训练室）被 _suppress_train_correction 抑制时，
+    no-op 项撑起 fix_plan 永不收敛 → 排班死循环（#229）。
+    """
+    for name in op_data.groups[group]:
+        agent = op_data.operators[name]
+        if agent.room == agent.current_room and agent.index == agent.current_index:
+            continue
+        if agent.room not in fix_plan:
+            fix_plan[agent.room] = ["Current"] * len(op_data.plan[agent.room])
+        fix_plan[agent.room][agent.index] = name
 
 
 class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
@@ -249,11 +261,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             ]
         logger.debug(f"更新下班小组信息为{candidates}")
         # 在candidate 中，计算出需要的high free 和 Low free 数量
-        current_resting = (
-            len(self.op_data.dorm)
-            - self.op_data.available_free()
-            - self.op_data.available_free("low")
-        )
+        # 只计算无法直接接管的主力床位。低优、替班和临时休息干员会让床，
+        # 不能在这里阻止整个大组尝试下班。
+        current_resting = self.op_data.active_high_resting_count()
         plan = {}
         self.get_resting_plan(candidates, [], plan, current_resting)
         if len(plan.items()) > 0:
@@ -640,6 +650,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 elif self.task.type == TaskTypes.REFRESH_TIME:
                     self.plan_run_order(self.task.meta_data)
                     self.skip(["todo_task", "collect_notification"])
+                elif self.task.type == TaskTypes.DEPOT:
+                    self.仓库扫描()
                 elif self.task.type == TaskTypes.NOT_SPECIFIC:
                     pass
                 del self.tasks[0]
@@ -926,15 +938,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     logger.debug(f"跳过检查{_agent}")
                     continue
                 elif _agent.group != "":
-                    # 把所有小组成员都移到工作站
-                    agents = self.op_data.groups[_agent.group]
-                    for a in agents:
-                        __agent = self.op_data.operators[a]
-                        if __agent.room not in fix_plan.keys():
-                            fix_plan[__agent.room] = ["Current"] * len(
-                                self.op_data.plan[__agent.room]
-                            )
-                        fix_plan[__agent.room][__agent.index] = a
+                    # 把所有小组成员都移到工作站（已在岗成员跳过，避免 no-op 假任务）
+                    _add_group_to_fix_plan(fix_plan, self.op_data, _agent.group)
                 if _agent.room not in fix_plan.keys():
                     fix_plan[_agent.room] = ["Current"] * len(
                         self.op_data.plan[_agent.room]
@@ -1602,8 +1607,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         # 根据剩余心情排序
         self.total_agent = list(
             v
-            for k, v in self.op_data.operators.items()
-            if v.is_high() and not v.room.startswith("dorm")
+            for v in self.op_data.operators.values()
+            if (v.is_high() or (v.current_room == "" and v.room == ""))
+            and not v.room.startswith("dorm")
         )
         self.total_agent.sort(key=lambda x: x.current_mood(), reverse=False)
         # 目前有换班的计划后面改
@@ -1642,14 +1648,16 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
     def resting(self):
         self.total_agent.sort(
-            key=lambda x: x.current_mood() - x.lower_limit, reverse=False
+            key=lambda x: (
+                self._resting_tier(x),
+                x.current_mood() - x.lower_limit,
+            ),
+            reverse=False,
         )
         self.plan_metadata()
-        current_resting = (
-            len(self.op_data.dorm)
-            - self.op_data.available_free()
-            - self.op_data.available_free("low")
-        )
+        # 理想休息人数只描述主力轮休；低优占床另由 available_free("low")
+        # 管理，不能抬高这里的当前人数或挡住可接管床位上的大组。
+        current_resting = self.op_data.active_high_resting_count()
         # 阈值暂定为 0.5
         self.ideal_resting_count = (
             4
@@ -1672,11 +1680,19 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             has_active_mastery = False
         _replacement = []
         _plan = {}
+        _high_done = False
+        _low_used = set()
         for op in self.total_agent:
-            if (
-                current_resting + len(_replacement) >= self.ideal_resting_count
-                and self.op_data.available_free() == 0
-            ):
+            if op.is_high():
+                if _high_done:
+                    continue
+                if (
+                    current_resting + len(_replacement) >= self.ideal_resting_count
+                    and self.op_data.available_free() == 0
+                ):
+                    _high_done = True
+                    continue
+            elif self.op_data.available_free("low") == 0:
                 break
             if op.name in self.op_data.workaholic_agent:
                 continue
@@ -1701,6 +1717,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 + op.lower_limit
             ):
                 continue
+            if not op.is_high():
+                _dorm = self.op_data.assign_dorm(op.name, True, used=_low_used)
+                if _dorm is not None:
+                    logger.debug(f"安排低优{op.name}休息 -> {_dorm.position}")
+                continue
             if op.group != "":
                 if op.group in self.op_data.exhaust_group:
                     # 忽略掉用尽心情的分组
@@ -1717,6 +1738,18 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             )
             logger.info(f"生成{_plan}的下班任务")
         return _plan
+
+    _REST_TIER_HIGH = 0
+    _REST_TIER_MARKED_LOW = 1
+    _REST_TIER_REPLACEMENT = 2
+
+    @staticmethod
+    def _resting_tier(op):
+        if op.is_high() and op.resting_priority == "high":
+            return BaseSchedulerSolver._REST_TIER_HIGH
+        if op.is_high():
+            return BaseSchedulerSolver._REST_TIER_MARKED_LOW
+        return BaseSchedulerSolver._REST_TIER_REPLACEMENT
 
     def backup_plan_solver(self, timing=None, append_empty_task=True):
         if timing is None:
@@ -1804,8 +1837,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         logger.debug(f"需求:{required}宿舍空位")
         logger.debug(f"需求:{exist_replacement} 当前安排")
         logger.debug(f"当前计划{plan}")
-        if current_resting + required + len(exist_replacement) > len(self.op_data.dorm):
-            return
         success = True
 
         fia_plan, fia_room = self.check_fia()
@@ -1856,15 +1887,17 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             else:
                 success = False
         if success:
-            # 记录替换组
+            resting_agents = [
+                x for x in agents if not self.op_data.operators[x].workaholic
+            ]
+            # 床位判断和分配使用同一套规则。先为整组模拟预留，避免低优占床
+            # 提前挡住大组，也避免分到一半才失败留下脏状态。
+            dorms = self.op_data.assign_dorm_group(resting_agents)
+            if dorms is None:
+                return
             logger.debug(f"当前替换{__replacement}")
             exist_replacement.extend(__replacement)
-            for idx, x in enumerate(agents):
-                # 0心情不需要宿舍位
-                if self.op_data.operators[x].workaholic:
-                    continue
-                _dorm = self.op_data.assign_dorm(x, True)
-            logger.debug(_dorm)
+            logger.debug(dorms)
             for k, v in __plan.items():
                 if k not in plan.keys():
                     plan[k] = __plan[k]
@@ -3764,23 +3797,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         #     logger.info(f"开始扫描仓库（MAA）")
         #     process_itemlist(d)
 
-    def check_maa_connectivity(self, context: str) -> None:
-        device_id = self.device.client.device_id
-        logger.info(f"{context}测试Maa连接：{device_id}")
-        result = run_maa_connectivity_check(adb=device_id)
-        if result["status"] != "success":
-            raise RuntimeError(f"{context}Maa连接测试失败：{result['message']}")
-        logger.info(f"{context}Maa连接测试通过：{result['message']}")
-
     def initialize_maa(self):
         config.stop_maa.clear()
-        if is_maa_connectivity_check_enabled():
-            # 上一个 Assistant 即使已停止任务仍保持设备连接，会让
-            # 调用前检测变成“第二条 Maa 连接”并造成误报。仅在启用
-            # 自动检测时提前释放，关闭开关时保持原有连接生命周期。
-            if getattr(self, "MAA", None) is not None:
-                self.MAA = None
-            self.check_maa_connectivity("调用前")
         conf = config.conf
         path = pathlib.Path(conf.maa_path)
         asst_path = os.path.dirname(path / "Python" / "asst")
@@ -3893,16 +3911,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         else:
             logger.info("MAA 连接失败")
             raise Exception("MAA 连接失败")
-
-    def rest_after_maa(self):
-        # 自动检测开启时，休眠期间也允许手动发起独立连通性测试；
-        # 关闭时则保留原逻辑，在休眠结束后才释放 Assistant。
-        release_maa_before_rest = is_maa_connectivity_check_enabled()
-        if release_maa_before_rest:
-            self.MAA = None
-        self.rest_until_next_task()
-        if not release_maa_before_rest:
-            self.MAA = None
 
     def append_maa_task(self, type):
         if type in ["StartUp", "Visit"]:
@@ -4155,7 +4163,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     sf_solver = SecretFront(self.device, self.recog)
                     sf_solver.run(self.tasks[0].time - datetime.now())
 
-            self.rest_after_maa()
+            self.rest_until_next_task()
+            self.MAA = None
         except MowerExit:
             if self.MAA is not None:
                 self.maa_stop()

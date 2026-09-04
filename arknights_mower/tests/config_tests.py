@@ -7,6 +7,30 @@ from unittest.mock import patch
 
 from arknights_mower.utils import config as config_module
 from arknights_mower.utils.config import atomic_write, migrate_app_config_paths
+from arknights_mower.utils.config.conf import Conf
+
+
+class TestMaaConfig(unittest.TestCase):
+    def test_mirrorchyan_token_round_trip(self):
+        conf = Conf(
+            maa_mirrorchyan_token="fixture-token",
+            maa_update_channel="beta",
+            maa_auto_check_update=True,
+        )
+        restored = Conf(**conf.model_dump())
+        self.assertEqual(restored.maa_mirrorchyan_token, "fixture-token")
+        self.assertEqual(restored.maa_update_channel, "beta")
+        self.assertTrue(restored.maa_auto_check_update)
+
+
+class TestUpdateConfig(unittest.TestCase):
+    def test_auto_update_enables_check_and_round_trips(self):
+        conf = Conf(hot_update={"enable": False, "auto_update": True})
+        self.assertTrue(conf.hot_update.enable)
+        self.assertTrue(conf.hot_update.auto_update)
+        restored = Conf(**conf.model_dump())
+        self.assertTrue(restored.hot_update.enable)
+        self.assertTrue(restored.hot_update.auto_update)
 
 
 class TestAtomicWrite(unittest.TestCase):
