@@ -465,6 +465,25 @@ def _check_hot_update_on_launch():
 Thread(target=_check_hot_update_on_launch, daemon=True).start()
 
 
+def _watch_shared_resource_changes():
+    """其他实例更新共享资源后，在本实例空闲时刷新进程内缓存。"""
+    from arknights_mower.utils.resource_pkg import reload_resource_caches_if_changed
+
+    while True:
+        time.sleep(1)
+        if _mower_busy_response():
+            continue
+        try:
+            if reload_resource_caches_if_changed():
+                _request_title_refresh()
+        except Exception:
+            logger.exception("刷新其他 mower 实例更新的共享资源失败")
+            time.sleep(30)
+
+
+Thread(target=_watch_shared_resource_changes, daemon=True).start()
+
+
 def require_token(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -480,17 +499,42 @@ def serve_index(path):
     return send_from_directory("ui/dist", path)
 
 
+def _serve_resource(base_dir: Path, relative: str):
+    """serve 资源包目录下的单个文件；不存在则返回 None，由调用方决定兜底。
+
+    资源包装到 ``@app/tmp/resource`` 后按仓库相对路径存放，这里从 base 下取出一个文件并
+    打 ``no-cache`` 保证刷新即生效。resolve 后校验仍位于 base 之下，避免路径穿越读到目录外。
+    """
+    base = base_dir.resolve()
+    p = (base / relative).resolve()
+    if base in p.parents and p.is_file():
+        response = send_file(p)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+    return None
+
+
 @app.before_request
 def serve_resource_overlay():
     """资源包 webp（depot/avatar/building_skill）overlay 优先，刷新即生效。"""
     path = request.path.lstrip("/")
     if path.startswith(("depot/", "avatar/", "building_skill/")):
-        base = Path(get_path("@app/tmp/resource/ui/public"))
-        p = (base / path).resolve()
-        if base.resolve() in p.parents and p.is_file():
-            response = send_file(p)
-            response.headers["Cache-Control"] = "no-cache"
-            return response
+        return _serve_resource(
+            Path(get_path("@app/tmp/resource/ui/public", space="")), path
+        )
+
+
+@app.route("/basement_skill/<filename>")
+def serve_basement_skill(filename):
+    """基建技能数据（skill.json/buffer.json）运行时下发，资源包优先、无则 404。
+
+    注意不要用 abort(404)：@app.errorhandler(404) 会把它兜底成 index.html(200)，
+    前端拉不到资源会拿到 HTML 而非 JSON；直接返回 (…, 404) 才能被 axios 当失败处理。
+    """
+    return _serve_resource(
+        Path(get_path("@app/tmp/resource/ui/src/pages/basement_skill", space="")),
+        filename,
+    ) or ("", 404)
 
 
 @app.after_request
@@ -552,6 +596,7 @@ def load_config():
             )
 
             manager = get_weekly_plan_manager()
+            manager.maybe_switch_expired_activity_plan()
             manager.sync_active_plan_to_config()
         except Exception:
             logger.exception("Failed to sync active weekly plan before returning /conf")
@@ -626,8 +671,8 @@ def stage_latest_activity():
     """刷理智周计划：最近开启活动（stage_data_full 热更后最新）的选中关。
 
     返回 [{value, label, code, materials}]，按代号尾号大到小。材料仅 MATERIAL 常规掉落
-    （剔 ACTIVITY_ITEM/COMPLETE）；库存取自 @app/tmp/cultivate.json（{id: count}）——
-    该材料缺档或为 0 时不带 (库存:n)。
+    （剔 ACTIVITY_ITEM/COMPLETE）；库存取自 @app/tmp/cultivate.json（{id: count}），
+    该材料缺档时按 0 完整显示。
     """
     from arknights_mower.data import key_mapping, stage_data_full
     from arknights_mower.utils.weekly_stage import (
@@ -652,6 +697,31 @@ def stage_latest_activity():
         list(stage_data_full), key_mapping, int(time.time())
     )
     return build_options(selected, inventory)
+
+
+@app.route("/stage/inventory-rules")
+@require_token
+def stage_inventory_rules():
+    """库存选关配置所需的关卡、默认掉落、物品及库存快照。"""
+    from arknights_mower.utils.maa_stage_inventory import (
+        build_item_options,
+        build_stage_options,
+        load_inventory_snapshot,
+    )
+
+    inventory, updated_at = load_inventory_snapshot()
+    stages, activity_ratio_suggestion = build_stage_options(
+        weekly_plan=config.conf.maa_weekly_plan,
+        limit_rules=config.conf.maa_stage_limit_rules,
+        ratio_rules=config.conf.maa_stage_ratio_rules,
+    )
+    return {
+        "stages": stages,
+        "items": build_item_options(),
+        "inventory": inventory,
+        "inventory_updated_at": updated_at,
+        "activity_ratio_suggestion": activity_ratio_suggestion,
+    }
 
 
 @app.route("/status")
@@ -808,14 +878,32 @@ def get_latest_screenshot():
     return ""
 
 
+def _webview_conn():
+    """返回当前存活的 WebView 子进程连接；未启动或已退出时返回 None。"""
+    process = getattr(config, "webview_process", None)
+    conn = getattr(config, "parent_conn", None)
+    if process is None or conn is None or not process.is_alive():
+        return None
+    return conn
+
+
+def _request_title_refresh():
+    """资源包变更后让 WebView 子进程重算并刷新窗口标题（fire-and-forget，不等待回执）。"""
+    conn = _webview_conn()
+    if conn is None:
+        return
+    try:
+        conn.send("title")
+    except Exception:
+        logger.exception("通知 WebView 刷新窗口标题失败")
+
+
 def conn_send(text):
-    from arknights_mower.utils import config
-
-    if not config.webview_process.is_alive():
+    conn = _webview_conn()
+    if conn is None:
         return ""
-
-    config.parent_conn.send(text)
-    return config.parent_conn.recv()
+    conn.send(text)
+    return conn.recv()
 
 
 @app.route("/dialog/file")
@@ -892,7 +980,10 @@ def hot_update_manual():
     update_file = request.files.get("update")
     if update_file is None:
         return {"ok": False, "message": "没有收到更新包文件"}
-    return apply_manual_update(update_file.read(), _mower_busy_response)
+    result = apply_manual_update(update_file.read(), _mower_busy_response)
+    if result.get("ok") and result.get("kind") == "resource":
+        _request_title_refresh()
+    return result
 
 
 @app.route("/dialog/save/img", methods=["POST"])
@@ -1644,6 +1735,7 @@ def install_resource():
         return {"ok": False, "message": "资源包下载失败，请检查网络"}
     if not install_resource_pkg(data):
         return {"ok": False, "message": "资源包安装失败（已回滚）"}
+    _request_title_refresh()
     return {
         "ok": True,
         "restart_required": False,
@@ -2209,7 +2301,44 @@ def get_weekly_plans():
     from arknights_mower.utils.config.weekly_plan_loader import get_weekly_plan_manager
 
     manager = get_weekly_plan_manager()
-    return {"plans": manager.get_plans()}
+    return {
+        "plans": manager.get_plans(),
+        "activity_fallbacks": manager.get_activity_fallbacks(),
+        "activity_fallback_switch_times": (
+            manager.get_activity_fallback_switch_times()
+        ),
+        "activity_plan_end_times": manager.get_activity_plan_end_times(),
+    }
+
+
+@app.route("/weekly-plans/activity-fallback", methods=["POST"])
+@require_token
+def update_weekly_plan_activity_fallback():
+    from arknights_mower.utils.config.weekly_plan_loader import get_weekly_plan_manager
+
+    try:
+        req = request.json or {}
+        manager = get_weekly_plan_manager()
+        source = str(req.get("source", "")).strip()
+        target = str(req.get("target", "")).strip()
+        if "switch_time" in req:
+            updated = manager.set_activity_fallback(
+                source, target, switch_time=req.get("switch_time")
+            )
+        else:
+            updated = manager.set_activity_fallback(source, target)
+        if not updated:
+            return {"error": "Invalid activity fallback plan binding"}, 400
+        return {
+            "activity_fallbacks": manager.get_activity_fallbacks(),
+            "activity_fallback_switch_times": (
+                manager.get_activity_fallback_switch_times()
+            ),
+            "activity_plan_end_times": manager.get_activity_plan_end_times(),
+        }
+    except Exception as e:
+        logger.exception(f"Failed to update weekly plan activity fallback: {e}")
+        return {"error": str(e)}, 500
 
 
 @app.route("/weekly-plans/active", methods=["POST"])
@@ -2238,6 +2367,11 @@ def update_active_weekly_plan():
         return {
             "active": active_key,
             "plan": new_plan,
+            "activity_fallbacks": manager.get_activity_fallbacks(),
+            "activity_fallback_switch_times": (
+                manager.get_activity_fallback_switch_times()
+            ),
+            "activity_plan_end_times": manager.get_activity_plan_end_times(),
         }
     except Exception as e:
         logger.exception(f"Failed to update weekly plan: {e}")

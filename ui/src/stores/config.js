@@ -24,6 +24,12 @@ export const useConfigStore = defineStore('config', () => {
   const maa_weekly_plan = ref([])
   const maa_weekly_plan_options = ref([])
   const maa_weekly_plan_active = ref('')
+  const maa_weekly_plan_activity_fallbacks = ref({})
+  const maa_weekly_plan_activity_switch_times = ref({})
+  const maa_weekly_plan_activity_end_times = ref({})
+  const maa_stage_inventory_enable = ref(false)
+  const maa_stage_limit_rules = ref([])
+  const maa_stage_ratio_rules = ref([])
   const maa_rg_enable = ref(0)
   const maa_long_task_type = ref('rogue')
   const mail_enable = ref(false)
@@ -173,11 +179,72 @@ export const useConfigStore = defineStore('config', () => {
     })
   }
 
+  function normalizeStageLimitRules(rawRules) {
+    if (!Array.isArray(rawRules)) {
+      return []
+    }
+    return rawRules
+      .filter((rule) => rule && typeof rule.stage === 'string' && rule.stage.trim())
+      .map((rule) => ({
+        stage: rule.stage.trim(),
+        operator: rule.operator === 'or' ? 'or' : 'and',
+        enabled: rule.enabled !== false,
+        items: (Array.isArray(rule.items) ? rule.items : [])
+          .filter((item) => item && (item.item_id || item.item_name))
+          .map((item) => ({
+            item_id: String(item.item_id || item.item_name || '').trim(),
+            item_name: String(item.item_name || item.item_id || '').trim(),
+            limit: Math.max(0, Number.isFinite(Number(item.limit)) ? Number(item.limit) : 0)
+          }))
+      }))
+  }
+
+  function normalizeStageRatioRules(rawRules) {
+    if (!Array.isArray(rawRules)) {
+      return []
+    }
+    return rawRules.map((rule, index) => ({
+      name: String(rule?.name || `比例规则 ${index + 1}`).trim(),
+      enabled: rule?.enabled !== false,
+      members: (Array.isArray(rule?.members) ? rule.members : [])
+        .filter((member) => member && member.stage && (member.item_id || member.item_name))
+        .map((member) => ({
+          stage: String(member.stage).trim(),
+          item_id: String(member.item_id || member.item_name || '').trim(),
+          item_name: String(member.item_name || member.item_id || '').trim(),
+          ratio: Math.max(0, Number.isFinite(Number(member.ratio)) ? Number(member.ratio) : 0)
+        }))
+    }))
+  }
+
+  function normalizeTimestampMap(rawValue) {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+      return {}
+    }
+    return Object.fromEntries(
+      Object.entries(rawValue)
+        .map(([key, value]) => [key, Number(value)])
+        .filter(([, value]) => Number.isFinite(value) && value > 0)
+    )
+  }
+
+  function applyWeeklyPlanMetadata(data = {}) {
+    maa_weekly_plan_activity_fallbacks.value =
+      data.activity_fallbacks && typeof data.activity_fallbacks === 'object'
+        ? data.activity_fallbacks
+        : {}
+    maa_weekly_plan_activity_switch_times.value = normalizeTimestampMap(
+      data.activity_fallback_switch_times
+    )
+    maa_weekly_plan_activity_end_times.value = normalizeTimestampMap(data.activity_plan_end_times)
+  }
+
   async function load_weekly_plan_state() {
     const listResponse = await axios.get(`${import.meta.env.VITE_HTTP_URL}/weekly-plans`)
     maa_weekly_plan_options.value = Array.isArray(listResponse.data.plans)
       ? listResponse.data.plans
       : []
+    applyWeeklyPlanMetadata(listResponse.data)
 
     if (!maa_weekly_plan_active.value) {
       await update_weekly_plan_active('默认', normalizeWeeklyPlan(maa_weekly_plan.value))
@@ -210,6 +277,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_weekly_plan_options.value = Array.from(
         new Set([...maa_weekly_plan_options.value, response.data.active])
       )
+      applyWeeklyPlanMetadata(response.data)
       return response.data
     } finally {
       syncingWeeklyPlan.value = false
@@ -241,10 +309,31 @@ export const useConfigStore = defineStore('config', () => {
       maa_weekly_plan_options.value = Array.isArray(listResponse.data.plans)
         ? listResponse.data.plans
         : []
+      applyWeeklyPlanMetadata(listResponse.data)
       return response.data
     } finally {
       syncingWeeklyPlan.value = false
     }
+  }
+
+  async function update_weekly_plan_activity_fallback(target, switchTime = undefined) {
+    const source = maa_weekly_plan_active.value
+    if (!source) {
+      throw new Error('请先选择周计划方案')
+    }
+    const payload = {
+      source,
+      target: typeof target === 'string' ? target.trim() : ''
+    }
+    if (switchTime !== undefined) {
+      payload.switch_time = switchTime
+    }
+    const response = await axios.post(
+      `${import.meta.env.VITE_HTTP_URL}/weekly-plans/activity-fallback`,
+      payload
+    )
+    applyWeeklyPlanMetadata(response.data)
+    return response.data
   }
 
   function normalizeLaunchConfig(config = {}) {
@@ -281,6 +370,9 @@ export const useConfigStore = defineStore('config', () => {
     ap_fallback.value = Number(response.data.ap_fallback) || 0
     maa_weekly_plan.value = normalizeWeeklyPlan(response.data.maa_weekly_plan)
     maa_weekly_plan_active.value = response.data.maa_weekly_plan_active || ''
+    maa_stage_inventory_enable.value = response.data.maa_stage_inventory_enable === true
+    maa_stage_limit_rules.value = normalizeStageLimitRules(response.data.maa_stage_limit_rules)
+    maa_stage_ratio_rules.value = normalizeStageRatioRules(response.data.maa_stage_ratio_rules)
     mail_enable.value = response.data.mail_enable != 0
     account.value = response.data.account
     pass_code.value = response.data.pass_code
@@ -398,6 +490,9 @@ export const useConfigStore = defineStore('config', () => {
       server_push_enable: server_push_enable.value ? 1 : 0,
       sendKey: sendKey.value,
       ap_fallback: ap_fallback.value,
+      maa_stage_inventory_enable: maa_stage_inventory_enable.value,
+      maa_stage_limit_rules: normalizeStageLimitRules(maa_stage_limit_rules.value),
+      maa_stage_ratio_rules: normalizeStageRatioRules(maa_stage_ratio_rules.value),
       mail_enable: mail_enable.value ? 1 : 0,
       package_type: package_type.value == 'official' ? 1 : 0,
       pass_code: pass_code.value,
@@ -546,6 +641,12 @@ export const useConfigStore = defineStore('config', () => {
     maa_weekly_plan,
     maa_weekly_plan_options,
     maa_weekly_plan_active,
+    maa_weekly_plan_activity_fallbacks,
+    maa_weekly_plan_activity_switch_times,
+    maa_weekly_plan_activity_end_times,
+    maa_stage_inventory_enable,
+    maa_stage_limit_rules,
+    maa_stage_ratio_rules,
     server_push_enable,
     sendKey,
     mail_enable,
@@ -642,6 +743,7 @@ export const useConfigStore = defineStore('config', () => {
     load_weekly_plan_state,
     update_weekly_plan_active,
     sync_active_weekly_plan,
-    delete_weekly_plan
+    delete_weekly_plan,
+    update_weekly_plan_activity_fallback
   }
 })

@@ -9,7 +9,7 @@ import urllib
 from collections import defaultdict, deque
 from ctypes import CFUNCTYPE, c_char_p, c_int, c_void_p
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Literal, Optional
 
 import cv2
 
@@ -67,7 +67,7 @@ from arknights_mower.utils.operators import (
 )
 from arknights_mower.utils.path import get_path
 from arknights_mower.utils.plan import PlanTriggerTiming
-from arknights_mower.utils.recognize import Recognizer, Scene
+from arknights_mower.utils.recognize import RecognizeError, Recognizer, Scene
 from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
@@ -2454,6 +2454,39 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 break
         return None
 
+    def _tap_drone_accelerate(
+        self,
+        accelerate_res: str,
+        all_in_res: str,
+        max_retry: int = 3,
+        interval: float = 1,
+    ) -> Optional[tp.Scope]:
+        """点击无人机加速按钮并确认加速面板打开，有界重试。
+
+        首次点击可能因界面未响应而未打开面板，此时仍停留在详情页；若不确认
+        all_in 出现就继续操作，会在详情页上误触。每次重试前重新识别加速按钮，
+        确认仍处于可点击的详情页后再点击。持续失败时抛出异常，让上层保留任务
+        并按既有策略退避，而不是把未执行的跑单当成已完成。
+        """
+        accelerate = self.find(accelerate_res)
+        for _ in range(max_retry):
+            if accelerate is None:
+                break
+            self.tap(accelerate, interval=interval)
+            all_in = self.find(all_in_res)
+            if all_in is not None:
+                return all_in
+            logger.debug(f"无人机加速面板未出现，重新识别 {accelerate_res} 后重试")
+            accelerate = self.find(accelerate_res)
+            if accelerate is None:
+                # 加速按钮消失通常意味着面板已打开：等一帧再确认 all_in，避免误判
+                self.sleep(0.5)
+                all_in = self.find(all_in_res)
+                if all_in is not None:
+                    return all_in
+                break
+        raise RecognizeError(f"无人机加速面板未出现：未识别到 {all_in_res}")
+
     def drone(
         self,
         room: str,
@@ -2483,8 +2516,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 logger.info(f"无人机数量小于{config.conf.drone_count_limit}->停止")
                 return
             logger.info("制造站加速")
-            self.tap(accelerate)
-            # self.tap_element('all_in')
+            all_in_scope = self._tap_drone_accelerate("factory_accelerate", "all_in")
             # 如果不是全部all in
             if all_in > 0:
                 tap_times = (
@@ -2493,14 +2525,14 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 for _count in range(tap_times):
                     self.tap((self.recog.w * 0.7, self.recog.h * 0.5), interval=0.1)
             else:
-                self.tap_element("all_in")
+                self.tap(all_in_scope)
             self.tap(accelerate, y_rate=1)
         else:
             accelerate = self.find("bill_accelerate")
             while accelerate and not adjust_time:
                 logger.info("贸易站加速")
-                self.tap(accelerate)
-                self.tap_element("all_in")
+                all_in_scope = self._tap_drone_accelerate("bill_accelerate", "all_in")
+                self.tap(all_in_scope)
                 self.tap((self.recog.w * 0.75, self.recog.h * 0.8))
                 if self.scene() in self.waiting_scene:
                     if not self.waiting_solver():
@@ -3635,6 +3667,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     def agent_arrange(self, plan: tp.BasePlan, get_time=False):
         logger.info("基建：排班")
         rooms = list(plan.keys())
+        # 保存原班：#907 无人机加速失败时恢复，避免任务以空 plan 在下一轮被误消费
+        original_plan = (
+            copy.deepcopy(plan) if self.task.type == TaskTypes.RUN_ORDER else None
+        )
         new_plan = {}
         # 优先替换工作站再替换宿舍
         rooms.sort(
@@ -3650,7 +3686,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 if self.task.adjusted:
                     logger.info("检测到跑单已调整，强制使用无人机跑单")
                 logger.info("开始插拔")
-                self.drone(room, not_customize=True)
+                try:
+                    self.drone(room, not_customize=True)
+                except Exception:
+                    # #907：无人机加速失败时恢复原班，避免任务以空 plan 在下轮被误消费
+                    if original_plan is not None:
+                        self.task.plan = original_plan
+                    raise
             else:
                 # 葛朗台跑单模式
                 self._wait_drone_interface()
@@ -3916,6 +3958,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if type in ["StartUp", "Visit"]:
             self.MAA.append_task(type)
         elif type == "Fight":
+            self.maybe_switch_expired_activity_plan()
             conf = config.conf
             server_weekday = get_server_weekday()
             _plan = conf.maa_weekly_plan[server_weekday]
@@ -3926,7 +3969,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     use_medicine = server_weekday >= 5
                 else:
                     use_medicine = True
-            for stage in _plan.stage:
+            stages = self.apply_maa_stage_inventory_rules(_plan.stage)
+            for stage in stages:
                 logger.info(f"添加关卡:{stage}")
                 self.MAA.append_task(
                     "Fight",
@@ -3947,6 +3991,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     },
                 )
                 self.stages.append(stage)
+
         elif type == "Mall":
             conf = config.conf
             self.MAA.append_task(
@@ -3974,6 +4019,18 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     "specialaccess": config.conf.maa_specialaccess,
                 },
             )
+
+    def maybe_switch_expired_activity_plan(self):
+        """刷理智实际选关前，根据活动方案的切换时间更新周计划。"""
+        try:
+            from arknights_mower.utils.config.weekly_plan_loader import (
+                get_weekly_plan_manager,
+            )
+
+            return get_weekly_plan_manager().maybe_switch_expired_activity_plan()
+        except Exception:
+            logger.exception("检测活动结束并切换刷理智周计划失败，继续使用当前方案")
+            return None
 
     def maa_stop(self, stop=True):
         if stop:
@@ -4207,7 +4264,54 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             self.last_execution["recruit"] = datetime.now()
             logger.info(f"下一次公开招募执行时间在{config.conf.recruit_gap}小时之后")
 
+    def apply_maa_stage_inventory_rules(self, stages) -> list[str]:
+        conf = config.conf
+        original = list(stages)
+        if not conf.maa_stage_inventory_enable:
+            return original
+        if not conf.maa_stage_limit_rules and not conf.maa_stage_ratio_rules:
+            return original
+
+        from arknights_mower.utils.maa_stage_inventory import (
+            load_inventory_snapshot,
+            select_stages_by_inventory,
+        )
+
+        try:
+            cultivateDepotSolver().start()
+        except Exception:
+            logger.exception("刷新森空岛库存失败，继续使用本地库存快照")
+        inventory, updated_at = load_inventory_snapshot()
+        selection = select_stages_by_inventory(
+            original,
+            limit_rules=conf.maa_stage_limit_rules,
+            ratio_rules=conf.maa_stage_ratio_rules,
+            inventory=inventory,
+        )
+        if selection["limit_fallback"]:
+            logger.info("全部关卡均达到库存上限，本次忽略库存跳过设置")
+        elif selection["limit_skipped"]:
+            logger.info(
+                "库存达到上限，跳过关卡: %s",
+                selection["limit_skipped"],
+            )
+        for decision in selection["ratio_decisions"]:
+            logger.info(
+                "库存比例选关 | rule=%s | selected=%s | candidates=%s",
+                decision["name"],
+                decision["selected"],
+                decision["candidates"],
+            )
+        logger.info(
+            "库存选关完成 | snapshot=%s | original=%s | selected=%s",
+            updated_at,
+            original,
+            selection["stages"],
+        )
+        return selection["stages"]
+
     def mower_stage_plan(self) -> list[str]:
+        self.maybe_switch_expired_activity_plan()
         plan = config.conf.maa_weekly_plan[get_server_weekday()]
         stages = []
         for stage in plan.stage:
@@ -4217,7 +4321,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             if not stage:
                 continue
             stages.append(stage)
-        return stages
+        return self.apply_maa_stage_inventory_rules(stages)
 
     def mower_stage_ap_cost(self, stage_id: str) -> int | None:
         stage_meta = next(

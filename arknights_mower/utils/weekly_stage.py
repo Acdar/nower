@@ -17,7 +17,7 @@ difficulty。id 即关卡代号（如 TO-9、TO-S-4）。
 
 只取 MATERIAL 类型、常规掉落（dropType 常规/NORMAL）的材料；剔 ACTIVITY_ITEM/COMPLETE。
 展示的掉落物：掉固源岩/装置（30012/30062）的关只展示这两种，其余关展示其全部
-MATERIAL 常规掉落；库存格式 `材料(库存:n)`。
+MATERIAL 常规掉落；库存格式 `材料(库存:n)`，无快照记录时显示 0。
 """
 
 import re
@@ -113,6 +113,26 @@ def _drops_target(stage) -> bool:
     )
 
 
+def activity_end_ts_for_stages(stages, stage_ids) -> int | None:
+    """返回指定关卡所属活动的最晚结束时间；没有可识别活动窗口时返回 None。"""
+    selected = {
+        str(stage_id).strip()
+        for stage_id in stage_ids or []
+        if isinstance(stage_id, str) and stage_id.strip()
+    }
+    if not selected:
+        return None
+
+    end_times = []
+    for stage in stages:
+        if stage.get("stageType") != "ACTIVITY" or _stage_code(stage) not in selected:
+            continue
+        window = _window(stage)
+        if window is not None:
+            end_times.append(int(window[1]))
+    return max(end_times) if end_times else None
+
+
 def select_latest_activity_stages(stages, key_mapping, now) -> list[dict]:
     """返回「最近开启活动」的选中普通关，按代号尾号大到小。
 
@@ -184,7 +204,7 @@ def select_latest_activity_stages(stages, key_mapping, now) -> list[dict]:
 def build_options(selected, inventory) -> list[dict]:
     """把选中关拼成前端可直接用的下拉项 [{value, label, code, materials}]。
 
-    label = 代号 （无目标材料）或 代号:材料(库存:n),材料(库存:n)——库存无/为 0 时不带 (库存:n)。
+    label = 代号 （无目标材料）或 代号:材料(库存:n),材料(库存:n)。
     """
     options = []
     for item in selected:
@@ -193,10 +213,8 @@ def build_options(selected, inventory) -> list[dict]:
         if materials:
             segments = []
             for mat in materials:
-                count = inventory.get(mat["id"])
-                segments.append(
-                    f"{mat['name']}(库存:{count})" if count else mat["name"]
-                )
+                count = int(inventory.get(mat["id"], 0) or 0)
+                segments.append(f"{mat['name']}(库存:{count})")
             label = f"{code}:" + ",".join(segments)
         else:
             label = code
