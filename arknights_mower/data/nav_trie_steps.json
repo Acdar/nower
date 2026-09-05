@@ -158,6 +158,71 @@
           }
         }
       ]
+    },
+    "SR-6": {
+      "updated_at": "2026-09-04T20:34:44",
+      "stage_type": "ACTIVITY",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              304,
+              828
+            ],
+            "text": "<月行水上>活动已开放"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1424,
+              999
+            ],
+            "text": "通学路",
+            "success": true
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1669,
+              629
+            ],
+            "text": "SR-6",
+            "success": true
+          }
+        }
+      ]
     }
   },
   "patterns": {
@@ -267,6 +332,72 @@
               603
             ],
             "text": "TO-9",
+            "success": true
+          }
+        }
+      ]
+    },
+    "SR-*": {
+      "updated_at": "2026-09-04T20:34:44",
+      "stage_type": "ACTIVITY",
+      "source_stage": "SR-6",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              304,
+              828
+            ],
+            "text": "<月行水上>活动已开放"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1424,
+              999
+            ],
+            "text": "通学路",
+            "success": true
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1669,
+              629
+            ],
+            "text": "SR-6",
             "success": true
           }
         }
