@@ -19,7 +19,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_mirrorchyan_token = ref('')
   const maa_update_channel = ref('stable')
   const maa_auto_check_update = ref(false)
-  const maa_expiring_medicine = ref(true)
+  const medicine_expire_days = ref(0)
   const ap_fallback = ref(0)
   const maa_weekly_plan = ref([])
   const maa_weekly_plan_options = ref([])
@@ -368,7 +368,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_auto_check_update.value = response.data.maa_auto_check_update ?? false
     maa_rg_enable.value = response.data.maa_rg_enable == 1
     maa_long_task_type.value = response.data.maa_long_task_type
-    maa_expiring_medicine.value = response.data.maa_expiring_medicine
+    medicine_expire_days.value = response.data.medicine_expire_days
     ap_fallback.value = Number(response.data.ap_fallback) || 0
     maa_weekly_plan.value = normalizeWeeklyPlan(response.data.maa_weekly_plan)
     maa_weekly_plan_active.value = response.data.maa_weekly_plan_active || ''
@@ -487,7 +487,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_auto_check_update: maa_auto_check_update.value,
       maa_rg_enable: maa_rg_enable.value ? 1 : 0,
       maa_long_task_type: maa_long_task_type.value,
-      maa_expiring_medicine: maa_expiring_medicine.value,
+      medicine_expire_days: medicine_expire_days.value,
       // 新增：Server酱的配置
       server_push_enable: server_push_enable.value ? 1 : 0,
       sendKey: sendKey.value,
@@ -648,7 +648,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_auto_check_update,
     maa_rg_enable,
     maa_long_task_type,
-    maa_expiring_medicine,
+    medicine_expire_days,
     ap_fallback,
     maa_weekly_plan,
     maa_weekly_plan_options,
