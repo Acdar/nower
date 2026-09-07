@@ -16,7 +16,10 @@ from yamlcore import CoreDumper, CoreLoader
 
 from arknights_mower.utils.config.conf import Conf
 from arknights_mower.utils.config.plan import PlanModel
+from arknights_mower.utils.network_settings import apply_http_proxy
 from arknights_mower.utils.path import get_path
+
+apply_http_proxy()
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +112,7 @@ migrate_app_config_paths()
 def save_conf():
     def dump(f):
         yaml.dump(
-            conf.model_dump(),
+            conf.model_dump(exclude_unset=True),
             f,
             Dumper=CoreDumper,
             encoding="utf-8",
@@ -128,7 +131,9 @@ def load_conf():
         save_conf()
         return
     with conf_path.open("r", encoding="utf-8") as f:
-        conf = Conf(**yaml.load(f, Loader=CoreLoader))
+        # 旧键 → 新键的兼容（exipring_medicine_on_weekend）由 Conf 校验层统一处理，
+        # 读文件与 /conf POST 等所有构造路径都走同一套迁移。
+        conf = Conf(**(yaml.load(f, Loader=CoreLoader) or {}))
 
 
 conf: Conf

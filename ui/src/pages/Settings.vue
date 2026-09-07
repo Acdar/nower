@@ -37,6 +37,7 @@ const {
   screenshot_interval,
   run_order_grandet_mode,
   webview,
+  runtime_platform,
   fix_mumu12_adb_disconnect,
   touch_method,
   free_room,
@@ -57,6 +58,11 @@ const {
   ai_type,
   ai_key
 } = storeToRefs(config_store)
+
+const hide_macos_menu_bar = computed({
+  get: () => !webview.value.tray,
+  set: (hidden) => (webview.value.tray = !hidden)
+})
 
 const { operators } = storeToRefs(plan_store)
 
@@ -170,6 +176,8 @@ const onSelectionChange = (newValue) => {
 }
 import { ref } from 'vue'
 import ChatBotSetting from '../components/ChatBotSetting.vue'
+import SoftwareUpdate from '../components/SoftwareUpdate.vue'
+import NetworkSettings from '../components/NetworkSettings.vue'
 
 const showSettingModal = ref(false)
 const editingIndex = ref(null)
@@ -269,13 +277,12 @@ if (return_home_when_idle.value) {
                 <help-text>
                   <div>MuMu12：<code>模拟器路径\\shell\\adb.exe</code></div>
                   <div>
-                    蓝叠Air（macOS）：Homebrew 安装后通常位于
-                    <code>/opt/homebrew/bin/adb</code>（Intel 机器为
-                    <code>/usr/local/bin/adb</code>）
+                    macOS 和 Linux 安装包自带 ADB。默认的 @internal/platform-tools/adb
+                    随程序位置解析，也可以手动选择其他 ADB。
                   </div>
                 </help-text>
               </template>
-              <n-input type="textarea" :autosize="true" v-model:value="maa_adb_path" />
+              <n-input v-model:value="maa_adb_path" />
               <n-button @click="select_maa_adb_path" class="dialog-btn">...</n-button>
             </n-form-item>
             <n-form-item>
@@ -312,11 +319,7 @@ if (return_home_when_idle.value) {
                   <div>MuMu12: 写到nx_main文件夹</div>
                 </help-text>
               </template>
-              <n-input
-                v-model:value="simulator.simulator_folder"
-                type="textarea"
-                :autosize="true"
-              />
+              <n-input v-model:value="simulator.simulator_folder" />
               <n-button @click="select_simulator_folder" class="dialog-btn">...</n-button>
             </n-form-item>
             <n-form-item v-if="simulator.name">
@@ -454,14 +457,19 @@ if (return_home_when_idle.value) {
                 <template #suffix>毫秒</template>
               </n-input-number>
             </n-form-item>
-            <n-form-item>
+            <n-form-item :show-feedback="screenshot === 0">
               <template #label>
                 <span>截图保存时间</span>
-                <help-text>可填小数</help-text>
+                <help-text>默认保留 1 小时，可填小数。</help-text>
               </template>
-              <n-input-number v-model:value="screenshot">
+              <n-input-number v-model:value="screenshot" :min="0">
                 <template #suffix>小时</template>
               </n-input-number>
+              <template v-if="screenshot === 0" #feedback>
+                <span role="status">
+                  已关闭截图保存，实时预览仍可用。后续调试、跑单等截图不会保存，排查问题时可能缺少截图记录。设为正数可恢复保存。
+                </span>
+              </template>
             </n-form-item>
             <n-form-item label="等待时间">
               <n-table size="small" class="waiting-table">
@@ -508,9 +516,18 @@ if (return_home_when_idle.value) {
               </n-button>
             </n-form-item>
             <n-form-item :show-label="false">
-              <n-checkbox v-model:checked="webview.tray">
+              <n-checkbox
+                v-if="runtime_platform === 'darwin'"
+                v-model:checked="hide_macos_menu_bar"
+              >
+                隐藏菜单栏图标
+                <help-text>
+                  重启生效。独立启动时不创建托盘进程，关闭窗口后仍在后台运行。多开管理器统一提供托盘，静默重启后也保留托盘入口。
+                </help-text>
+              </n-checkbox>
+              <n-checkbox v-else v-model:checked="webview.tray">
                 使用托盘图标
-                <help-text>重启生效</help-text>
+                <help-text>重启生效。多开管理器启动的实例统一使用管理器托盘。</help-text>
               </n-checkbox>
             </n-form-item>
             <n-form-item label="显示主题">
@@ -881,14 +898,44 @@ if (return_home_when_idle.value) {
       <div>
         <ChatBotSetting />
       </div>
-      <div>
-        <ResourceUpdate />
-      </div>
+    </div>
+    <div class="settings-network">
+      <NetworkSettings />
+    </div>
+    <div class="settings-updates">
+      <div><SoftwareUpdate /></div>
+      <div><ResourceUpdate /></div>
+    </div>
+    <div class="settings-network">
+      <ProcessControl />
     </div>
   </div>
 </template>
 
 <style scoped lang="scss">
+.settings-network {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin-top: 10px;
+}
+
+.settings-updates {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+
+  > div {
+    min-width: 0;
+    max-width: 600px;
+  }
+
+  @media (min-width: 1400px) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+  }
+}
+
 .threshold {
   display: flex;
   align-items: center;

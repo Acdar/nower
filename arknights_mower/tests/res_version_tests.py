@@ -126,6 +126,50 @@ class TestContentHash(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             content_hash(self.dir, [Path("nope.bin")])
 
+    def test_declared_text_normalizes_crlf_across_chunk_boundary(self):
+        rel = Path(RES_PACKAGE_DATA[0])
+        path = self.dir / rel
+        path.parent.mkdir(parents=True)
+        crlf = b"x" * ((1 << 20) - 1) + b"\r\nnext\r\nlast\r"
+        path.write_bytes(crlf)
+        windows_hash = content_hash(self.dir, [rel])
+        path.write_bytes(crlf.replace(b"\r\n", b"\n"))
+        self.assertEqual(windows_hash, content_hash(self.dir, [rel]))
+
+    def test_binary_without_nul_and_undeclared_text_keep_exact_bytes(self):
+        for name in (
+            RES_PACKAGE_MODELS[0],
+            "ui/public/avatar/test.webp",
+            "unknown.json",
+        ):
+            with self.subTest(name=name):
+                rel = Path(name)
+                path = self.dir / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"\x01\r\n\x02")
+                original = content_hash(self.dir, [rel])
+                path.write_bytes(b"\x01\n\x02")
+                self.assertNotEqual(original, content_hash(self.dir, [rel]))
+
+    def test_声明的文本资源按换行归一化(self):
+        # 声明的文本资源在 LF/CRLF 检出下应得到同一摘要。
+        rel = Path(RES_PACKAGE_DATA[0])
+        (self.dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (self.dir / rel).write_bytes(b'{"a":1}\r\n{"b":2}\r\n')
+        h_crlf = content_hash(self.dir, [rel])
+        (self.dir / rel).write_bytes(b'{"a":1}\n{"b":2}\n')
+        h_lf = content_hash(self.dir, [rel])
+        self.assertEqual(h_crlf, h_lf)
+
+    def test_二进制后缀不过换行归一化(self):
+        # 非文本类型即便不含 NUL 也按原始字节参与，内容不同的二进制样例不致同摘要
+        rel = Path("blob.bin")
+        (self.dir / rel).write_bytes(b"a\r\nb\r\n")
+        h_crlf = content_hash(self.dir, [rel])
+        (self.dir / rel).write_bytes(b"a\nb\n")
+        h_lf = content_hash(self.dir, [rel])
+        self.assertNotEqual(h_crlf, h_lf)
+
 
 class TestPackageFilePaths(unittest.TestCase):
     def setUp(self):

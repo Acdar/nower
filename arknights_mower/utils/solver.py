@@ -13,14 +13,11 @@ from arknights_mower.utils import config
 from arknights_mower.utils import typealias as tp
 from arknights_mower.utils.csleep import MowerExit, csleep
 from arknights_mower.utils.device.adb_client.const import KeyCode
-from arknights_mower.utils.device.adb_client.session import Session
 from arknights_mower.utils.device.device import Device
-from arknights_mower.utils.device.scrcpy import Scrcpy
 from arknights_mower.utils.email import send_message
 from arknights_mower.utils.image import cropimg, thres2
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.recognize import RecognizeError, Recognizer, Scene
-from arknights_mower.utils.simulator import restart_simulator
 from arknights_mower.utils.traceback import caller_info
 
 
@@ -47,6 +44,8 @@ class BaseSolver:
         self,
         device: Device | None = None,
         recog: Recognizer | None = None,
+        *,
+        connection_retries: int = 3,
     ) -> None:
         # self.device = device if device is not None else (recog.device if recog is not None else Device())
         if device is None and recog is not None:
@@ -54,37 +53,7 @@ class BaseSolver:
         if device is not None:
             self.device = device
         else:
-            for _ in range(3):
-                try:
-                    self.device = Device()
-                    self.device.client.check_server_alive()
-                    Session().connect(config.conf.adb)
-                    if not self.device.check_resolution():
-                        raise MowerExit
-                    if config.conf.droidcast.enable:
-                        self.device.start_droidcast()
-                    if config.conf.touch_method == "scrcpy":
-                        self.device.control.scrcpy = Scrcpy(self.device.client)
-                    break
-                except MowerExit:
-                    raise
-                except Exception as e:
-                    last_exc = e
-                    logger.warning(f"设备连接失败：{e}")
-                    # 启动时目标设备未注册到 adb=模拟器未启动，直接启动（只启动不关闭，
-                    # 误判也不会杀在跑的游戏）；已注册但瞬时故障才走重连重试
-                    try:
-                        registered = [d for d, _ in Session().devices_list()]
-                    except Exception:
-                        registered = []
-                    if config.conf.adb and config.conf.adb not in registered:
-                        restart_simulator(stop=False, start=True)
-                    elif hasattr(self, "device") and self.device.client:
-                        self.device._safe_reconnect()
-            else:
-                raise ConnectionError(
-                    "设备连接 3 次失败（判定设备无法连接，自动重启模拟器由上层处理）"
-                ) from last_exc
+            self.device = Device.create(connection_retries=connection_retries)
 
         self.recog = recog if recog is not None else Recognizer(self.device)
 

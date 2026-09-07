@@ -20,6 +20,16 @@ Mower 是为长期运行设计的开源明日方舟脚本。
 
 ## 下载与安装
 
+已部署的程序可在 **Mower 设置 → 软件更新** 中检查正式版、公测版或开发版更新，并在更新后重启同一安装目录下所有运行实例、恢复原运行状态。运行中的任务默认重置运行缓存后重新调度，专精计划保留并按训练室实际状态恢复。Release 独立包支持手动上传安装包离线安装；源码与独立包部署均可选择后台静默重启。首次启用、平台支持与失败恢复说明见 [软件更新与实例恢复](doc/software-update.md)。
+
+软件更新可选择启动时自动检查及自动安装。设置页最底部的 **进程操作** 可单独重启或结束当前实例；重启保留多开管理器传入的名称、数据目录、端口和原运行状态。macOS 可勾选 **隐藏菜单栏图标**，重启后不创建托盘进程。
+
+源码更新允许 npm 锁文件的纯元数据改写；其他本地源码改动可在二次确认后使用 **强制更新** 覆盖，不备份本地修改。展开 **源码版本管理** 可选择远端分支、近期提交或手动填写 SHA / tag，切回包含实例恢复功能的旧提交。支持 Windows、macOS、Linux 源码部署，不限制 Python 环境名称与位置；使用当前解释器的 pip 或可用的 uv 安装依赖，均不可用时先尝试 ensurepip。
+
+设置页下方的 **网络与下载代理** 可配置全局网络连接及 GitHub 下载代理站点（如 `https://ghfast.top/`）。填写后自动保存，后续连接使用新设置，并可测试 GitHub 下载接口是否可达。软件更新与资源更新位于其下方，宽屏并排显示。
+
+资源包保存在共享的持久目录 `@app/resources`，各实例在任务间歇加载，不修改 internal 或已签名的 macOS 程序包。详见[共享资源存储与实例加载](doc/resource-storage.md)。
+
 ### 运行环境准备
 
 git、Python 3.12、Node.js 16
@@ -162,8 +172,8 @@ pyinstaller webui_zip_for_macos.spec
 arknights-mower_<version>_windows_x64.zip
 arknights-mower_<version>_linux_x64.tar.gz
 arknights-mower_<version>_linux_arm64.tar.gz
-arknights-mower_<version>_macos_x64.zip
-arknights-mower_<version>_macos_arm64.zip
+arknights-mower_<version>_macos_x64.dmg
+arknights-mower_<version>_macos_arm64.dmg
 ```
 
 发布入口、版本格式、构建检查和系统依赖见

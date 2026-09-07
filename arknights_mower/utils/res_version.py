@@ -59,16 +59,44 @@ def package_file_paths(root) -> list:
 
 
 def content_hash(root, rels) -> str:
-    """对相对路径文件集算聚合 sha256（含路径，结果与顺序无关）。"""
+    """对相对路径文件集算聚合 sha256（含路径，结果与顺序无关）。
+
+    Windows 检出（core.autocrlf）会把文本文件的 LF 转成 CRLF。仅对
+    RES_PACKAGE_DATA 声明的文本资源归一化到 LF；模型、图片及其他文件均按
+    原字节参与，不通过 NUL 字节猜测文件类型。分块读取避免一次载入整文件。
+    """
     root = Path(root)
     digest = hashlib.sha256()
     for rel in sorted(rels, key=lambda p: p.as_posix()):
         digest.update(rel.as_posix().encode("utf-8"))
         digest.update(b"\0")
         with open(root / rel, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                digest.update(chunk)
+            normalize = rel.as_posix() in RES_PACKAGE_DATA
+            _update_digest(digest, f, normalize)
     return digest.hexdigest()
+
+
+def _update_digest(digest, stream, normalize: bool) -> None:
+    """Hash a stream, normalizing CRLF to LF for text files.
+
+    A trailing ``\\r`` can pair with the leading ``\\n`` of the next chunk, so it
+    is carried over between reads instead of being dropped.
+    """
+    if not normalize:
+        while chunk := stream.read(1 << 20):
+            digest.update(chunk)
+        return
+    pending = b""
+    while chunk := stream.read(1 << 20):
+        data = pending + chunk
+        if data.endswith(b"\r"):
+            pending = b"\r"
+            data = data[:-1]
+        else:
+            pending = b""
+        digest.update(data.replace(b"\r\n", b"\n"))
+    if pending:
+        digest.update(pending)
 
 
 def _pick_latest(entries, filter_field, skip_keys, time_key, name_key) -> dict:

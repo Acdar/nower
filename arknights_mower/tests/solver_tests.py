@@ -1,46 +1,47 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from arknights_mower.utils import config
+from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.solver import BaseSolver
 
 
 class TestSolverStartupLaunch(unittest.TestCase):
-    """启动时目标设备未注册到 adb=模拟器未启动，直接启动模拟器而不是重连（修复点）。"""
+    """Solver 委托设备统一连接入口，不重复创建截图和触控服务。"""
 
     def setUp(self):
-        self.device_patch = patch("arknights_mower.utils.solver.Device")
-        self.device_mock = self.device_patch.start()
-        self.device_mock.side_effect = RuntimeError("Device connection failure")
-        self.session_patch = patch("arknights_mower.utils.solver.Session")
-        self.session_mock = self.session_patch.start()
-        self.session_mock.return_value.devices_list.return_value = []
-        self.restart_patch = patch("arknights_mower.utils.solver.restart_simulator")
-        self.restart_mock = self.restart_patch.start()
-        self.addCleanup(self.device_patch.stop)
-        self.addCleanup(self.session_patch.stop)
-        self.addCleanup(self.restart_patch.stop)
+        self.create = self.enterContext(
+            patch("arknights_mower.utils.solver.Device.create")
+        )
+        self.recog = self.enterContext(patch("arknights_mower.utils.solver.Recognizer"))
 
-    def test_no_device_launches_simulator(self):
-        old_adb = config.conf.adb
-        config.conf.adb = "127.0.0.1:16384"
-        try:
-            with self.assertRaises(ConnectionError):
-                BaseSolver()
-        finally:
-            config.conf.adb = old_adb
-        self.restart_mock.assert_called_with(stop=False, start=True)
-        self.assertEqual(self.restart_mock.call_count, 3)
+    def test_first_connection_uses_single_initial_attempt(self):
+        solver = BaseSolver(connection_retries=1)
+        self.create.assert_called_once_with(connection_retries=1)
+        self.assertIs(solver.device, self.create.return_value)
+        self.recog.assert_called_once_with(solver.device)
 
-    def test_no_configured_adb_does_not_launch(self):
-        old_adb = config.conf.adb
-        config.conf.adb = ""
-        try:
-            with self.assertRaises(ConnectionError):
-                BaseSolver()
-        finally:
-            config.conf.adb = old_adb
-        self.restart_mock.assert_not_called()
+    def test_later_connection_uses_three_attempts(self):
+        BaseSolver()
+        self.create.assert_called_once_with(connection_retries=3)
+
+    def test_supplied_device_is_reused(self):
+        device = MagicMock()
+        solver = BaseSolver(device)
+        self.assertIs(solver.device, device)
+        self.create.assert_not_called()
+
+    def test_failed_connection_does_not_start_recognition(self):
+        self.create.side_effect = ConnectionError("offline")
+        with self.assertRaises(ConnectionError):
+            BaseSolver()
+        self.recog.assert_not_called()
+
+    def test_stop_propagates_without_extra_attempt(self):
+        self.create.side_effect = MowerExit
+        with self.assertRaises(MowerExit):
+            BaseSolver()
+        self.create.assert_called_once_with(connection_retries=3)
+        self.recog.assert_not_called()
 
 
 class TestTapElement(unittest.TestCase):

@@ -83,7 +83,7 @@ export const useConfigStore = defineStore('config', () => {
   const rcl = ref({})
   const rogue = ref({})
   const sss = ref({})
-  const screenshot = ref(0)
+  const screenshot = ref(1)
   const screenshot_interval = ref(500)
   const mail_subject = ref('')
   const ai_type = ref('')
@@ -100,6 +100,7 @@ export const useConfigStore = defineStore('config', () => {
   const recruit_gap = ref(false)
   const recruit_auto_5 = ref('hand')
   const webview = ref({ scale: 1.0 })
+  const runtime_platform = ref('')
   const shop_collect_enable = ref(true)
   const meeting_level = ref(3)
   const fix_mumu12_adb_disconnect = ref(false)
@@ -122,7 +123,7 @@ export const useConfigStore = defineStore('config', () => {
   const hot_update_auto_update = ref(false)
   const notification_level = ref('INFO')
   const waiting_scene = ref({})
-  const exipring_medicine_on_weekend = ref(false)
+  const expiring_medicine_on_weekend = ref(false)
   const maa_mail = ref(false)
   const maa_recruit = ref(false)
   const maa_orundum = ref(false)
@@ -350,6 +351,7 @@ export const useConfigStore = defineStore('config', () => {
 
   async function load_config() {
     const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/conf`)
+    runtime_platform.value = response.data.runtime_platform || ''
     adb.value = response.data.adb
     drone_count_limit.value = response.data.drone_count_limit
     drone_room.value = response.data.drone_room
@@ -458,7 +460,7 @@ export const useConfigStore = defineStore('config', () => {
     hot_update_auto_update.value = response.data.hot_update?.auto_update ?? false
     notification_level.value = response.data.notification_level
     waiting_scene.value = response.data.waiting_scene
-    exipring_medicine_on_weekend.value = response.data.exipring_medicine_on_weekend
+    expiring_medicine_on_weekend.value = response.data.expiring_medicine_on_weekend
     maa_mail.value = response.data.maa_mail
     maa_recruit.value = response.data.maa_recruit
     maa_orundum.value = response.data.maa_orundum
@@ -583,7 +585,7 @@ export const useConfigStore = defineStore('config', () => {
       },
       notification_level: notification_level.value,
       waiting_scene: waiting_scene.value,
-      exipring_medicine_on_weekend: exipring_medicine_on_weekend.value,
+      expiring_medicine_on_weekend: expiring_medicine_on_weekend.value,
       maa_mail: maa_mail.value,
       maa_recruit: maa_recruit.value,
       maa_orundum: maa_orundum.value,
@@ -613,15 +615,25 @@ export const useConfigStore = defineStore('config', () => {
     },
     { deep: true }
   )
+  let configSaveRequest = Promise.resolve()
+  function save_config() {
+    const payload = JSON.parse(JSON.stringify(build_config()))
+    configSaveRequest = configSaveRequest
+      .catch(() => {})
+      .then(() => axios.post(`${import.meta.env.VITE_HTTP_URL}/conf`, payload))
+    return configSaveRequest
+  }
+
   watchEffect(() => {
     if (loaded.value) {
-      axios.post(`${import.meta.env.VITE_HTTP_URL}/conf`, build_config())
+      save_config().catch((error) => console.error('配置保存失败', error))
     }
   })
 
   return {
     adb,
     load_config,
+    save_config,
     drone_count_limit,
     drone_room,
     drone_interval,
@@ -712,6 +724,7 @@ export const useConfigStore = defineStore('config', () => {
     recruit_gap,
     recruit_auto_5,
     webview,
+    runtime_platform,
     shop_collect_enable,
     meeting_level,
     fix_mumu12_adb_disconnect,
@@ -734,7 +747,7 @@ export const useConfigStore = defineStore('config', () => {
     hot_update_auto_update,
     notification_level,
     waiting_scene,
-    exipring_medicine_on_weekend,
+    expiring_medicine_on_weekend,
     maa_mail,
     maa_recruit,
     maa_orundum,

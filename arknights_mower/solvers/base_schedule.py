@@ -5,13 +5,13 @@ import math
 import os
 import pathlib
 import sys
-import urllib
 from collections import defaultdict, deque
 from ctypes import CFUNCTYPE, c_char_p, c_int, c_void_p
 from datetime import datetime, timedelta
 from typing import Literal, Optional
 
 import cv2
+import requests
 
 from arknights_mower.data import (
     agent_list,
@@ -65,9 +65,10 @@ from arknights_mower.utils.operators import (
     Operator,
     Operators,
 )
-from arknights_mower.utils.path import get_path
+from arknights_mower.utils.path import get_path, resolve_config_path
 from arknights_mower.utils.plan import PlanTriggerTiming
 from arknights_mower.utils.recognize import RecognizeError, Recognizer, Scene
+from arknights_mower.utils.resource_pkg import refresh_resource_at_boundary
 from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
@@ -125,8 +126,14 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     收集基建的产物：物资、赤金、信赖
     """
 
-    def __init__(self, device: Device = None, recog: Recognizer = None) -> None:
-        super().__init__(device, recog)
+    def __init__(
+        self,
+        device: Device = None,
+        recog: Recognizer = None,
+        *,
+        connection_retries: int = 3,
+    ) -> None:
+        super().__init__(device, recog, connection_retries=connection_retries)
         self.op_data = None
         self.party_time = None
         self.drone_time = None
@@ -146,6 +153,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.recruit_time = None
         self.last_clue = None
         self.sleeping = False
+        self._simulator_closed_for_idle = False
         self.operators = {}
         self.last_execution = {"maa": None, "recruit": None, "todo": None}
         self.order_reader = TradingOrder()
@@ -3842,7 +3850,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     def initialize_maa(self):
         config.stop_maa.clear()
         conf = config.conf
-        path = pathlib.Path(conf.maa_path)
+        path = pathlib.Path(resolve_config_path(conf.maa_path))
         asst_path = os.path.dirname(path / "Python" / "asst")
         if asst_path not in sys.path:
             sys.path.append(asst_path)
@@ -3920,9 +3928,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0"
             }
-            request = urllib.request.Request(url=ota_tasks_url, headers=headers)
-            with urllib.request.urlopen(request, timeout=60) as u:
-                res = u.read().decode("utf-8")
+            with requests.get(ota_tasks_url, headers=headers, timeout=60) as response:
+                response.raise_for_status()
+                res = response.content.decode("utf-8")
             with open(ota_tasks_path, "w", encoding="utf-8") as f:
                 f.write(res)
             logger.info("Maa活动关卡导航更新成功")
@@ -3947,7 +3955,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             InstanceOptionType.touch_type, conf.maa_touch_option
         )
         if self.MAA.connect(
-            conf.maa_adb_path, self.device.client.device_id, conf.maa_conn_preset
+            resolve_config_path(conf.maa_adb_path),
+            self.device.client.device_id,
+            conf.maa_conn_preset,
         ):
             logger.info("MAA 连接成功")
         else:
@@ -3965,7 +3975,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.info(f"现在服务器是{_plan.weekday}")
             use_medicine = False
             if conf.maa_expiring_medicine:
-                if conf.exipring_medicine_on_weekend:
+                if conf.expiring_medicine_on_weekend:
                     use_medicine = server_weekday >= 5
                 else:
                     use_medicine = True
@@ -4916,10 +4926,24 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         try:
             end_time = datetime.now() + timedelta(seconds=remaining_time)
             while datetime.now() < end_time:
+                refresh_resource_at_boundary()
                 if config.wake_scheduler.is_set():
                     config.wake_scheduler.clear()
                     break
                 csleep(min(1, (end_time - datetime.now()).total_seconds()))
+            if config.stop_mower.is_set():
+                raise MowerExit
+            refresh_resource_at_boundary()
+            if (
+                config.conf.close_simulator_when_idle
+                and self._simulator_closed_for_idle
+            ):
+                logger.info("休眠结束，启动自动关闭的模拟器")
+                if not restart_simulator(stop=False, start=True):
+                    raise ConnectionError("休眠结束后模拟器启动失败")
+                # 启动成功即结束本轮的主动启动，后续连接故障交由正常重连恢复。
+                self._simulator_closed_for_idle = False
+                self.device.reconnect()
             self.recog.update()
         finally:
             self.sleeping = False
@@ -4960,7 +4984,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
     def handle_idle_action(self, remaining_time=0):
         if config.conf.close_simulator_when_idle and remaining_time > 300:
-            restart_simulator(start=False)
+            if restart_simulator(start=False):
+                self._simulator_closed_for_idle = True
         elif config.conf.exit_game_when_idle and remaining_time > 300:
             self.device.exit()
         elif config.conf.return_home_when_idle:

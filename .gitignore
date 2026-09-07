@@ -8,6 +8,7 @@ FZDYSK.TTF
 
 # Local debug output
 /debug/
+/.playwright-cli/
 
 !main.spec
 *.yaml
@@ -202,6 +203,9 @@ dmypy.json
 # 运行期配置文件（@app/config/，2026-08-21 由 @app/ 迁移而来）
 /config/
 
+# Shared persistent runtime resource packages (never bundled or tracked)
+/resources/
+
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode
 /*.json
 dist
@@ -226,6 +230,9 @@ MAA
 # opencode
 .opencode/
 openspec/
+
+# Official macOS ADB, staged during packaging
+/platform-tools/
 
 #vscode
 .vscode/*

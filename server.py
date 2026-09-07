@@ -20,7 +20,7 @@ from werkzeug.security import safe_join
 
 from arknights_mower import __system__
 from arknights_mower.solvers.record import clear_data, load_state, save_state
-from arknights_mower.utils import config
+from arknights_mower.utils import config, network_settings
 from arknights_mower.utils.csv_utils import parse_cell_num, read_dicts
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.log import logger
@@ -31,9 +31,15 @@ from arknights_mower.utils.maa_check import (
     parse_maa_check_output,
 )
 from arknights_mower.utils.operators import Operators, build_global_plan
-from arknights_mower.utils.path import get_path
+from arknights_mower.utils.path import get_path, resolve_config_path
+from arknights_mower.utils.resource_pkg import register_resource_reload
+from arknights_mower.utils.resource_update_job import ResourceUpdateJob
+from arknights_mower.utils.update_runtime import active_job
 from arknights_mower.views.db_admin import db_admin_bp
 from arknights_mower.views.mastery import mastery_bp
+from arknights_mower.views.network import network_bp
+from arknights_mower.views.process_control import process_control_bp
+from arknights_mower.views.software_update import software_update_bp
 from arknights_mower.views.task import set_mower_thread, task_bp
 
 mimetypes.add_type("text/html", ".html")
@@ -43,6 +49,7 @@ mimetypes.add_type("application/javascript", ".js")
 app = Flask(__name__, static_folder="ui/dist", static_url_path="")
 sock = Sock(app)
 CORS(app)
+network_settings.start_proxy_sync()
 
 
 @app.errorhandler(500)
@@ -140,6 +147,9 @@ maa_resource_update_check = {
 }
 maa_resource_update_check_lock = RLock()
 maa_maintenance_lock = RLock()
+
+
+resource_update = ResourceUpdateJob()
 
 
 def _collect_maa_check_result():
@@ -445,11 +455,7 @@ def read_log():
         log_lines.append(msg)
         log_lines = log_lines[-100:]
         for ws in ws_connections:
-            ws.send(
-                json.dumps(
-                    {"type": "log", "data": msg, "screenshot": get_latest_screenshot()}
-                )
-            )
+            ws.send(json.dumps({"type": "log", "data": msg}))
 
 
 Thread(target=read_log, daemon=True).start()
@@ -466,16 +472,13 @@ Thread(target=_check_hot_update_on_launch, daemon=True).start()
 
 
 def _watch_shared_resource_changes():
-    """其他实例更新共享资源后，在本实例空闲时刷新进程内缓存。"""
+    """停止任务时刷新资源；运行期间由任务线程在安全边界主动刷新。"""
     from arknights_mower.utils.resource_pkg import reload_resource_caches_if_changed
 
     while True:
         time.sleep(1)
-        if _mower_busy_response():
-            continue
         try:
-            if reload_resource_caches_if_changed():
-                _request_title_refresh()
+            reload_resource_caches_if_changed()
         except Exception:
             logger.exception("刷新其他 mower 实例更新的共享资源失败")
             time.sleep(30)
@@ -502,8 +505,7 @@ def serve_index(path):
 def _serve_resource(base_dir: Path, relative: str):
     """serve 资源包目录下的单个文件；不存在则返回 None，由调用方决定兜底。
 
-    资源包装到 ``@app/tmp/resource`` 后按仓库相对路径存放，这里从 base 下取出一个文件并
-    打 ``no-cache`` 保证刷新即生效。resolve 后校验仍位于 base 之下，避免路径穿越读到目录外。
+    从本实例固定的资源版本读取文件，禁用缓存，并确保路径位于指定目录内。
     """
     base = base_dir.resolve()
     p = (base / relative).resolve()
@@ -516,25 +518,26 @@ def _serve_resource(base_dir: Path, relative: str):
 
 @app.before_request
 def serve_resource_overlay():
-    """资源包 webp（depot/avatar/building_skill）overlay 优先，刷新即生效。"""
+    """图片与本实例当前加载的数据使用同一个完整资源版本。"""
+    from arknights_mower.utils.resource_pkg import resource_ui_path
+
     path = request.path.lstrip("/")
     if path.startswith(("depot/", "avatar/", "building_skill/")):
-        return _serve_resource(
-            Path(get_path("@app/tmp/resource/ui/public", space="")), path
-        )
+        selected = resource_ui_path("")
+        if selected is not None:
+            return _serve_resource(selected, path) or ("", 404)
 
 
 @app.route("/basement_skill/<filename>")
 def serve_basement_skill(filename):
-    """基建技能数据（skill.json/buffer.json）运行时下发，资源包优先、无则 404。
+    """基建技能 JSON 与当前整包资源一致；内置资源由前端自身加载。"""
+    from arknights_mower.utils.resource_pkg import resource_ui_path
 
-    注意不要用 abort(404)：@app.errorhandler(404) 会把它兜底成 index.html(200)，
-    前端拉不到资源会拿到 HTML 而非 JSON；直接返回 (…, 404) 才能被 axios 当失败处理。
-    """
-    return _serve_resource(
-        Path(get_path("@app/tmp/resource/ui/src/pages/basement_skill", space="")),
-        filename,
-    ) or ("", 404)
+    selected = resource_ui_path("pages/basement_skill", source=True)
+    if selected is None:
+        return "", 404
+    # 直接返回 404，避免全局错误处理器把缺失 JSON 替换成 index.html。
+    return _serve_resource(selected, filename) or ("", 404)
 
 
 @app.after_request
@@ -602,6 +605,7 @@ def load_config():
             logger.exception("Failed to sync active weekly plan before returning /conf")
             manager = None
         data = config.conf.model_dump()
+        data["runtime_platform"] = __system__
         if manager is not None:
             data["maa_weekly_plan_active"] = manager.get_active_plan_key()
         return data
@@ -727,6 +731,7 @@ def stage_inventory_rules():
 @app.route("/status")
 def get_status():
     response = {
+        "auto_start_handled": bool(os.environ.get("MOWER_RESTART_JOB")),
         "plan_condition": [],
         "status": "stopped",
         "next_task_time": None,
@@ -764,12 +769,16 @@ def start(start_type):
     global mower_thread
     global log_lines
 
+    if active_job():
+        return "false"
+
     with maa_maintenance_lock:
         if (
             mower_thread
             and mower_thread.is_alive()
             or _job_running(maa_update_job)
             or _job_running(maa_resource_update_job)
+            or resource_update.running()
         ):
             return "false"
         # 创建 tmp 文件夹
@@ -777,9 +786,8 @@ def start(start_type):
         tmp_dir.mkdir(exist_ok=True)
 
         config.stop_mower.clear()
-        saved_state = load_state()
-        if saved_state is None or start_type == "2":
-            saved_state = {}
+        # Reset starts must not deserialize a snapshot from an older version.
+        saved_state = {} if start_type == "2" else (load_state() or {})
         if start_type == "1":
             saved_state["tasks"] = []
         restart_after_mood_read = (
@@ -866,16 +874,22 @@ def serve_screenshot(filename):
     return send_from_directory(screenshot_dir, filename)
 
 
+@app.route("/screenshot/latest")
+@require_token
+def get_screenshot_preview():
+    from arknights_mower.views.screenshot import latest_screenshot_response
+
+    return latest_screenshot_response()
+
+
 @app.route("/latest-screenshot")
 def get_latest_screenshot():
     """
     返回最新截图的路径
     """
-    from arknights_mower.utils.log import last_screenshot
+    from arknights_mower.utils.log import screenshot_store
 
-    if last_screenshot:
-        return last_screenshot
-    return ""
+    return screenshot_store.last_saved()
 
 
 def _webview_conn():
@@ -887,15 +901,24 @@ def _webview_conn():
     return conn
 
 
+@register_resource_reload
 def _request_title_refresh():
-    """资源包变更后让 WebView 子进程重算并刷新窗口标题（fire-and-forget，不等待回执）。"""
+    """向窗口发送主进程当前资源版本，任务边界切换也会触发此回调。"""
     conn = _webview_conn()
     if conn is None:
         return
     try:
-        conn.send("title")
+        from arknights_mower.utils.resource_version import check_resource_update
+
+        current = check_resource_update(local_only=True).get("current_display") or ""
+        conn.send(("title", current))
     except Exception:
         logger.exception("通知 WebView 刷新窗口标题失败")
+    for ws in list(ws_connections):
+        try:
+            ws.send(json.dumps({"type": "resource_updated"}))
+        except Exception:
+            logger.exception("广播资源版本变更给前端失败")
 
 
 def conn_send(text):
@@ -1094,7 +1117,11 @@ def get_maa_update_info():
     configured_target = str(
         request.args.get("maa_path") or config.conf.maa_path or ""
     ).strip()
-    target = Path(configured_target).expanduser() if configured_target else None
+    target = (
+        Path(resolve_config_path(configured_target)).expanduser()
+        if configured_target
+        else None
+    )
     target_text = str(target) if target is not None else ""
     job = _maa_update_snapshot()
     installed_version = read_installed_version(target, fresh=True) if target else ""
@@ -1182,7 +1209,7 @@ def check_maa_update():
     target_text = str(payload.get("maa_path") or config.conf.maa_path or "").strip()
     if not target_text:
         return {"ok": False, "message": "请先设置 Maa 目录"}
-    target = str(Path(target_text).expanduser())
+    target = str(Path(resolve_config_path(target_text)).expanduser())
     if not has_maa_installation(target):
         return {"ok": False, "message": "当前目录未检测到 Maa，请使用下载功能"}
     if __system__ == "windows":
@@ -1275,7 +1302,7 @@ def start_maa_update():
         return {"ok": False, "message": str(e)}
     if not target:
         return {"ok": False, "message": "请先设置 Maa 目录"}
-    target = str(Path(target).expanduser())
+    target = str(Path(resolve_config_path(target)).expanduser())
     installed = has_maa_installation(target)
     operation = "更新" if installed else "下载"
     if __system__ == "windows" and installed:
@@ -1300,6 +1327,8 @@ def start_maa_update():
     with maa_maintenance_lock:
         if _job_running(maa_resource_update_job):
             return {"ok": False, "message": "Maa 资源更新正在进行中"}
+        if active_job():
+            return {"ok": False, "message": "Mower 软件更新或进程操作正在进行中"}
         with maa_update_lock:
             thread = maa_update_job.get("thread")
             if thread is not None and thread.is_alive():
@@ -1337,6 +1366,7 @@ def start_maa_update():
             maa_update_job.update(
                 {
                     "thread": thread,
+                    "id": uuid4().hex,
                     "status": "running",
                     "phase": "checking",
                     "message": (
@@ -1415,7 +1445,11 @@ def get_maa_resource_update_info():
     configured_target = str(
         request.args.get("maa_path") or config.conf.maa_path or ""
     ).strip()
-    target = Path(configured_target).expanduser() if configured_target else None
+    target = (
+        Path(resolve_config_path(configured_target)).expanduser()
+        if configured_target
+        else None
+    )
     target_text = str(target) if target else ""
     source = str(request.args.get("source") or "github").strip()
     cached_check = _cached_update_check(
@@ -1481,7 +1515,7 @@ def check_maa_resource_update():
     target_text = str(payload.get("maa_path") or config.conf.maa_path or "").strip()
     if not target_text:
         return {"ok": False, "message": "请先设置 Maa 目录"}
-    target = str(Path(target_text).expanduser())
+    target = str(Path(resolve_config_path(target_text)).expanduser())
     if not has_maa_installation(target):
         return {"ok": False, "message": "请先下载并设置有效的 Maa 目录"}
     source = str(payload.get("source") or "github").strip()
@@ -1547,7 +1581,7 @@ def start_maa_resource_update():
     ).strip()
     if not target:
         return {"ok": False, "message": "请先设置 Maa 目录"}
-    target = str(Path(target).expanduser())
+    target = str(Path(resolve_config_path(target)).expanduser())
     if not has_maa_installation(target):
         return {"ok": False, "message": "请先下载并设置有效的 Maa 目录"}
     if source not in {"github", "mirrorchyan"}:
@@ -1561,6 +1595,8 @@ def start_maa_resource_update():
     with maa_maintenance_lock:
         if mower_thread and mower_thread.is_alive():
             return {"ok": False, "message": "请先停止 Mower，再更新 Maa 资源"}
+        if active_job():
+            return {"ok": False, "message": "Mower 软件更新或进程操作正在进行中"}
         if _job_running(maa_update_job):
             return {"ok": False, "message": "MAA 下载或更新正在进行中"}
         with maa_resource_update_lock:
@@ -1599,6 +1635,7 @@ def start_maa_resource_update():
             maa_resource_update_job.update(
                 {
                     "thread": thread,
+                    "id": uuid4().hex,
                     "status": "running",
                     "phase": "checking",
                     "message": "正在检查 Maa 资源更新",
@@ -1624,7 +1661,9 @@ def get_maa_resource_update_status():
 @app.route("/maa-conn-preset")
 @require_token
 def get_maa_conn_presets():
-    config_path = os.path.join(config.conf.maa_path, "resource", "config.json")
+    config_path = os.path.join(
+        resolve_config_path(config.conf.maa_path), "resource", "config.json"
+    )
     if not os.path.exists(config_path):
         logger.warning(f"MAA 配置文件不存在，返回空预设: {config_path}")
         return []
@@ -1720,27 +1759,33 @@ def get_resource_version():
 @app.route("/resource/install", methods=["POST"])
 @require_token
 def install_resource():
-    """下载并原子安装资源包（overlay 模型）；mower 运行任务时拒绝。"""
-    busy = _mower_busy_response()
-    if busy:
-        return busy
-
-    from arknights_mower.utils.resource_pkg import (
-        download_resource_pkg,
-        install_resource_pkg,
-    )
-
-    data = download_resource_pkg()
-    if data is None:
-        return {"ok": False, "message": "资源包下载失败，请检查网络"}
-    if not install_resource_pkg(data):
-        return {"ok": False, "message": "资源包安装失败（已回滚）"}
-    _request_title_refresh()
+    """Start a tracked update; old clients may still wait synchronously."""
+    with maa_maintenance_lock:
+        busy = _mower_busy_response()
+        if busy:
+            return busy
+        if active_job():
+            return {"ok": False, "message": "Mower 软件更新或进程操作正在进行中"}, 409
+        try:
+            job = resource_update.start(_request_title_refresh)
+        except ValueError as error:
+            return {"ok": False, "message": str(error)}, 409
+    if (request.get_json(silent=True) or {}).get("background") is True:
+        return {"ok": True, "job": job}
+    resource_update.thread.join()
+    job = resource_update.snapshot()
     return {
-        "ok": True,
+        "ok": job["status"] == "success",
+        "message": job["message"],
         "restart_required": False,
-        "message": "资源包安装成功，已生效，无需重启 Mower",
+        "job": job,
     }
+
+
+@app.route("/resource/status")
+@require_token
+def resource_update_status():
+    return {"ok": True, "job": resource_update.snapshot()}
 
 
 def str2date(target: str):
@@ -2458,3 +2503,6 @@ def ws_chat(ws):
 app.register_blueprint(mastery_bp)
 app.register_blueprint(task_bp)
 app.register_blueprint(db_admin_bp)
+app.register_blueprint(software_update_bp)
+app.register_blueprint(network_bp)
+app.register_blueprint(process_control_bp)
