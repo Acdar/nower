@@ -1,7 +1,7 @@
 <template>
   <div class="home-container">
     <div class="page-header">
-      <h1 class="page-title">专精推荐</h1>
+      <h1 class="page-title">自动专精</h1>
       <n-space align="center" :size="8">
         <n-button size="small" @click="openPlanModal">
           <template #icon><n-icon :component="ListIcon" /></template>
@@ -15,9 +15,9 @@
         </n-button>
         <n-button size="small" @click="openSettings">
           <template #icon><n-icon :component="SettingsIcon" /></template>
-          专精路线
+          通用专精路线预览
         </n-button>
-        <n-button size="small" @click="showWorkshopSettings = true">
+        <n-button size="small" @click="openWorkshopSettings">
           <template #icon><n-icon :component="SettingsIcon" /></template>
           加工站干员设置
         </n-button>
@@ -25,8 +25,6 @@
           <template #icon><n-icon :component="HammerIcon" /></template>
           自动合成配置
         </n-button>
-        <n-button size="small" @click="savePreset">保存合成配置</n-button>
-        <n-button size="small" @click="restorePreset">还原合成配置</n-button>
         <n-button type="primary" size="small" @click="fetchCultivate" :loading="store.loading">
           <template #icon><n-icon :component="RefreshIcon" /></template>
           刷新
@@ -184,6 +182,12 @@
                     <n-button type="primary" size="tiny" @click.stop="confirmSkill(op, rec)"
                       >一键专精</n-button
                     >
+                    <n-button
+                      v-if="planStatus[planKey(op.char_id, rec.skill_index)]?.id"
+                      size="tiny"
+                      @click.stop="openSupports(op, rec)"
+                      >协助方案</n-button
+                    >
                   </n-space>
                 </n-space>
               </template>
@@ -258,24 +262,16 @@
           >技能: <n-text strong>{{ cd.rec?.skill_name }}</n-text> → 专精3级 |
           {{ formatTime(cd.rec?.total_time || 0) }}</n-text
         >
+        <n-text v-if="workshopTrainingWarning(cd.op?.name)" type="warning">{{
+          workshopTrainingWarning(cd.op?.name)
+        }}</n-text>
         <n-divider />
-        <n-text depth="2">训练室换班:</n-text>
-        <n-space :size="4" style="margin-top: 4px">
-          <n-tag size="small" :bordered="false">train</n-tag>
-          <n-tag size="small" type="info">一号位: {{ cd.firstSupport || '当前' }}</n-tag>
-          <n-tag size="small" type="warning">二号位: {{ cd.op?.name }}</n-tag>
-        </n-space>
-        <n-divider />
-        <n-text depth="2">专精工具人:</n-text>
-        <div v-if="cd.supports?.length" style="margin-top: 4px">
-          <div v-for="(sup, si) in cd.supports" :key="si" class="confirm-support-row">
-            <n-tag size="small" :bordered="false" type="info">专{{ sup.skill_level }}</n-tag>
-            <n-text>{{ sup.name }}</n-text>
-            <n-text depth="3" v-if="sup.swap_name !== sup.name">→ {{ sup.swap_name }}</n-text>
-            <n-text depth="3">{{ sup.efficiency }}%</n-text>
-          </div>
-        </div>
-        <n-text v-else depth="3">(未配置)</n-text>
+        <n-text depth="2"
+          >将根据已拥有干员和排班表自动生成协助方案，添加后可通过「协助方案」查看或修改。</n-text
+        >
+        <n-text v-if="trainingWarning(cd.op?.name)" type="warning">{{
+          trainingWarning(cd.op?.name)
+        }}</n-text>
         <n-divider />
         <n-text :type="cd.rec?.full_chain_achievable ? 'success' : 'warning'"
           >材料: {{ cd.rec?.full_chain_achievable ? '充足 ✓' : '不足 ✗' }}</n-text
@@ -300,27 +296,48 @@
       </template>
     </n-modal>
 
-    <!-- 专精路线设置 -->
+    <MasterySupports
+      v-model:show="showSupports"
+      :plan="supportSelection.plan"
+      :name="supportSelection.name"
+      @saved="refreshPlanFromServer"
+    />
+
+    <!-- 通用专精路线预览 -->
     <n-modal
       v-model:show="showSettings"
       preset="card"
-      title="专精路线设置"
-      style="width: min(720px, 95vw)"
+      title="通用专精路线预览"
+      style="width: min(900px, 95vw); max-height: 90vh"
+      content-style="overflow-y: auto; min-height: 0"
       :mask-closable="false"
+      :closable="!routeCalculating"
+      :close-on-esc="!routeCalculating"
     >
-      <n-tabs type="segment" v-model:value="settingsTab">
+      <n-alert v-if="defaultsError" type="warning" style="margin-bottom: 12px">{{
+        defaultsError
+      }}</n-alert>
+      <n-text depth="3">
+        此处预览各职业的通用路线，默认按已拥有且已解锁的训练技能生成；无 BOX
+        时展示原默认最佳路线。不计分支专属加成。手动下拉可选全部干员。
+        添加具体干员的训练计划时，会按其职业和分支独立计算，符合条件的分支加成协助者也会参与计算，因此实际路线可能与预览不同。
+      </n-text>
+      <MasteryProfessionTrainers
+        :trainers="bestTrainers"
+        :professions="profKeys"
+        style="margin: 12px 0"
+      />
+      <n-tabs class="mastery-route-tabs" type="segment" v-model:value="settingsTab">
         <n-tab-pane v-for="prof in profKeys" :key="prof" :name="prof" :tab="prof">
           <n-scrollbar style="max-height: 60vh">
-            <n-dynamic-input
-              v-model:value="routeSettings[prof].supports"
-              :on-create="() => newSupport(prof)"
-              :max="3"
-            >
-              <template #create-button-default>添加专精工具人</template>
+            <n-dynamic-input v-model:value="routeSettings[prof].supports" :min="3" :max="3">
+              <!-- 空插槽会回退到默认增删按钮，保留隐藏节点以覆盖默认操作。 -->
+              <template #action><span hidden /></template>
               <template #default="{ value }">
                 <div class="support-outer">
                   <n-select
                     v-model:value="value.skill_level"
+                    disabled
                     :options="level_list"
                     style="width: 80px"
                   />
@@ -338,7 +355,7 @@
                       <label class="ml" style="font-size: 13px">训练速度</label>
                       <n-input-number
                         v-model:value="value.efficiency"
-                        :min="30"
+                        :min="0"
                         :max="100"
                         style="width: 80px"
                         :show-button="false"
@@ -375,16 +392,12 @@
       <n-divider />
       <n-text depth="2">中枢干员加成</n-text>
       <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px">
-        <n-switch
-          v-model:value="masterySettings.central_bonus"
-          :checked-value="5"
-          :unchecked-value="0"
-        >
+        <n-switch :value="autoCentralBonus" disabled :checked-value="5" :unchecked-value="0">
           <template #checked>+5%</template>
           <template #unchecked>无</template>
         </n-switch>
         <n-text depth="3" style="font-size: 11px">
-          阿斯卡纶 / 烛煌 / 斩业星熊 入驻控制中枢时训练速度 +5%
+          按主排班、备用排班中枢栏的主力及替换干员自动识别 +5%
         </n-text>
       </div>
       <n-text depth="2" style="margin-top: 10px">减半换人缓冲时间（分钟）</n-text>
@@ -399,9 +412,22 @@
         减半对象需在位时间 = 5小时 + 缓冲时间，缓冲越大越保守
       </n-text>
       <template #footer>
-        <n-space justify="end">
-          <n-button @click="resetRoute" :disabled="routeSaving">恢复默认</n-button>
-          <n-button type="primary" @click="saveRouteAndClose" :loading="routeSaving">
+        <n-space justify="end" align="center">
+          <n-button
+            @click="calculateOptimalRoutes"
+            :disabled="routeSaving || store.loading"
+            :loading="routeCalculating"
+            >计算最优</n-button
+          >
+          <HelpText label="计算最优说明">
+            先同步干员数据，再按照最新 BOX 计算最优默认专精路线，应用于全部职业。
+          </HelpText>
+          <n-button
+            type="primary"
+            @click="saveRouteAndClose"
+            :loading="routeSaving"
+            :disabled="routeCalculating"
+          >
             保存并关闭
           </n-button>
         </n-space>
@@ -483,30 +509,95 @@
       v-model:show="showWorkshopSettings"
       preset="card"
       title="加工站干员设置"
-      style="width: min(500px, 95vw)"
+      style="width: min(600px, 95vw); max-height: 90vh"
+      content-style="overflow-y: auto; min-height: 0"
       :mask-closable="false"
+      :closable="!workshopDefaultsLoading"
+      :close-on-esc="!workshopDefaultsLoading"
     >
       <n-space vertical>
+        <n-alert v-if="workshopDefaultsError" type="warning">{{ workshopDefaultsError }}</n-alert>
+        <n-text depth="3">
+          一键设置先同步干员数据，再按最新 BOX
+          填入已拥有、已解锁技能且副产品概率加成达到所设下限的干员，可继续手动增删。
+          材料专属干员仅分配符合条件的材料，相关低阶材料也会生成合成配置。
+          主排班及全部备用排班中的主力和替换干员，出现在宿舍、加工站以外的设施时，一键设置会跳过这些干员。
+        </n-text>
+        <n-space align="center">
+          <n-text>副产品概率加成至少</n-text>
+          <n-input-number
+            :value="workshopMinBonus"
+            @update:value="workshopMinBonus = $event ?? 80"
+            :min="0"
+            :max="1000"
+            :precision="0"
+            :step="5"
+            :show-button="false"
+            :disabled="workshopDefaultsLoading"
+            :input-props="{ 'aria-label': '副产品概率加成下限' }"
+            style="width: 100px"
+            ><template #suffix>%</template></n-input-number
+          >
+          <n-button size="small" @click="setWorkshopOperators" :loading="workshopDefaultsLoading"
+            >一键设置</n-button
+          >
+        </n-space>
         <div>
           <n-text depth="3">非 T5 材料加工干员</n-text>
-          <help-text>
-            选择 九色鹿 时会自动添加 碳素，碳素组，家具零件_碳素组 作为垫刀材料
-          </help-text>
+          <help-text>九色鹿使用下方独立设置中的垫刀素材。</help-text>
         </div>
         <slick-operator-select
           v-model="fodderOps"
-          :disabled="false"
+          :disabled="workshopDefaultsLoading"
           select_placeholder="选择干员（九色鹿带垫刀材料）"
         />
         <n-text depth="3">T5 加工干员</n-text>
-        <slick-operator-select v-model="t5Ops" :disabled="false" select_placeholder="选择干员" />
+        <slick-operator-select
+          v-model="t5Ops"
+          :disabled="workshopDefaultsLoading"
+          select_placeholder="选择干员"
+        />
         <n-text depth="3">技巧概要加工干员</n-text>
-        <slick-operator-select v-model="bookOps" :disabled="false" select_placeholder="选择干员" />
+        <slick-operator-select
+          v-model="bookOps"
+          :disabled="workshopDefaultsLoading"
+          select_placeholder="选择干员"
+        />
+        <n-collapse>
+          <n-collapse-item title="九色鹿垫刀素材设置" name="deer-fodder">
+            <workshop-deer-fodder v-model="deerFodder" :disabled="workshopDefaultsLoading" />
+          </n-collapse-item>
+          <n-collapse-item
+            v-if="workshopRecommendations"
+            title="值得培养的干员"
+            name="workshop-materials"
+          >
+            <n-space vertical>
+              <div v-for="category in workshopCategoryLabels" :key="category.key">
+                <n-text strong>{{ category.label }}</n-text>
+                <div v-for="operator in workshopRecommendations[category.key]" :key="operator.name">
+                  <n-text depth="3">{{
+                    workshopRecommendationText(
+                      operator,
+                      workshopOwnedOperators !== null && !workshopOwnedOperators.has(operator.name)
+                    )
+                  }}</n-text>
+                </div>
+                <n-text v-if="!workshopRecommendations[category.key].length" depth="3"
+                  >暂无推荐干员</n-text
+                >
+              </div>
+            </n-space>
+          </n-collapse-item>
+        </n-collapse>
       </n-space>
       <template #footer>
         <n-space justify="end">
-          <n-button size="small" @click="resetWorkshopDefaults">恢复默认</n-button>
-          <n-button type="primary" size="small" @click="showWorkshopSettings = false"
+          <n-button
+            type="primary"
+            size="small"
+            @click="showWorkshopSettings = false"
+            :disabled="workshopDefaultsLoading"
             >保存</n-button
           >
         </n-space>
@@ -516,6 +607,16 @@
 </template>
 
 <script setup>
+import {
+  loadWorkshopOperators,
+  loadWorkshopReference,
+  syncWorkshopOperators,
+  selectedWorkshopOperators,
+  usesLegacyWorkshopDefaults,
+  workshopRecommendationText,
+  workshopTraineeWarning
+} from '@/utils/workshopOperators'
+import { masteryScheduleContext, masteryTraineeWarning } from '@/utils/masterySupport'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import {
   NAlert,
@@ -551,14 +652,18 @@ import { Build, Refresh } from '@vicons/ionicons5'
 import axios from 'axios'
 import draggable from 'vuedraggable'
 import { useMasteryStore } from '@/stores/mastery'
+import MasterySupports from '@/components/MasterySupports.vue'
+import MasteryProfessionTrainers from '@/components/MasteryProfessionTrainers.vue'
+import HelpText from '@/components/HelpText.vue'
 import { usePlanStore } from '@/stores/plan'
 import { useConfigStore } from '@/stores/config'
 import { storeToRefs } from 'pinia'
 import { pinyin_match } from '@/utils/common'
 import {
   buildMasteryRoutePayload,
-  normalizeMasteryRouteDefaults,
-  parseMasteryRoute
+  prepareMasteryRoutes,
+  completeMasterySupports,
+  syncMasteryRouteDefaults
 } from '@/utils/masteryRoute'
 import { render_op_label } from '@/utils/op_select'
 
@@ -606,17 +711,69 @@ const idleFilterOptions = [
   { label: '非空闲', value: 'busy' }
 ]
 const {
+  workshop_min_bonus: workshopMinBonus,
+  workshop_deer_fodder: deerFodder,
   fodder_operators: fodderOps,
   t5_operators: t5Ops,
   book_operators: bookOps
 } = storeToRefs(configStore)
 const workshopLoading = ref(false)
 const showWorkshopSettings = ref(false)
+const workshopRecommendations = ref(null)
+const workshopOwnedOperators = ref(null)
+const workshopDefaultsLoading = ref(false)
+const workshopDefaultsError = ref('')
+const workshopCategoryLabels = [
+  { key: 'fodder_operators', label: '非 T5 材料' },
+  { key: 't5_operators', label: 'T5 材料' },
+  { key: 'book_operators', label: '技巧概要' }
+]
 
-function resetWorkshopDefaults() {
-  fodderOps.value = ['九色鹿']
-  t5Ops.value = ['年']
-  bookOps.value = ['司霆惊蛰']
+async function readWorkshopDefaults(apply = false, sync = false) {
+  if (workshopDefaultsLoading.value) return
+  workshopDefaultsLoading.value = true
+  workshopDefaultsError.value = ''
+  try {
+    const load = sync ? syncWorkshopOperators : loadWorkshopOperators
+    const data = await load(axios, import.meta.env.VITE_HTTP_URL, workshopMinBonus.value)
+    workshopRecommendations.value = data.recommendations
+    workshopOwnedOperators.value = Array.isArray(data.owned_operators)
+      ? new Set(data.owned_operators)
+      : null
+    if (apply) {
+      fodderOps.value = [...data.defaults.fodder_operators]
+      t5Ops.value = [...data.defaults.t5_operators]
+      bookOps.value = [...data.defaults.book_operators]
+    }
+  } catch (e) {
+    workshopDefaultsError.value = e.response?.data?.error || e.message || '加工站推荐读取失败'
+    workshopOwnedOperators.value = null
+    try {
+      workshopRecommendations.value = await loadWorkshopReference(
+        axios,
+        import.meta.env.VITE_HTTP_URL
+      )
+    } catch {
+      workshopRecommendations.value = null
+    }
+  } finally {
+    workshopDefaultsLoading.value = false
+  }
+}
+
+async function openWorkshopSettings() {
+  showWorkshopSettings.value = true
+  await readWorkshopDefaults(
+    usesLegacyWorkshopDefaults({
+      fodder_operators: fodderOps.value,
+      t5_operators: t5Ops.value,
+      book_operators: bookOps.value
+    })
+  )
+}
+
+async function setWorkshopOperators() {
+  await readWorkshopDefaults(true, true)
 }
 const workshopT3Summary = ref([])
 
@@ -679,6 +836,12 @@ function getStatusType(status) {
 
 async function toggleSkillPlan(op, rec, draft = false) {
   const k = planKey(op.char_id, rec.skill_index)
+  if (!plan.value[k] && workshopTrainingWarning(op.name)) {
+    message.warning(workshopTrainingWarning(op.name))
+  }
+  if (!plan.value[k] && trainingWarning(op.name)) {
+    message.warning(trainingWarning(op.name))
+  }
   if (plan.value[k]) {
     // 删除计划
     const info = planStatus.value[k]
@@ -708,10 +871,14 @@ async function toggleSkillPlan(op, rec, draft = false) {
       const body = { items: [{ name: op.name, skill_index: rec.skill_index }] }
       const r = await axios.post(`${import.meta.env.VITE_HTTP_URL}/mastery-plan`, body)
       const results = r.data?.results || []
+      for (const warning of new Set(results.map((result) => result.warning).filter(Boolean))) {
+        message.warning(warning)
+      }
       if (results[0]?.status === 'added') {
         plan.value[k] = true
         // #65：target_level 由服务端默认专三（与推荐一致）
         planStatus.value[k] = { id: results[0].id, status: 'idle', target_level: 3, priority: 0 }
+        await refreshPlanFromServer()
       } else {
         message.warning(results[0]?.reason || '添加失败')
       }
@@ -722,7 +889,16 @@ async function toggleSkillPlan(op, rec, draft = false) {
 }
 
 async function addAllToPlan(op, draft = false) {
+  if (trainingWarning(op.name)) {
+    message.warning(trainingWarning(op.name))
+  }
   const recs = op.recommendations
+  if (
+    recs.some((rec) => !plan.value[planKey(op.char_id, rec.skill_index)]) &&
+    workshopTrainingWarning(op.name)
+  ) {
+    message.warning(workshopTrainingWarning(op.name))
+  }
   if (draft) {
     // 计划弹窗内草稿：只动本地，保存时 POST
     for (const rec of recs) {
@@ -744,6 +920,9 @@ async function addAllToPlan(op, draft = false) {
       items: toAdd.map((rec) => ({ name: op.name, skill_index: rec.skill_index }))
     })
     const results = r.data?.results || []
+    for (const warning of new Set(results.map((result) => result.warning).filter(Boolean))) {
+      message.warning(warning)
+    }
     const errs = []
     results.forEach((res, i) => {
       const rec = toAdd[i]
@@ -800,6 +979,9 @@ async function savePlanFn() {
   if (toAdd.length) {
     const r = await axios.post(`${import.meta.env.VITE_HTTP_URL}/mastery-plan`, { items: toAdd })
     const results = r.data?.results || []
+    for (const warning of new Set(results.map((result) => result.warning).filter(Boolean))) {
+      message.warning(warning)
+    }
     const err = results.filter((x) => x.status === 'error')
     if (err.length) {
       message.warning(`保存完成，${err.length} 项失败: ${err.map((x) => x.reason).join('；')}`)
@@ -845,7 +1027,9 @@ async function refreshPlanFromServer() {
         target_level: item.target_level,
         priority: item.priority,
         expires_at: item.expires_at,
-        failed_reason: item.failed_reason
+        failed_reason: item.failed_reason,
+        support_plan: item.support_plan,
+        support_runtime: item.support_runtime
       }
     }
     plan.value = p
@@ -928,45 +1112,10 @@ const filteredPlanOperators = computed(() => {
   return list
 })
 
-async function savePreset() {
-  try {
-    await axios.post(`${import.meta.env.VITE_HTTP_URL}/workshop-preset`, {
-      settings: configStore.workshop_settings,
-      fodder_operators: fodderOps.value,
-      t5_operators: t5Ops.value,
-      book_operators: bookOps.value
-    })
-    message.success('当前合成配置已保存为默认')
-  } catch (e) {
-    message.error('保存失败: ' + e.message)
-  }
-}
-async function restorePreset() {
-  try {
-    const r = await axios.get(`${import.meta.env.VITE_HTTP_URL}/workshop-preset`)
-    const data = r.data
-    if (data && (data.settings?.length || data.length)) {
-      configStore.workshop_settings = data.settings || data
-      if (data.fodder_operators) fodderOps.value = data.fodder_operators
-      if (data.t5_operators) t5Ops.value = data.t5_operators
-      if (data.book_operators) bookOps.value = data.book_operators
-      await new Promise((res) => setTimeout(res, 100))
-      await axios.post(`${import.meta.env.VITE_HTTP_URL}/conf`, configStore.build_config())
-      message.success('合成配置已还原')
-    } else {
-      message.warning('暂无已保存的合成配置')
-    }
-  } catch (e) {
-    message.error('还原失败: ' + e.message)
-  }
-}
-
 async function autoWorkshop() {
   workshopLoading.value = true
   try {
-    const keys = Object.keys(plan.value).filter((k) => plan.value[k])
     const resp = await axios.post(`${import.meta.env.VITE_HTTP_URL}/workshop-auto-config`, {
-      planned_skills: keys,
       fodder_operators: fodderOps.value,
       t5_operators: t5Ops.value,
       book_operators: bookOps.value
@@ -976,14 +1125,19 @@ async function autoWorkshop() {
       message.warning('生成失败')
       return
     }
-    if (keys.length === 0) {
-      message.success('当前没有专精计划，已自动生成全量合成方案')
+    configStore.apply_workshop_response(resp.data)
+    if (resp.data.workshop_preset_warning) {
+      message.warning(resp.data.workshop_preset_warning)
+      return
     }
-    configStore.workshop_settings = ws
-
-    await new Promise((r) => setTimeout(r, 100))
-    await axios.post(`${import.meta.env.VITE_HTTP_URL}/conf`, configStore.build_config())
     workshopT3Summary.value = resp.data?.t3_summary || []
+
+    if (!resp.data.automatic || !ws.length) {
+      message.info(
+        resp.data.restored ? '专精材料已准备完毕，已恢复手动合成配置' : '当前没有可准备的专精材料'
+      )
+      return
+    }
 
     const tasksResp = await axios.get(`${import.meta.env.VITE_HTTP_URL}/task`)
     const tasks = tasksResp.data || []
@@ -1005,9 +1159,10 @@ async function autoWorkshop() {
       }
       const r = await axios.post(`${import.meta.env.VITE_HTTP_URL}/task`, {
         task: {
-          time: new Date(Date.now() + 120000 + added.length * 600000).toISOString(),
+          time: new Date(Date.now() + added.length * 2000).toISOString(),
           plan: {},
           task_type: '加工材料',
+          workshop_generation: resp.data.workshop_generation,
           meta_data: op
         }
       })
@@ -1021,7 +1176,7 @@ async function autoWorkshop() {
     const parts = []
     if (added.length) parts.push(`已添加任务: ${added.join(', ')}`)
     if (skipped.length) parts.push(`已有任务: ${skipped.join(', ')}`)
-    message.success(`合成配置已生成${parts.length ? '，' + parts.join('；') : ''}`)
+    message.success(`已为下一待专精技能生成合成配置${parts.length ? '，' + parts.join('；') : ''}`)
   } catch (e) {
     message.error(`生成失败: ${e.message}`)
   } finally {
@@ -1029,7 +1184,7 @@ async function autoWorkshop() {
   }
 }
 
-// ─── 专精路线设置 ───
+// ─── 通用专精路线预览 ───
 const showSettings = ref(false)
 const settingsTab = ref('近卫')
 const swap_list = [
@@ -1049,20 +1204,27 @@ const level_list = [
 const masterySettings = reactive({ central_bonus: 0, mastery_swap_buffer: 10 })
 
 const defaultsCache = ref(null)
+const bestTrainers = ref({})
+const defaultsError = ref('')
 
 const routeSettings = reactive(
-  Object.fromEntries(profKeys.map((p) => [p, { supports: [], half_off: true }]))
+  Object.fromEntries(
+    profKeys.map((p) => [p, { supports: completeMasterySupports([]), half_off: true }])
+  )
 )
 let _autoSaveReady = false
 let _routeSaveChain = Promise.resolve()
 const _dirtyRouteProfessions = new Set()
+const _suggestedRouteProfessions = new Set()
 let _dirtyMasterySettings = false
 const routeSaving = ref(false)
+const routeCalculating = ref(false)
 
 function persistRouteSettings() {
-  const professions = [..._dirtyRouteProfessions]
+  const professions = [...new Set([..._dirtyRouteProfessions, ..._suggestedRouteProfessions])]
   if (!professions.length) return _routeSaveChain
   _dirtyRouteProfessions.clear()
+  _suggestedRouteProfessions.clear()
   const payloads = professions.map((profession) =>
     buildMasteryRoutePayload(profession, routeSettings[profession])
   )
@@ -1115,35 +1277,16 @@ watch(
   }
 )
 
-function newSupport(p) {
-  const n = routeSettings[p].supports.length
-  if (n >= 3) return null
-  const i = n + 1
-  const def = defaultsCache.value
-  if (def && !routeSettings[p].optimal) {
-    if (i >= 3) {
-      const ref = def[p]?.supports?.find((s) => s.skill_level >= 3)
-      if (ref) return { ...ref, swap: true }
-    }
-    const backups = def._backups || {}
-    const name = backups[p] || ''
-    if (name) {
-      return { name, skill_level: i, efficiency: 60, swap: true, swap_name: name, match: 'no' }
-    }
-  }
-  if (def && routeSettings[p].optimal) {
-    const ref = def[p]?.supports?.find((s) => s.skill_level === i)
-    if (ref) return { ...ref, swap: true }
-  }
-  return { name: '', skill_level: i, efficiency: 60, swap: false, swap_name: '', match: 'no' }
-}
-
 function applyRoute(d) {
   for (const p of profKeys) {
     if (d[p]) {
-      routeSettings[p].supports = (d[p].supports || routeSettings[p].supports).filter(Boolean)
+      routeSettings[p].supports = completeMasterySupports(d[p].supports, d._jsonDefaults?.[p])
       routeSettings[p].optimal = !!d[p].optimal
       routeSettings[p].half_off = d[p].half_off !== undefined ? d[p].half_off : true
+    } else {
+      routeSettings[p].supports = completeMasterySupports([], d._jsonDefaults?.[p])
+      routeSettings[p].optimal = false
+      routeSettings[p].half_off = false
     }
   }
 }
@@ -1151,44 +1294,31 @@ function applyRoute(d) {
 async function loadRoute() {
   const r = await axios.get(`${import.meta.env.VITE_HTTP_URL}/mastery-route`)
   const routes = r.data?.routes || []
-  const backups = r.data?.backups || {}
   const routeDefaults = r.data?.defaults || {}
   const settings = r.data?.settings || {}
+  _autoSaveReady = false
   masterySettings.central_bonus = settings.central_bonus ?? 0
   masterySettings.mastery_swap_buffer = settings.mastery_swap_buffer ?? 10
-  const merged = { _backups: backups }
-  for (const rt of routes) {
-    const parsed = parseMasteryRoute(rt)
-    if (!parsed.profession) continue
-    merged[parsed.profession] = parsed
-  }
-  merged._jsonDefaults = normalizeMasteryRouteDefaults(routeDefaults)
-  // DB 未保存过此职业路线时，用默认配置兜底显示（不自动写库，编辑后由保存流程落库）
-  for (const p of profKeys) {
-    if (!merged[p] && merged._jsonDefaults[p]?.length) {
-      merged[p] = {
-        profession: p,
-        supports: merged._jsonDefaults[p],
-        optimal: false,
-        half_off: true
-      }
-    }
-  }
+  bestTrainers.value = r.data?.best_trainers || {}
+  defaultsError.value = r.data?.defaults_error || ''
+  const { routes: merged, suggestedProfessions } = prepareMasteryRoutes(
+    routes,
+    routeDefaults,
+    profKeys
+  )
+  _suggestedRouteProfessions.clear()
+  suggestedProfessions.forEach((p) => _suggestedRouteProfessions.add(p))
   defaultsCache.value = merged
   applyRoute(merged)
   await nextTick()
   _autoSaveReady = true
 }
 async function openSettings() {
-  if (!defaultsCache.value) {
-    try {
-      await loadRoute()
-    } catch (e) {
-      console.error('openSettings: loadRoute failed', e)
-    }
-    if (!defaultsCache.value) {
-      defaultsCache.value = {}
-    }
+  try {
+    await loadRoute()
+  } catch (e) {
+    defaultsError.value = '路线加载失败，请稍后重试'
+    console.error('openSettings: loadRoute failed', e)
   }
   showSettings.value = true
 }
@@ -1208,7 +1338,7 @@ async function discardRouteChanges() {
 watch(showSettings, (val) => {
   if (!val && (_dirtyRouteProfessions.size || _dirtyMasterySettings)) {
     discardRouteChanges()
-      .then(() => message.warning('专精路线修改未保存，已还原'))
+      .then(() => message.warning('通用专精路线修改未保存，已还原'))
       .catch((e) => console.error('discard route changes failed', e))
   }
 })
@@ -1218,37 +1348,44 @@ async function saveRouteAndClose() {
     await Promise.all([
       flushRouteSettings(),
       axios.post(`${import.meta.env.VITE_HTTP_URL}/mastery-route/settings`, {
-        central_bonus: masterySettings.central_bonus,
+        central_bonus: autoCentralBonus.value,
         mastery_swap_buffer: masterySettings.mastery_swap_buffer
       })
     ])
     _dirtyMasterySettings = false // 已落库，关弹窗不再触发「未保存还原」
     showSettings.value = false
-    message.success('专精路线设置已保存')
+    message.success('通用专精路线已保存')
   } catch (e) {
     console.error('saveRouteAndClose: failed', e)
     message.error('保存失败')
   }
 }
 
-function resetRoute() {
-  const p = settingsTab.value
-  if (!p) return
-  const def = defaultsCache.value
-  if (!def) {
-    message.warning('请先关闭再打开专精路线设置')
-    return
+async function calculateOptimalRoutes() {
+  if (routeCalculating.value || routeSaving.value || store.loading) return
+  routeCalculating.value = true
+  try {
+    const data = await syncMasteryRouteDefaults(axios, import.meta.env.VITE_HTTP_URL)
+    const { routes: def } = prepareMasteryRoutes([], data.defaults, profKeys)
+    bestTrainers.value = data.best_trainers || {}
+    defaultsError.value = ''
+    defaultsCache.value = def
+    if (!profKeys.some((p) => def._jsonDefaults[p]?.length)) {
+      message.info('没有已拥有且已解锁训练技能的可用干员')
+      return
+    }
+    for (const p of profKeys) {
+      routeSettings[p].supports = (def._jsonDefaults[p] || []).map((s) => ({ ...s }))
+      routeSettings[p].half_off = !!def._defaultFlags[p]?.half_off
+      routeSettings[p].optimal = false
+      _dirtyRouteProfessions.add(p)
+    }
+    message.success('已同步干员数据并计算全部职业的最优路线（保存并关闭后生效）')
+  } catch (e) {
+    message.error(e.response?.data?.message || e.response?.data?.error || e.message || '计算失败')
+  } finally {
+    routeCalculating.value = false
   }
-  const jsonSupports = def._jsonDefaults?.[p]
-  if (!jsonSupports?.length) {
-    message.info('没有默认路线可恢复')
-    return
-  }
-  routeSettings[p].supports = jsonSupports.map((s) => ({ ...s }))
-  routeSettings[p].half_off = true
-  routeSettings[p].optimal = false
-  _dirtyRouteProfessions.add(p)
-  message.success(`已恢复 ${p} 默认路线（保存并关闭后生效）`)
 }
 
 // ─── 显示列表 ───
@@ -1258,22 +1395,25 @@ const allOperatorList = ref([])
 // 空闲 = 不在排班表（主/副表槽位 + 候补 replacement）& 不在专精路线配置（协助位 name/换人 swap_name）
 // & 不在加工站工具人 & 不在宿舍黑名单。
 // 与「是否有专精计划」正交：空闲/非空闲只看基地占用，计划状态由「只看计划」管——
-// 否则空闲却有计划（可正常训练）的干员会和真正非空闲却有计划（错计划）的混在一起。
+// 非空闲干员同样可以加入计划，添加时仅提示排班冲突。
 // 排班由 App 启动时全局 load（router-view 以 loaded 门控，进入本页必然已加载）。
-const scheduledOperatorSet = computed(() => {
-  const busy = new Set()
-  const plans = [planStore.plan, ...(planStore.backup_plans || []).map((b) => b.plan)]
-  for (const p of plans) {
-    for (const facility in p || {}) {
-      for (const slot of p[facility]?.plans || []) {
-        for (const agent of [slot.agent, ...(slot.replacement || [])]) {
-          if (agent && agent !== 'Free' && agent !== 'Current') busy.add(agent)
-        }
-      }
-    }
-  }
-  return busy
-})
+const supportSchedule = computed(() =>
+  masteryScheduleContext(planStore.plan, planStore.backup_plans)
+)
+const scheduledOperatorSet = computed(() => supportSchedule.value.scheduled)
+const autoCentralBonus = computed(() => supportSchedule.value.centralBonus)
+function trainingWarning(name) {
+  return masteryTraineeWarning(name, supportSchedule.value.blocked)
+}
+
+const showSupports = ref(false)
+const supportSelection = reactive({ plan: null, name: '' })
+async function openSupports(op, rec) {
+  await refreshPlanFromServer()
+  supportSelection.plan = planStatus.value[planKey(op.char_id, rec.skill_index)]
+  supportSelection.name = op.name
+  showSupports.value = true
+}
 const routeOperatorSet = computed(() => {
   const busy = new Set()
   for (const p of profKeys) {
@@ -1284,15 +1424,14 @@ const routeOperatorSet = computed(() => {
   }
   return busy
 })
-const workshopOperators = computed(() => [
-  ...(fodderOps.value || []),
-  ...(t5Ops.value || []),
-  ...(bookOps.value || [])
-])
+const workshopOperators = computed(() => selectedWorkshopOperators(configStore))
+function workshopTrainingWarning(name) {
+  return workshopTraineeWarning(name, workshopOperators.value)
+}
 function isIdleOperator(op) {
   if (scheduledOperatorSet.value.has(op.name)) return false
   if (routeOperatorSet.value.has(op.name)) return false
-  if (workshopOperators.value.includes(op.name)) return false
+  if (workshopOperators.value.has(op.name)) return false
   if ((configStore.free_blacklist || []).includes(op.name)) return false
   return true
 }
@@ -1377,35 +1516,19 @@ async function fetchCultivate() {
 
 // ─── 确认 & 提交 ───
 const showConfirm = ref(false)
-const cd = reactive({ op: null, rec: null, supports: null, firstSupport: null })
-
-function buildSupports(op) {
-  const p = profMap[op.profession] || '近卫'
-  const s = routeSettings[p]
-  if (!s?.supports?.length) return []
-  const bonus = masterySettings.central_bonus || 0
-  return s.supports.map((sup) => ({
-    name: sup.name,
-    swap_name: sup.swap ? sup.swap_name || sup.name : sup.name,
-    skill_level: sup.skill_level,
-    efficiency: Math.min(100, (sup.efficiency || 45) + bonus),
-    match: sup.swap ? !!sup.match : false,
-    half_off: s.half_off
-  }))
-}
+const cd = reactive({ op: null, rec: null })
 
 function confirmSkill(op, rec) {
-  const p = profMap[op.profession] || '近卫'
   cd.op = op
   cd.rec = rec
-  cd.supports = buildSupports(op)
-  cd.firstSupport = routeSettings[p]?.supports?.[0]?.name || ''
   showConfirm.value = true
 }
 
 async function doAddTask() {
   showConfirm.value = false
   const { op, rec } = cd
+  if (workshopTrainingWarning(op.name)) message.warning(workshopTrainingWarning(op.name))
+  if (trainingWarning(op.name)) message.warning(trainingWarning(op.name))
   try {
     // #71：一键专精走 DB 计划创建 API（POST /mastery-plan），不再发原始 /task「技能专精」
     // （死流：server 只认 DB 计划）。target_level 由服务端默认专三，与确认弹窗「→ 专精3级」一致。
@@ -1413,6 +1536,9 @@ async function doAddTask() {
       items: [{ name: op.name, skill_index: rec.skill_index }]
     })
     const results = r.data?.results || []
+    for (const warning of new Set(results.map((result) => result.warning).filter(Boolean))) {
+      message.warning(warning)
+    }
     if (results[0]?.status === 'added') {
       message.success(`${op.name} ${rec.skill_name} 专精任务已添加！`)
       await refreshPlanFromServer()
@@ -1428,7 +1554,7 @@ async function doAddTask() {
 onMounted(async () => {
   await refreshPlanFromServer()
   await Promise.all([loadOperators(), store.fetchRecommendations()])
-  // 空闲干员筛选需要路线配置：提前加载（defaultsCache 去重，openSettings 不再重复拉取）
+  // 空闲干员筛选需要路线配置；打开设置时再刷新一次，反映最新拥有情况和解锁技能。
   if (!defaultsCache.value) {
     try {
       await loadRoute()
@@ -1471,6 +1597,10 @@ async function loadOperators() {
 .mastery-list {
   width: 100%;
   max-width: 960px;
+}
+.mastery-route-tabs {
+  /* Keep the segment capsule inside the scrolling content's coordinate space. */
+  position: relative;
 }
 .rec-item .n-card {
   margin-bottom: 0;

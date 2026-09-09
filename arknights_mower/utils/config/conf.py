@@ -2,6 +2,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -64,6 +65,10 @@ class CluePart(ConfModel):
     "优先购买"
     maa_mall_ignore_blacklist_when_full: bool = False
     "信用溢出时无视黑名单"
+    maa_mall_only_buy_discount: bool = False
+    "只购买折扣物品（仅第二轮购买）"
+    maa_mall_reserve_max_credit: bool = False
+    "保留最大信用点：信用点低于 300 时停止购买（仅第二轮购买）"
 
 
 class EmailPart(ConfModel):
@@ -146,6 +151,12 @@ class LongTaskPart(ConfModel):
         "开局干员使用助战"
         use_nonfriend_support: bool = False
         "开局干员使用非好友助战"
+        start_with_elite_two: bool = False
+        "凹开局干员直升精二（仅刷开局策略下的水月/萨米主题，且开局分队为战术分队类）"
+        only_start_with_elite_two: bool = False
+        "只凹开局干员直升精二，不进行作战（仅在刷开局策略且已勾直升时生效）"
+        collectible_mode_start_list: dict[str, bool] = Field(default_factory=dict)
+        "刷开局期望的奖励（键值见协议，仅刷开局策略生效）"
         mode: int = 1
         "策略"
         refresh_trader_with_dice: bool = False
@@ -157,6 +168,36 @@ class LongTaskPart(ConfModel):
             "一抹黑",
         ]
         "需要刷的坍缩范式"
+        difficulty: int = -1
+        "肉鸽难度（-1 = 不指定难度；2147483647 = 主题最高难度）"
+        stop_at_final_boss: bool = False
+        "打到第 5 层险路恶敌节点前停止（Phantom 主题不适用）"
+        stop_at_max_level: bool = False
+        "肉鸽等级刷满后停止"
+        investment_enabled: bool = True
+        "是否投资源石锭"
+        stop_when_investment_full: bool = False
+        "源石锭投资满时停止"
+        investment_with_more_score: bool = False
+        "投资模式启用购物、招募、进2层"
+        collectible_mode_shopping: bool = False
+        "烧水时是否启用购物"
+        collectible_mode_squad: str = ""
+        "烧水使用的分队（默认与 squad 同步）"
+        monthly_squad_auto_iterate: bool = False
+        "月度小队自动切换（仅策略 6 生效）"
+        monthly_squad_check_comms: bool = False
+        "将月度小队通信也作为切换依据（需勾选月度小队自动切换）"
+        deep_exploration_auto_iterate: bool = False
+        "深入调查自动切换（仅策略 7 生效）"
+        first_floor_foldartal: str = ""
+        "凹第一层远见板子（板子名，非空才生效，仅萨米刷开局）"
+        start_foldartal_list: list[str] = Field(default_factory=list)
+        "凹开局板子列表（最多 3 个，仅萨米刷开局且生活至上分队）"
+        blackflow_cultivation_target: str = "swaddled_cat"
+        "刷襁褓动物目标品种（swaddled_cat/swaddled_feathered_serpent/swaddled_dog/swaddled_cerberus）"
+        find_playtime_target: int = 1
+        "目标常乐节点子类型（1=令/2=黍/3=年，仅界园刷常乐节点）"
 
     class SSSConf(ConfModel):
         type: int = 1
@@ -236,7 +277,7 @@ class MaaPart(ConfModel):
     maa_update_channel: str = "stable"
     "MAA 版本通道：stable 正式版，beta 公测版"
     maa_auto_check_update: bool = False
-    "进入 Maa 设置页后自动检查 Maa 本体及资源更新"
+    "进入 MAA 设置页后自动检查 MAA 本体及资源更新"
     maa_conn_preset: str = Field(
         default_factory=lambda: "CompatMac" if sys.platform == "darwin" else "General"
     )
@@ -305,6 +346,12 @@ class RegularTaskPart(ConfModel):
     "关卡体力消耗默认值（数据中找不到关卡时的兜底，0 表示不启用）"
     maa_eat_stone: bool = False
     "无限吃源石"
+    maa_report_to_yituliu: bool = False
+    "向一图流上报作战结果"
+    maa_yituliu_id: str = ""
+    "一图流上报 id（仅在开启上报时有效）"
+    maa_penguin_id: str = ""
+    "企鹅物流上报 id（可选，留空为匿名上报）"
     maa_weekly_plan: list[MaaDailyPlan] = [
         {"medicine": 0, "sanity_threshold": 0, "stage": [""], "weekday": "周一"},
         {"medicine": 0, "sanity_threshold": 0, "stage": [""], "weekday": "周二"},
@@ -323,8 +370,10 @@ class RegularTaskPart(ConfModel):
     "多关卡物品库存比例规则"
     maa_depot_enable: bool = False
     "仓库物品混合读取"
-    visit_friend: bool = True
+    visit_friend_enable: bool = True
     "访问好友"
+    visit_friend_mode: str = "maa"
+    "访问好友处理方式：mower 原生 / maa 交 MAA"
     report_enable: bool = True
     "读取基报"
 
@@ -336,6 +385,11 @@ class WorkShopItem(ConfModel):
     "子项下限"
     self_upper_limit: int = 30
     "自己上限"
+
+
+class WorkshopDeerFodderItem(WorkShopItem):
+    children_lower_limit: int = Field(default=0, ge=0, le=999999)
+    self_upper_limit: int = Field(default=9999, ge=0, le=999999)
 
 
 class RIICPart(ConfModel):
@@ -354,6 +408,8 @@ class RIICPart(ConfModel):
         "干员"
         enabled: bool = True
         "启用"
+        source: Literal["manual", "mastery", "stockpile"] = "manual"
+        "配置来源；旧配置按手动配置保留"
 
     drone_count_limit: int = 100
     "无人机使用阈值"
@@ -385,6 +441,39 @@ class RIICPart(ConfModel):
     "替换组心情监视"
     workshop_settings: list[WorkShopSetting] = []
     "工作室设置"
+    workshop_manual_backup: list[WorkShopSetting] | None = None
+    "独立保存、可编辑的手动加工表单；None 表示尚未初始化"
+    workshop_auto_active: bool = False
+    "自动专精是否正在接管运行配置"
+    workshop_manual_revision: int = 0
+    "手动表单版本，与自动运行配置版本独立"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_workshop_active(cls, data):
+        if (
+            isinstance(data, dict)
+            and "workshop_auto_active" not in data
+            and data.get("workshop_manual_backup") is not None
+        ):
+            data = dict(data)
+            data["workshop_auto_active"] = True
+        return data
+
+    workshop_preset_migrated: bool = False
+    "旧版手动保存的加工配置是否已接续"
+    workshop_generation: int = 0
+    "加工配置接管版本，防止旧页面和旧任务覆盖恢复后的配置"
+    workshop_deer_fodder: list[WorkshopDeerFodderItem] = [
+        {
+            "item_names": ["碳素", "碳素组", "家具零件_碳素组"],
+            "children_lower_limit": 0,
+            "self_upper_limit": 9999,
+        }
+    ]
+    "九色鹿垫刀素材，独立于自动生成的配置"
+    workshop_min_bonus: int = Field(default=80, ge=0, le=1000)
+    "加工站一键设置的副产品概率加成下限（百分比）"
     t5_operators: list[str] = ["年"]
     "自动专精 T5 加工干员"
     book_operators: list[str] = ["司霆惊蛰"]
@@ -565,6 +654,15 @@ class Conf(
     def migrate_legacy_keys(cls, data):
         if not isinstance(data, dict):
             return data
+        # visit_friend(bool) 已退役：迁移为 visit_friend_enable(bool)。原 true 语义是 mower
+        # 原生访问好友，迁移保留该行为（mode=mower），避免非 MAA 用户在迁移后静默失去访问
+        # 好友；未配置过旧键的新用户才取默认 maa。
+        old_visit_friend = data.pop("visit_friend", None)
+        if old_visit_friend is not None:
+            if "visit_friend_enable" not in data:
+                data["visit_friend_enable"] = old_visit_friend
+            if "visit_friend_mode" not in data:
+                data["visit_friend_mode"] = "mower" if old_visit_friend else "maa"
         for old, new in _LEGACY_KEY_MIGRATIONS.items():
             if old not in data:
                 continue

@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { defineStore } from 'pinia'
 import { inject, ref, watch, watchEffect } from 'vue'
+import { createWorkshopState } from '@/utils/workshopConfig'
 
 export const useConfigStore = defineStore('config', () => {
   const defaultLaunchCommand =
@@ -20,6 +21,9 @@ export const useConfigStore = defineStore('config', () => {
   const maa_update_channel = ref('stable')
   const maa_auto_check_update = ref(false)
   const medicine_expire_days = ref(0)
+  const maa_report_to_yituliu = ref(false)
+  const maa_yituliu_id = ref('')
+  const maa_penguin_id = ref('')
   const ap_fallback = ref(0)
   const maa_weekly_plan = ref([])
   const maa_weekly_plan_options = ref([])
@@ -56,7 +60,24 @@ export const useConfigStore = defineStore('config', () => {
   const fia_threshold = ref(90)
   const rescue_threshold = ref(75)
   const favorite = ref([])
-  const workshop_settings = ref([])
+  const {
+    workshop_settings,
+    workshop_settings_generation,
+    workshop_manual_settings,
+    workshop_manual_settings_revision,
+    workshop_preset_warning,
+    load_workshop_config,
+    apply_workshop_response
+  } = createWorkshopState()
+  const defaultDeerFodder = () => [
+    {
+      item_names: ['碳素', '碳素组', '家具零件_碳素组'],
+      children_lower_limit: 0,
+      self_upper_limit: 9999
+    }
+  ]
+  const workshop_deer_fodder = ref(defaultDeerFodder())
+  const workshop_min_bonus = ref(80)
   const fodder_operators = ref(['九色鹿'])
   const t5_operators = ref(['年'])
   const book_operators = ref(['司霆惊蛰'])
@@ -74,6 +95,8 @@ export const useConfigStore = defineStore('config', () => {
   const maa_conn_preset = ref('General')
   const maa_touch_option = ref('maatouch')
   const maa_mall_ignore_blacklist_when_full = ref(false)
+  const maa_mall_only_buy_discount = ref(false)
+  const maa_mall_reserve_max_credit = ref(false)
   const maa_rg_sleep_min = ref('00:00')
   const maa_rg_sleep_max = ref('00:00')
   const maa_credit_fight = ref(true)
@@ -116,7 +139,8 @@ export const useConfigStore = defineStore('config', () => {
   const sign_in = ref({ enable: true })
   const droidcast = ref({})
   const mumu12IPC = ref(false)
-  const visit_friend = ref(true)
+  const visit_friend_enable = ref(true)
+  const visit_friend_mode = ref('maa')
   const credit_fight = ref({})
   const custom_screenshot = ref({})
   const hot_update_enable = ref(false)
@@ -369,6 +393,9 @@ export const useConfigStore = defineStore('config', () => {
     maa_rg_enable.value = response.data.maa_rg_enable == 1
     maa_long_task_type.value = response.data.maa_long_task_type
     medicine_expire_days.value = response.data.medicine_expire_days
+    maa_report_to_yituliu.value = response.data.maa_report_to_yituliu ?? false
+    maa_yituliu_id.value = response.data.maa_yituliu_id ?? ''
+    maa_penguin_id.value = response.data.maa_penguin_id ?? ''
     ap_fallback.value = Number(response.data.ap_fallback) || 0
     maa_weekly_plan.value = normalizeWeeklyPlan(response.data.maa_weekly_plan)
     maa_weekly_plan_active.value = response.data.maa_weekly_plan_active || ''
@@ -405,6 +432,8 @@ export const useConfigStore = defineStore('config', () => {
     maa_conn_preset.value = response.data.maa_conn_preset
     maa_touch_option.value = response.data.maa_touch_option
     maa_mall_ignore_blacklist_when_full.value = response.data.maa_mall_ignore_blacklist_when_full
+    maa_mall_only_buy_discount.value = response.data.maa_mall_only_buy_discount ?? false
+    maa_mall_reserve_max_credit.value = response.data.maa_mall_reserve_max_credit ?? false
     maa_rg_sleep_max.value = response.data.maa_rg_sleep_max
     maa_rg_sleep_min.value = response.data.maa_rg_sleep_min
     maa_credit_fight.value = response.data.maa_credit_fight
@@ -449,10 +478,13 @@ export const useConfigStore = defineStore('config', () => {
     sign_in.value = response.data.sign_in
     droidcast.value = response.data.droidcast
     mumu12IPC.value = response.data.mumu12IPC
-    visit_friend.value = response.data.visit_friend
+    visit_friend_enable.value = response.data.visit_friend_enable ?? true
+    visit_friend_mode.value = response.data.visit_friend_mode ?? 'maa'
     credit_fight.value = response.data.credit_fight
     custom_screenshot.value = response.data.custom_screenshot
-    workshop_settings.value = response.data.workshop_settings
+    load_workshop_config(response.data)
+    workshop_deer_fodder.value = response.data.workshop_deer_fodder ?? defaultDeerFodder()
+    workshop_min_bonus.value = response.data.workshop_min_bonus ?? 80
     fodder_operators.value = response.data.fodder_operators || ['九色鹿']
     t5_operators.value = response.data.t5_operators || ['年']
     book_operators.value = response.data.book_operators || ['司霆惊蛰']
@@ -488,6 +520,9 @@ export const useConfigStore = defineStore('config', () => {
       maa_rg_enable: maa_rg_enable.value ? 1 : 0,
       maa_long_task_type: maa_long_task_type.value,
       medicine_expire_days: medicine_expire_days.value,
+      maa_report_to_yituliu: maa_report_to_yituliu.value,
+      maa_yituliu_id: maa_yituliu_id.value,
+      maa_penguin_id: maa_penguin_id.value,
       // 新增：Server酱的配置
       server_push_enable: server_push_enable.value ? 1 : 0,
       sendKey: sendKey.value,
@@ -527,6 +562,8 @@ export const useConfigStore = defineStore('config', () => {
       maa_conn_preset: maa_conn_preset.value,
       maa_touch_option: maa_touch_option.value,
       maa_mall_ignore_blacklist_when_full: maa_mall_ignore_blacklist_when_full.value,
+      maa_mall_only_buy_discount: maa_mall_only_buy_discount.value,
+      maa_mall_reserve_max_credit: maa_mall_reserve_max_credit.value,
       maa_rg_sleep_max: maa_rg_sleep_max.value,
       maa_rg_sleep_min: maa_rg_sleep_min.value,
       maa_credit_fight: maa_credit_fight.value,
@@ -572,10 +609,14 @@ export const useConfigStore = defineStore('config', () => {
       sign_in: sign_in.value,
       droidcast: droidcast.value,
       mumu12IPC: mumu12IPC.value,
-      visit_friend: visit_friend.value,
+      visit_friend_enable: visit_friend_enable.value,
+      visit_friend_mode: visit_friend_mode.value,
       credit_fight: credit_fight.value,
       custom_screenshot: custom_screenshot.value,
-      workshop_settings: workshop_settings.value,
+      workshop_manual_settings: workshop_manual_settings.value,
+      workshop_manual_settings_revision: workshop_manual_settings_revision.value,
+      workshop_deer_fodder: workshop_deer_fodder.value,
+      workshop_min_bonus: workshop_min_bonus.value,
       fodder_operators: fodder_operators.value,
       t5_operators: t5_operators.value,
       book_operators: book_operators.value,
@@ -617,10 +658,17 @@ export const useConfigStore = defineStore('config', () => {
   )
   let configSaveRequest = Promise.resolve()
   function save_config() {
-    const payload = JSON.parse(JSON.stringify(build_config()))
+    // Track nested edits synchronously for watchEffect; serialize the latest
+    // draft and revision when this queued request actually starts.
+    JSON.stringify(build_config())
     configSaveRequest = configSaveRequest
       .catch(() => {})
-      .then(() => axios.post(`${import.meta.env.VITE_HTTP_URL}/conf`, payload))
+      .then(async () => {
+        const payload = JSON.parse(JSON.stringify(build_config()))
+        const response = await axios.post(`${import.meta.env.VITE_HTTP_URL}/conf`, payload)
+        apply_workshop_response(response.data, payload.workshop_manual_settings)
+        return response
+      })
     return configSaveRequest
   }
 
@@ -649,6 +697,9 @@ export const useConfigStore = defineStore('config', () => {
     maa_rg_enable,
     maa_long_task_type,
     medicine_expire_days,
+    maa_report_to_yituliu,
+    maa_yituliu_id,
+    maa_penguin_id,
     ap_fallback,
     maa_weekly_plan,
     maa_weekly_plan_options,
@@ -687,6 +738,13 @@ export const useConfigStore = defineStore('config', () => {
     rescue_threshold,
     favorite,
     workshop_settings,
+    workshop_settings_generation,
+    workshop_manual_settings,
+    workshop_manual_settings_revision,
+    workshop_preset_warning,
+    apply_workshop_response,
+    workshop_deer_fodder,
+    workshop_min_bonus,
     fodder_operators,
     t5_operators,
     book_operators,
@@ -698,6 +756,8 @@ export const useConfigStore = defineStore('config', () => {
     maa_conn_preset,
     maa_touch_option,
     maa_mall_ignore_blacklist_when_full,
+    maa_mall_only_buy_discount,
+    maa_mall_reserve_max_credit,
     maa_rg_sleep_min,
     maa_rg_sleep_max,
     maa_credit_fight,
@@ -740,7 +800,8 @@ export const useConfigStore = defineStore('config', () => {
     sign_in,
     droidcast,
     mumu12IPC,
-    visit_friend,
+    visit_friend_enable,
+    visit_friend_mode,
     credit_fight,
     custom_screenshot,
     hot_update_enable,

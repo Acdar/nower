@@ -75,6 +75,7 @@ from arknights_mower.utils.scheduler_task import (
     check_dorm_ordering,
     find_next_task,
     plan_metadata,
+    protect_support_swaps,
     scheduling,
     try_add_release_dorm,
     try_reorder,
@@ -91,6 +92,7 @@ def _is_mastery_busy(operator_name: str) -> bool:
         return is_operator_busy(operator_name)
     except Exception:
         return False
+
 
 # 追踪 MAA 临时核心库文件，进程退出时自动清理
 _maa_temp_files = set()
@@ -119,6 +121,33 @@ def _add_group_to_fix_plan(fix_plan: dict, op_data: Operators, group: str) -> No
         if agent.room not in fix_plan:
             fix_plan[agent.room] = ["Current"] * len(op_data.plan[agent.room])
         fix_plan[agent.room][agent.index] = name
+
+
+def _maa_client_type() -> str:
+    """推导 MAA 集成协议的客户端类型：官服 Official，B 服 Bilibili。"""
+    return "Official" if config.conf.package_type == 1 else "Bilibili"
+
+
+# 战术分队类（对照 RoguelikeSquadIsProfessional），凹开局直升精二仅对这类分队下发
+_PROFESSIONAL_SQUADS = (
+    "突击战术分队",
+    "堡垒战术分队",
+    "远程战术分队",
+    "破坏战术分队",
+)
+
+# 刷开局期望奖励键，与协议 collectible_mode_start_list 的九项一致
+_COLLECTIBLE_START_KEYS = (
+    "hot_water",
+    "shield",
+    "ingot",
+    "hope",
+    "random",
+    "key",
+    "dice",
+    "ideas",
+    "ticket",
+)
 
 
 class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
@@ -209,24 +238,22 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.error = False
         self.handle_error(True)
 
-        scheduling(self.tasks)
-        check_dorm_ordering(self.tasks, self.op_data)
-        if len(self.tasks) > 0:
-            # 找到时间最近的一次单个任务
-            self.task = self.tasks[0]
-        else:
-            self.task = None
-        if self.task is not None:
-            if (self.task.time - datetime.now()).total_seconds() > 300:
-                self.task = None
-        if self.task is not None and datetime.now() < self.task.time:
+        while True:
+            scheduling(self.tasks)
+            check_dorm_ordering(self.tasks, self.op_data)
+            protect_support_swaps(self.tasks)
+            self.task = self.tasks[0] if self.tasks else None
+            if self.task is None:
+                break
             reschedule_time = (self.task.time - datetime.now()).total_seconds()
-            if reschedule_time > 0:
-                logger.info(
-                    f"出现任务调度情况休息{reschedule_time}秒等待下一个任务开始"
-                )
-                # 等待下一个任务开始也是任务间空闲，走唯一的休眠收口点维护 sleeping
-                self._idle_sleep(reschedule_time)
+            if reschedule_time > 300:
+                self.task = None
+                break
+            if reschedule_time <= 0:
+                break
+            logger.info(f"出现任务调度情况休息{reschedule_time}秒等待下一个任务开始")
+            # 休眠可能被新增任务唤醒；返回后重新排序、选择并检查到期时间。
+            self._idle_sleep(reschedule_time)
         if self.party_time is not None and self.party_time < datetime.now():
             self.party_time = None
         if self.free_clue is not None and self.free_clue != get_server_weekday():
@@ -505,6 +532,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
     def craft_material(self):
         task = self.task
+        from arknights_mower.utils.workshop_automation import workshop_task_snapshot
+
+        snapshot = workshop_task_snapshot(task)
+        if snapshot is None:
+            logger.info("加工配置已更新，跳过旧的自动加工任务")
+            return
         try:
             self.enter_room("factory")
             current_agent = [
@@ -525,7 +558,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.debug(f"当前工厂干员: {current_agent}")
             logger.debug(f"当前加工干员位置: {agent_room}")
             self.agent_arrange({"factory": [task.meta_data]})
-            self.generate_product(task.meta_data)
+            self.generate_product(task.meta_data, snapshot=snapshot)
             if len(current_agent) > 0 and current_agent[0] != task.meta_data:
                 new_plan = {"factory": current_agent}
                 if agent_room and agent_index >= 0:
@@ -548,11 +581,25 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             self.back()
             return
         if self.task is not None:
+            # Navigation/reconnection may have consumed the margin since run().
+            # Recheck at a safe boundary, before any staff arrangement has started.
+            protect_support_swaps(self.tasks)
+            if self.task.time > datetime.now() or not any(
+                task is self.task for task in self.tasks
+            ):
+                self.task = None
+                self.skip()
+                return True
             try:
                 if self.task.type == TaskTypes.SKILL_UPGRADE:
                     from arknights_mower.solvers.mastery import run_mastery_task
 
                     run_mastery_task(self)
+                    from arknights_mower.utils.workshop_automation import (
+                        restore_if_no_plans,
+                    )
+
+                    restore_if_no_plans()
                 elif self.task.type == TaskTypes.SWAP_SUPPORT:
                     from arknights_mower.solvers.mastery import run_swap_support
 
@@ -662,7 +709,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.仓库扫描()
                 elif self.task.type == TaskTypes.NOT_SPECIFIC:
                     pass
-                del self.tasks[0]
+                self.tasks[:] = [t for t in self.tasks if t is not self.task]
                 if self.tasks and self.tasks[0].type in [TaskTypes.SHIFT_ON]:
                     self.backup_plan_solver(PlanTriggerTiming.AFTER_PLANNING)
             except MowerExit:
@@ -1024,6 +1071,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             # （受保护时发节流提醒邮件）。fix_plan 拿 op_data 缓存比对静态计划，专精
             # 活跃/受保护时缓存与计划必然错位，不弹会每轮生成训练室纠错（反复进出）。
             self._suppress_train_correction(fix_plan)
+            # Prefer replacements after all correction passes; if none are available,
+            # retain the original correction's recall instead of blocking it.
+            from arknights_mower.utils.resting_correction import (
+                prefer_resting_replacements,
+            )
+
+            prefer_resting_replacements(self.op_data, fix_plan, _is_mastery_busy)
             if len(fix_plan.keys()) > 0:
                 # 如果5分钟之内有任务则跳过心情读取
                 next_task = self.find_next_task()
@@ -1115,24 +1169,42 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             )
             send_message(msg, level="WARNING")
 
-    def generate_product(self, agent: str):
+    def generate_product(self, agent: str, *, task=None, snapshot=None):
         """
         Process materials in a factory with specified operators
         Args:
             agent: List of operators that need two production cycles
         """
 
+        from arknights_mower.utils.workshop_automation import (
+            workshop_task_snapshot,
+        )
+        from arknights_mower.utils.workshop_config import workshop_lock
+
         try:
+            if snapshot is None:
+                snapshot = workshop_task_snapshot(task)
+            if snapshot is None or not snapshot.is_current():
+                return
             cultivateDepotSolver().start()
+            if not snapshot.is_current():
+                return
+            settings = snapshot.settings
             unknown_cnt = 0
             inventory_data = get_inventory_counts()
             is_9colored = agent == "九色鹿"
-            if agent not in [s.operator for s in config.conf.workshop_settings]:
+            if agent not in [s.operator for s in settings]:
                 logger.info(f"当前干员{agent}不在加工站配置中")
                 return
-            item_list = next(
-                (s.items for s in config.conf.workshop_settings if s.operator == agent)
+            item_list = next((s.items for s in settings if s.operator == agent))
+            from arknights_mower.utils.workshop_recommendation import (
+                scope_workshop_items,
             )
+
+            item_list = scope_workshop_items(agent, item_list, workshop_formula)
+            if not item_list:
+                logger.info(f"{agent}没有符合材料范围的加工配置，跳过")
+                return
             seen = set()
             group = defaultdict(dict)
             for item in item_list:
@@ -1172,6 +1244,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             gap = 0
             start_time = datetime.now()
             while tasks:
+                if not snapshot.is_current():
+                    break
                 if datetime.now() - start_time > timedelta(
                     minutes=5
                 ):  # 检测是否超过 5 分钟
@@ -1262,7 +1336,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             self.op_data.operators[agent].time_stamp = datetime.now()
                             logger.debug("设置加工站干员心情为0，别问我，我懒得算了")
                             continue
-                        self.tap(produce_btn, interval=2)
+                        # Keep the final check and submission together. Scans and
+                        # navigation do not hold this lock or block settings saves.
+                        with workshop_lock:
+                            if not snapshot.is_current():
+                                break
+                            self.tap(produce_btn, interval=2)
                         max_wait = 10
                         sleep_time = 0
                         while self.factory_scene() != Scene.FACTORY_PRODUCT_COLLECT:
@@ -1575,6 +1654,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             adj_0_task, adj_task = adj_tasks
         except TypeError:
             return None
+        # A mastery handoff is a fixed deadline, never a drone target.
+        run_orders = [
+            t for t in adj_tasks if t.type == TaskTypes.RUN_ORDER and t.meta_data
+        ]
+        if len(run_orders) != 2:
+            return run_orders[0].meta_data if len(run_orders) == 1 else None
         adjust_0_room = adj_0_task.meta_data
         adjust_room = adj_task.meta_data
         # 如果加速房间为跑单房间，则优先使用
@@ -1691,7 +1776,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         _high_done = False
         _low_used = set()
         for op in self.total_agent:
-            if op.is_high():
+            if op.is_high() and not op.is_workshop():
                 if _high_done:
                     continue
                 if (
@@ -1753,6 +1838,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
     @staticmethod
     def _resting_tier(op):
+        if op.is_workshop():
+            return 3
         if op.is_high() and op.resting_priority == "high":
             return BaseSchedulerSolver._REST_TIER_HIGH
         if op.is_high():
@@ -2410,7 +2497,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         action_required_task = scheduling(self.tasks)
         # logger.error(f"action_required_task:{action_required_task}")
         logger.debug(f"room:{room}")
-        logger.debug(any(task.meta_data == room for task in action_required_task))
+        logger.debug(self.get_run_order_adjust_room(action_required_task) == room)
         # while  action_required_task is not None and any(task.meta_data == room for task in action_required_task):
 
         # 设置为每次循环都验证一次当前房间 是否适合加速
@@ -2903,7 +2990,52 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         )
         if train_support in free_list:
             free_list.remove(train_support)
+        if any(
+            name in self.op_data.operators
+            and not self.op_data.operators[name].is_workshop()
+            and self.op_data.operators[name].current_mood() <= 22
+            for name in free_list
+        ):
+            # The game sorts by mood, so list ordering alone cannot put crafters
+            # behind replacements. Exclude them from this free-slot selection.
+            free_list = [
+                name
+                for name in free_list
+                if name not in self.op_data.operators
+                or not self.op_data.operators[name].is_workshop()
+            ]
         return free_list
+
+    def preserve_resting_crafters(self, agents, room):
+        """Resolve Free placeholders before UI selection can evict a crafter.
+
+        Reserve each qualifying replacement once. A generic Free selection must
+        not substitute an almost-full replacement for a recovering crafter.
+        """
+        if not room.startswith("dorm") or "Free" not in agents:
+            return
+        replacements = sorted(
+            (
+                self.op_data.operators[name]
+                for name in self.get_free_list(agents)
+                if name in self.op_data.operators
+                and not self.op_data.operators[name].is_workshop()
+                and self.op_data.operators[name].current_mood() <= 22
+            ),
+            key=lambda op: op.current_mood(),
+        )
+        for index, name in enumerate(agents):
+            if name != "Free":
+                continue
+            current = self.op_data.get_current_operator(room, index)
+            if (
+                current is None
+                or not current.is_workshop()
+                or current.current_mood() >= current.upper_limit
+                or current.name in agents
+            ):
+                continue
+            agents[index] = replacements.pop(0).name if replacements else current.name
 
     def choose_agent(
         self, agents: list[str], room: str, fast_mode=True, train_index=0
@@ -2924,6 +3056,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if "" in agents:
             fast_mode = False
             agents = [item for item in agents if item != ""]
+        self.preserve_resting_crafters(agents, room)
         current_list = set()
         for idx, n in enumerate(agents):
             if n not in current_list:
@@ -3912,14 +4045,14 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             except Exception as e:
                 logger.error(f"动态复制MAA核心库失败，将使用原库：{e}")
 
-            logger.info("Maa Python模块导入成功")
+            logger.info("MAA Python模块导入成功")
         except Exception as e:
             save_exception(e)
-            logger.exception(f"Maa Python模块导入失败：{str(e)}")
-            raise Exception("Maa Python模块导入失败")
+            logger.exception(f"MAA Python模块导入失败：{str(e)}")
+            raise Exception("MAA Python模块导入失败")
 
         try:
-            logger.debug("开始更新Maa活动关卡导航……")
+            logger.debug("开始更新MAA活动关卡导航……")
             ota_tasks_url = (
                 "https://api.maa.plus/MaaAssistantArknights/api/resource/tasks.json"
             )
@@ -3933,9 +4066,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 res = response.content.decode("utf-8")
             with open(ota_tasks_path, "w", encoding="utf-8") as f:
                 f.write(res)
-            logger.info("Maa活动关卡导航更新成功")
+            logger.info("MAA活动关卡导航更新成功")
         except Exception as e:
-            logger.error(f"Maa活动关卡导航更新失败：{str(e)}")
+            logger.error(f"MAA活动关卡导航更新失败：{str(e)}")
             save_exception(e)
 
         try:
@@ -3965,8 +4098,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             raise Exception("MAA 连接失败")
 
     def append_maa_task(self, type):
-        if type in ["StartUp", "Visit"]:
-            self.MAA.append_task(type)
+        if type == "StartUp":
+            self.MAA.append_task("StartUp", {"client_type": _maa_client_type()})
         elif type == "Fight":
             self.maybe_switch_expired_activity_plan()
             conf = config.conf
@@ -3995,11 +4128,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         "times": 999,
                         "series": 0,
                         "report_to_penguin": True,
-                        "client_type": "",
-                        "penguin_id": "",
+                        "client_type": _maa_client_type(),
+                        "penguin_id": conf.maa_penguin_id,
                         "DrGrandet": False,
                         "server": "CN",
                         "medicine_expire_days": medicine_expire_days,
+                        "report_to_yituliu": conf.maa_report_to_yituliu,
+                        "yituliu_id": conf.maa_yituliu_id,
                     },
                 )
                 self.stages.append(stage)
@@ -4015,8 +4150,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     "credit_fight": conf.maa_credit_fight
                     and "" not in self.stages
                     and self.credit_fight is None,
-                    "select_formation": conf.credit_fight.squad,
+                    "formation_index": max(0, min(4, conf.credit_fight.squad)),
                     "force_shopping_if_credit_full": conf.maa_mall_ignore_blacklist_when_full,
+                    "visit_friends": conf.visit_friend_enable
+                    and conf.visit_friend_mode == "maa",
+                    "only_buy_discount": conf.maa_mall_only_buy_discount,
+                    "reserve_max_credit": conf.maa_mall_reserve_max_credit,
                 },
             )
         elif type == "Award":
@@ -4052,7 +4191,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if stage_drop["details"] and not self.drop_send:
             send_message(
                 maa_template.render(stage_drop=stage_drop),
-                "Maa停止",
+                "MAA停止",
             )
             self.drop_send = True
 
@@ -4114,7 +4253,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     else:
                         self.sleep(5)
                 if hard_stop:
-                    hard_stop_msg = "Maa任务未完成，等待3分钟"
+                    hard_stop_msg = "MAA任务未完成，等待3分钟"
                     logger.info(hard_stop_msg)
                     send_message(hard_stop_msg)
                     self.sleep(180)
@@ -4130,13 +4269,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         logger.info("记录首次信用作战")
                         self.maa_stop(False)
                 else:
-                    send_message("Maa单次任务停止")
+                    send_message("MAA单次任务停止")
                     if (
                         self.find_next_task(datetime.now() + timedelta(minutes=15))
                         is None
                     ):
                         logger.debug(
-                            "Maa单次任务结束15分钟内没有其他任务，新增单次任务防止漏单"
+                            "MAA单次任务结束15分钟内没有其他任务，新增单次任务防止漏单"
                         )
                         self.tasks.insert(0, SchedulerTask(time=datetime.now()))
             conf = config.conf
@@ -4159,22 +4298,137 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.recog.update()
                     self.back_to_index()
                     if conf.RG:
-                        self.MAA.append_task(
-                            "Roguelike",
-                            {
-                                "theme": conf.maa_rg_theme,
-                                "squad": conf.rogue.squad,
-                                "roles": conf.rogue.roles,
-                                "core_char": conf.rogue.core_char,
-                                "use_support": conf.rogue.use_support,
-                                "use_nonfriend_support": conf.rogue.use_nonfriend_support,
-                                "mode": conf.rogue.mode,
-                                "refresh_trader_with_dice": conf.rogue.refresh_trader_with_dice,
-                                "starts_count": 9999999,
-                                "investments_count": 9999999,
-                                "expected_collapsal_paradigms": conf.rogue.expected_collapsal_paradigms,
-                            },
-                        )
+                        # Roguelike 通用字段按协议条件下发（#264）：投资类字段仅在
+                        # investment_enabled 时下发（值内联各自的策略/主题限制，与 MAA 一致），
+                        # stop_at_final_boss 除 Phantom 外可用且仅策略 0 下发，
+                        # expected_collapsal_paradigms 仅 Sami + 策略 5 且列表非空时下发，
+                        # 烧水字段仅策略 4 下发，勾选「只凹开局干员直升精二」时
+                        # 撤销 collectible_mode_start_list，指路鳞的值内联 Mizuki 限制。
+                        # 月度小队/深入调查字段仅策略 6/7 下发（通信检查需先勾自动切换），
+                        # first_floor_foldartal 与 start_foldartal_list 仅 Sami + 策略 4
+                        # （板子列表另限生活至上分队），黑流树海字段仅刷襁褓动物模式下发，
+                        # find_playTime_target 仅界园刷常乐节点模式下发。
+                        professional = conf.rogue.squad in _PROFESSIONAL_SQUADS
+                        rogue_params = {
+                            "theme": conf.maa_rg_theme,
+                            "squad": conf.rogue.squad,
+                            "roles": conf.rogue.roles,
+                            "core_char": conf.rogue.core_char,
+                            "use_support": conf.rogue.use_support,
+                            "use_nonfriend_support": conf.rogue.use_nonfriend_support,
+                            "mode": conf.rogue.mode,
+                            "starts_count": 9999999,
+                            "investments_count": 9999999,
+                            "difficulty": conf.rogue.difficulty,
+                            "investment_enabled": conf.rogue.investment_enabled,
+                            "refresh_trader_with_dice": (
+                                conf.maa_rg_theme == "Mizuki"
+                                and conf.rogue.refresh_trader_with_dice
+                            ),
+                        }
+                        if conf.rogue.investment_enabled:
+                            rogue_params["investment_with_more_score"] = (
+                                conf.maa_rg_theme != "BlackFlow"
+                                and conf.rogue.investment_with_more_score
+                                and conf.rogue.mode == 1
+                            )
+                            rogue_params["stop_when_investment_full"] = (
+                                conf.rogue.stop_when_investment_full
+                                and conf.rogue.mode == 1
+                            )
+                        if conf.maa_rg_theme != "Phantom" and conf.rogue.mode == 0:
+                            rogue_params["stop_at_final_boss"] = (
+                                conf.rogue.stop_at_final_boss
+                            )
+                        if conf.rogue.mode == 0:
+                            rogue_params["stop_at_max_level"] = (
+                                conf.rogue.stop_at_max_level
+                            )
+                        if (
+                            conf.maa_rg_theme == "Sami"
+                            and conf.rogue.mode == 5
+                            and conf.rogue.expected_collapsal_paradigms
+                        ):
+                            rogue_params["expected_collapsal_paradigms"] = (
+                                conf.rogue.expected_collapsal_paradigms
+                            )
+                        if conf.rogue.mode == 4:
+                            rogue_params["collectible_mode_shopping"] = (
+                                conf.rogue.collectible_mode_shopping
+                            )
+                            rogue_params["collectible_mode_squad"] = (
+                                conf.rogue.collectible_mode_squad
+                            )
+                            # 协议值语义：直升需与战术分队类同步，只凹仅受主题/策略限制
+                            rogue_params["start_with_elite_two"] = (
+                                conf.rogue.start_with_elite_two
+                                and professional
+                                and conf.maa_rg_theme in ("Mizuki", "Sami")
+                            )
+                            rogue_params["only_start_with_elite_two"] = (
+                                conf.rogue.only_start_with_elite_two
+                                and conf.maa_rg_theme in ("Mizuki", "Sami")
+                            )
+                            # 勾选「只凹开局干员直升精二」时不刷奖励，撤销下发
+                            elite_two_only = (
+                                conf.rogue.only_start_with_elite_two
+                                and conf.rogue.start_with_elite_two
+                                and conf.maa_rg_theme != "Phantom"
+                                and professional
+                            )
+                            if not elite_two_only:
+                                rogue_params["collectible_mode_start_list"] = {
+                                    key: conf.rogue.collectible_mode_start_list.get(
+                                        key, False
+                                    )
+                                    for key in _COLLECTIBLE_START_KEYS
+                                }
+                        if conf.rogue.mode == 6:
+                            rogue_params["monthly_squad_auto_iterate"] = (
+                                conf.rogue.monthly_squad_auto_iterate
+                            )
+                            if conf.rogue.monthly_squad_auto_iterate:
+                                rogue_params["monthly_squad_check_comms"] = (
+                                    conf.rogue.monthly_squad_check_comms
+                                )
+                        if conf.rogue.mode == 7:
+                            rogue_params["deep_exploration_auto_iterate"] = (
+                                conf.rogue.deep_exploration_auto_iterate
+                            )
+                        if (
+                            conf.maa_rg_theme == "Sami"
+                            and conf.rogue.mode == 4
+                            and conf.rogue.first_floor_foldartal
+                        ):
+                            rogue_params["first_floor_foldartal"] = (
+                                conf.rogue.first_floor_foldartal
+                            )
+                        if (
+                            conf.maa_rg_theme == "Sami"
+                            and conf.rogue.mode == 4
+                            and conf.rogue.squad == "生活至上分队"
+                            and conf.rogue.start_foldartal_list
+                        ):
+                            rogue_params["start_foldartal_list"] = (
+                                conf.rogue.start_foldartal_list
+                            )
+                        if (
+                            conf.maa_rg_theme == "BlackFlow"
+                            and conf.rogue.mode == 30001
+                        ):
+                            # 协议固定刷襁褓动物策略，仅目标品种可选
+                            rogue_params["blackflow_strategy"] = "baby_animal"
+                            rogue_params["blackflow_cultivation_target"] = (
+                                conf.rogue.blackflow_cultivation_target
+                            )
+                        if (
+                            conf.maa_rg_theme == "JieGarden"
+                            and conf.rogue.mode == 20001
+                        ):
+                            rogue_params["find_playTime_target"] = (
+                                conf.rogue.find_playtime_target
+                            )
+                        self.MAA.append_task("Roguelike", rogue_params)
                     elif conf.SSS:
                         copilot = get_path("@app/sss.json")
                         if (
@@ -4217,10 +4471,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             self.maa_stop()
                             break
                     if maa_crash:
-                        self.device.exit()
-                        self.check_current_focus()
-                    else:
-                        break
+                        logger.error("MAA 肉鸽/保全/盐酸运行中断")
+                        send_message("MAA 肉鸽/保全/盐酸运行中断", level="ERROR")
+                    break
 
             elif not rg_sleep:
                 if conf.RA:
@@ -4237,21 +4490,22 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         except MowerExit:
             if self.MAA is not None:
                 self.maa_stop()
-                logger.info("停止maa")
+                logger.info("停止MAA")
             raise
         except Exception as e:
             save_exception(e)
             logger.exception(e)
             self.MAA = None
-            self.device.exit()
-            send_message(str(e), "Maa调用出错！", level="ERROR")
+            send_message(str(e), "MAA调用出错！", level="ERROR")
             remaining_time = (self.tasks[0].time - datetime.now()).total_seconds()
             if remaining_time > 0:
+                # 参照 rest_until_next_task：休眠前重置场景计时，避免 check_freeze
+                # 把这段休眠当成「同一场景超时」而再次调用 device.exit() 关闭游戏。
+                self.recog.last_scene = None
                 logger.info(
                     f"休息 {format_time(remaining_time)}，到{self.tasks[0].time.strftime('%H:%M:%S')}开始工作"
                 )
                 self._idle_sleep(remaining_time)
-            self.check_current_focus()
 
     def skland_plan_solver(self):
         try:
@@ -4796,7 +5050,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             return ReportSolver(self.device, self.recog).run()
 
     def visit_friend_plan_solver(self):
-        if config.conf.visit_friend:
+        if config.conf.visit_friend_enable and config.conf.visit_friend_mode == "mower":
             return CreditSolver(self.device, self.recog).run()
 
     def sign_in_plan_solver(self):
@@ -4835,7 +5089,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
             from arknights_mower.utils.mastery_recommendation import (
                 auto_schedule_mastery_tasks,
-                compute_workshop_config,
             )
 
             res = auto_schedule_mastery_tasks()
@@ -4852,30 +5105,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             if config.conf.enable_mastery:
                 self._dispatch_scan_start_tasks(res.get("scheduled", []))
 
-            new_settings = compute_workshop_config(
-                fodder_operators=config.conf.fodder_operators,
-                t5_operators=config.conf.t5_operators,
-                book_operators=config.conf.book_operators,
-            )
-            if new_settings is not None:
-                from arknights_mower.utils.config.conf import (
-                    RIICPart,
-                    WorkShopItem,
-                )
+            from arknights_mower.utils.workshop_automation import update_workshop_config
 
-                ws_list = []
-                for s in new_settings:
-                    items = [WorkShopItem(**item) for item in s.get("items", [])]
-                    ws_list.append(
-                        RIICPart.WorkShopSetting(
-                            operator=s["operator"],
-                            enabled=s.get("enabled", True),
-                            items=items,
-                        )
-                    )
-                config.conf.workshop_settings = ws_list
-                config.save_conf()
-                logger.info("自动更新合成配置完成")
+            update_workshop_config()
         except Exception as e:
             logger.exception(f"自动安排专精/合成配置失败: {e}")
 

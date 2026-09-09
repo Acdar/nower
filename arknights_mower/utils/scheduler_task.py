@@ -90,6 +90,99 @@ def find_next_task(
 
 
 def scheduling(tasks, run_order_delay=5, execution_time=0.75, time_now=None):
+    time_now = time_now or datetime.now()
+    # Keep swaps out of the mutable run-order schedule: their deadline cannot move.
+    enabled = config.conf.enable_mastery
+    ordinary = (
+        [t for t in tasks if t.type != TaskTypes.SWAP_SUPPORT] if enabled else tasks
+    )
+    conflict = _schedule_run_orders(ordinary, run_order_delay, execution_time, time_now)
+    if enabled:
+        swap_conflict = protect_support_swaps(
+            tasks, run_order_delay, execution_time, time_now
+        )
+        if swap_conflict:
+            return swap_conflict
+        # Near a handoff, stop optional drone adjustment loops as well as dispatch.
+        if any(
+            t.type == TaskTypes.SWAP_SUPPORT
+            and t.time <= time_now + _support_swap_gap(run_order_delay)
+            for t in tasks
+        ):
+            return None
+    tasks.sort(key=lambda t: t.time)
+    return conflict
+
+
+def _support_swap_gap(run_order_delay):
+    # The order countdown is offset by the configured entry delay, even when a
+    # caller uses scheduling()'s default conflict interval.
+    return timedelta(
+        minutes=max(10, run_order_delay * 2, config.conf.run_order_delay * 2)
+    )
+
+
+def protect_support_swaps(tasks, run_order_delay=5, execution_time=0.75, time_now=None):
+    """Fixed handoff deadlines yield only trade rooms as drone-acceleration targets."""
+    if not config.conf.enable_mastery:
+        return None
+    now = time_now or datetime.now()
+    swaps = sorted(
+        (t for t in tasks if t.type == TaskTypes.SWAP_SUPPORT), key=lambda t: t.time
+    )
+    gap = _support_swap_gap(run_order_delay)
+    conflict = None
+    for swap in swaps:
+        order_conflict = _avoid_swap_with_orders(tasks, swap, (now, gap))
+        conflict = conflict or order_conflict
+        _defer_work_before_swap(tasks, swap, (now, execution_time))
+    tasks.sort(key=lambda t: t.time)
+    return conflict
+
+
+def _avoid_swap_with_orders(tasks, swap, timing):
+    now, gap = timing
+    conflict = None
+    for task in tasks:
+        if task.type != TaskTypes.RUN_ORDER or not task.meta_data:
+            continue
+        if max(now, task.time) + gap <= swap.time or task.time > swap.time + gap:
+            continue
+        if now + gap < swap.time:
+            conflict = conflict or (task, swap)
+        else:
+            task.time = max(now, swap.time) + gap + timedelta(seconds=1)
+            logger.warning("跑单来不及提前避开专精换人，先执行换人后再处理跑单")
+    return conflict
+
+
+def _ordinary_task_minutes(task, execution_time):
+    minutes = max(1, len(task.plan) * execution_time)
+    if task.type in (TaskTypes.FIAMMETTA, TaskTypes.CLUE_PARTY):
+        minutes = max(minutes, 3)
+    # A downshift can insert an extra dorm-reordering action before itself.
+    return minutes * 2 if task.type == TaskTypes.SHIFT_OFF else minutes
+
+
+def _defer_work_before_swap(tasks, swap, timing):
+    now, execution_time = timing
+    cursor = now
+    for task in sorted(tasks, key=lambda t: t.time):
+        if (
+            task.type in (TaskTypes.SWAP_SUPPORT, TaskTypes.RUN_ORDER)
+            or task.time > swap.time
+        ):
+            continue
+        finish = max(cursor, task.time) + timedelta(
+            minutes=_ordinary_task_minutes(task, execution_time)
+        )
+        if finish >= swap.time - timedelta(minutes=1):
+            task.time = max(now, swap.time) + timedelta(minutes=3)
+        else:
+            cursor = finish
+
+
+def _schedule_run_orders(tasks, run_order_delay=5, execution_time=0.75, time_now=None):
     # execution_time per room
     if time_now is None:
         time_now = datetime.now()
@@ -511,13 +604,28 @@ def try_reorder(op_data, new_plan):
     return plan
 
 
+def next_workshop_task_time(tasks, earliest=None):
+    """Keep workshop jobs close together but outside the 1.5-second collision window."""
+    candidate = earliest if earliest is not None else datetime.now()
+    gap = timedelta(seconds=2)
+    for task in sorted(tasks, key=lambda task: task.time):
+        if task.time >= candidate + gap:
+            break
+        if abs(task.time - candidate) < gap:
+            candidate = task.time + gap
+    return candidate
+
+
 def try_workshop_tasks(op_data, tasks):
     # 如果没有其他任务则进行加工站干员检查
     from arknights_mower.data import workshop_formula
+    from arknights_mower.utils.workshop_recommendation import (
+        prioritize_workshop_settings,
+    )
 
     inventory_data = get_inventory_counts()
     if config.conf.workshop_settings and inventory_data:
-        for item in config.conf.workshop_settings:
+        for item in prioritize_workshop_settings(config.conf.workshop_settings):
             if not item.enabled:
                 logger.info(f"{item.operator}加工站任务被禁用，跳过")
                 continue
@@ -585,8 +693,15 @@ def try_workshop_tasks(op_data, tasks):
             if match and valid:
                 logger.info(f"{item.operator}满足使用条件:, 生成加工站任务")
                 task = SchedulerTask(
-                    task_type=TaskTypes.WORKSHOP, meta_data=item.operator
+                    time=next_workshop_task_time(tasks),
+                    task_type=TaskTypes.WORKSHOP,
+                    meta_data=item.operator,
                 )
+                from arknights_mower.utils.workshop_automation import (
+                    stamp_workshop_task,
+                )
+
+                stamp_workshop_task(task)
                 tasks.append(task)
             else:
                 logger.debug("数据不满足条件，跳过加工站任务生成")

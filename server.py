@@ -24,6 +24,7 @@ from arknights_mower.utils import config, network_settings
 from arknights_mower.utils.csv_utils import parse_cell_num, read_dicts
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.log import logger
+from arknights_mower.utils.log_stream import LogStream
 from arknights_mower.utils.maa_check import (
     MAA_CHECK_TIMEOUT,
     maa_check_command,
@@ -47,6 +48,7 @@ mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("application/javascript", ".js")
 
 app = Flask(__name__, static_folder="ui/dist", static_url_path="")
+app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
 sock = Sock(app)
 CORS(app)
 network_settings.start_proxy_sync()
@@ -66,8 +68,7 @@ if token := config.conf.webview.token:
     app.token = token
 
 mower_thread = None
-log_lines = []
-ws_connections = []
+log_stream = LogStream()
 
 
 def _mower_busy_response():
@@ -410,13 +411,13 @@ def _run_maa_resource_update(
             clear_loaded_maa_cache(result["target"])
         result["installed"] = read_maa_resource_info(result["target"])
     except Exception as e:
-        logger.exception(f"Maa 资源更新失败：{e}")
+        logger.exception(f"MAA 资源更新失败：{e}")
         with maa_resource_update_lock:
             maa_resource_update_job.update(
                 {
                     "status": "error",
                     "phase": "error",
-                    "message": f"Maa 资源更新失败：{e}",
+                    "message": f"MAA 资源更新失败：{e}",
                     "progress": None,
                     "result": None,
                     "thread": None,
@@ -426,9 +427,9 @@ def _run_maa_resource_update(
 
     source_label = "Mirror酱" if result["source"] == "mirrorchyan" else "GitHub"
     if result["updated"]:
-        message = f"Maa 资源 {result['version']} 已通过 {source_label}更新完成"
+        message = f"MAA 资源 {result['version']} 已通过 {source_label}更新完成"
     else:
-        message = f"Maa 资源 {result['version']} 已是最新版本"
+        message = f"MAA 资源 {result['version']} 已是最新版本"
     with maa_resource_update_lock:
         maa_resource_update_job.update(
             {
@@ -447,15 +448,9 @@ def _run_maa_resource_update(
 
 
 def read_log():
-    global log_lines
-    global ws_connections
-
     while True:
         msg = config.log_queue.get()
-        log_lines.append(msg)
-        log_lines = log_lines[-100:]
-        for ws in ws_connections:
-            ws.send(json.dumps({"type": "log", "data": msg}))
+        log_stream.publish(msg)
 
 
 Thread(target=read_log, daemon=True).start()
@@ -519,6 +514,10 @@ def _serve_resource(base_dir: Path, relative: str):
 @app.before_request
 def serve_resource_overlay():
     """图片与本实例当前加载的数据使用同一个完整资源版本。"""
+    # /depot/readdepot 等 API 与图片共用路径前缀，只接管静态文件路由。
+    if request.endpoint not in {"static", "serve_index"}:
+        return None
+
     from arknights_mower.utils.resource_pkg import resource_ui_path
 
     path = request.path.lstrip("/")
@@ -581,12 +580,56 @@ def gzip_static(response):
 
 @app.errorhandler(404)
 def not_found(e):
-    if (path := request.path).startswith("/docs"):
+    path = request.path
+    static_route = request.endpoint in {None, "static", "serve_index"}
+    if not static_route or request.method not in {"GET", "HEAD"}:
+        return {"error": "Not Found"}, 404
+
+    if path == "/docs" or path.startswith("/docs/"):
         try:
-            return send_from_directory("ui/dist" + path, "index.html")
+            return send_from_directory(
+                app.static_folder, path.strip("/") + "/index.html"
+            )
         except NotFound:
             return "<h1>404 Not Found</h1>", 404
-    return send_from_directory("ui/dist", "index.html")
+
+    # 与 Vue 路由表保持一致（routes.test.js 校验）；源码部署兼容尚未重建的 dist。
+    manifest = Path(app.static_folder) / "frontend-routes.json"
+    if not manifest.is_file():
+        manifest = get_path("@internal/ui/public/frontend-routes.json")
+    try:
+        pages = {
+            p.rstrip("/").lower() or "/"
+            for p in json.loads(manifest.read_text("utf-8"))
+        }
+    except (OSError, ValueError):
+        pages = set()
+    if (path.rstrip("/").lower() or "/") in pages:
+        return send_from_directory(app.static_folder, "index.html")
+
+    # 未知 API 和缺失资源必须保留 404，不能用首页掩盖错误。
+    root = path.strip("/").split("/", 1)[0]
+    api_roots = {
+        rule.rule.strip("/").split("/", 1)[0]
+        for rule in app.url_map.iter_rules()
+        if rule.endpoint not in {"static", "serve_index"}
+    }
+    resource_roots = {
+        "assets",
+        "avatar",
+        "depot",
+        "building_skill",
+        "basement_skill",
+        "screenshots",
+    }
+    navigation = any(
+        mime == "text/html" and quality > 0
+        for mime, quality in request.accept_mimetypes
+    ) and request.headers.get("Sec-Fetch-Dest", "") in {"", "document", "iframe"}
+    if navigation and root not in api_roots | resource_roots and not Path(path).suffix:
+        # 保留 Vue 的未知页面提示；接口客户端和静态资源请求不进入该兜底。
+        return send_from_directory(app.static_folder, "index.html")
+    return {"error": "Not Found"}, 404
 
 
 @app.route("/conf", methods=["GET", "POST"])
@@ -604,7 +647,9 @@ def load_config():
         except Exception:
             logger.exception("Failed to sync active weekly plan before returning /conf")
             manager = None
-        data = config.conf.model_dump()
+        from arknights_mower.utils.workshop_config import read_user_config
+
+        data = read_user_config()
         data["runtime_platform"] = __system__
         if manager is not None:
             data["maa_weekly_plan_active"] = manager.get_active_plan_key()
@@ -614,8 +659,11 @@ def load_config():
         req["maa_weekly_plan"] = [
             item.model_dump() for item in config.conf.maa_weekly_plan
         ]
-        config.conf = config.Conf(**req)
-        config.save_conf()
+        from arknights_mower.utils.workshop_config import save_user_config
+
+        state = save_user_config(req)
+        if "workshop_manual_settings" in req or "workshop_settings_generation" in req:
+            return {"message": "New config saved!", **state}
         return "New config saved!"
 
 
@@ -648,6 +696,10 @@ def shop_list():
 def item_list():
     from arknights_mower.data import workshop_formula
 
+    if request.args.get("kind") == "deer-fodder":
+        from arknights_mower.utils.workshop_fodder import deer_fodder_materials
+
+        return deer_fodder_materials()
     return list(workshop_formula.keys())
 
 
@@ -767,7 +819,6 @@ def get_status():
 @require_token
 def start(start_type):
     global mower_thread
-    global log_lines
 
     if active_job():
         return "false"
@@ -800,9 +851,8 @@ def start(start_type):
         )
         # /task 路由（views/task.py）独立判定「mower 正在运行」，须与本模块同步
         set_mower_thread(mower_thread)
+        log_stream.clear()
         mower_thread.start()
-
-        log_lines = []
 
         return "true"
 
@@ -843,26 +893,7 @@ def stop_maa():
 
 @sock.route("/log")
 def log(ws):
-    global ws_connections
-    global log_lines
-
-    ws.send(
-        json.dumps(
-            {
-                "type": "log",
-                "data": "\n".join(log_lines),  # 发送完整日志
-            }
-        )
-    )
-    ws_connections.append(ws)
-
-    from simple_websocket import ConnectionClosed
-
-    try:
-        while True:
-            ws.receive()
-    except ConnectionClosed:
-        ws_connections.remove(ws)
+    log_stream.serve(ws)
 
 
 @app.route("/screenshots/<path:filename>")
@@ -914,11 +945,7 @@ def _request_title_refresh():
         conn.send(("title", current))
     except Exception:
         logger.exception("通知 WebView 刷新窗口标题失败")
-    for ws in list(ws_connections):
-        try:
-            ws.send(json.dumps({"type": "resource_updated"}))
-        except Exception:
-            logger.exception("广播资源版本变更给前端失败")
+    log_stream.broadcast({"type": "resource_updated"})
 
 
 def conn_send(text):
@@ -1077,7 +1104,7 @@ def get_maa_adb_version():
             logger.exception(e)
             return {
                 "status": "error",
-                "message": f"Maa测试启动失败：{e}",
+                "message": f"MAA测试启动失败：{e}",
             }
         maa_check_job.update(
             {
@@ -1208,12 +1235,12 @@ def check_maa_update():
     payload = request.get_json(silent=True) or {}
     target_text = str(payload.get("maa_path") or config.conf.maa_path or "").strip()
     if not target_text:
-        return {"ok": False, "message": "请先设置 Maa 目录"}
+        return {"ok": False, "message": "请先设置 MAA 目录"}
     target = str(Path(resolve_config_path(target_text)).expanduser())
     if not has_maa_installation(target):
-        return {"ok": False, "message": "当前目录未检测到 Maa，请使用下载功能"}
+        return {"ok": False, "message": "当前目录未检测到 MAA，请使用下载功能"}
     if __system__ == "windows":
-        return {"ok": False, "message": "请手动打开 Maa 检查并完成更新"}
+        return {"ok": False, "message": "请手动打开 MAA 检查并完成更新"}
     if __system__ not in {"darwin", "linux"}:
         return {"ok": False, "message": "当前平台不使用 Mower 的 MAA 更新功能"}
 
@@ -1231,7 +1258,7 @@ def check_maa_update():
         )
         installed_version = read_installed_version(target, fresh=True)
         if not installed_version:
-            raise MaaUpdateError("未读取到已安装的 Maa 版本，请检查 Maa 目录")
+            raise MaaUpdateError("未读取到已安装的 MAA 版本，请检查 MAA 目录")
         release = (
             get_mirrorchyan_release(
                 mirror_token,
@@ -1265,9 +1292,9 @@ def check_maa_update():
         "installed_version": installed_version,
         "latest": release.as_dict(),
         "message": (
-            f"发现 Maa {channel_label}新版本 {release.tag}（{source_label}）"
+            f"发现 MAA {channel_label}新版本 {release.tag}（{source_label}）"
             if available
-            else f"当前 Maa 已是最新{channel_label}"
+            else f"当前 MAA 已是最新{channel_label}"
         ),
     }
 
@@ -1301,14 +1328,14 @@ def start_maa_update():
     except MaaUpdateError as e:
         return {"ok": False, "message": str(e)}
     if not target:
-        return {"ok": False, "message": "请先设置 Maa 目录"}
+        return {"ok": False, "message": "请先设置 MAA 目录"}
     target = str(Path(resolve_config_path(target)).expanduser())
     installed = has_maa_installation(target)
     operation = "更新" if installed else "下载"
     if __system__ == "windows" and installed:
         return {
             "ok": False,
-            "message": "已检测到 Windows Maa，请手动打开 Maa 进行更新",
+            "message": "已检测到 Windows MAA，请手动打开 MAA 进行更新",
         }
     if source not in {"github", "mirrorchyan"}:
         return {"ok": False, "message": f"未知的 MAA {operation}源"}
@@ -1326,7 +1353,7 @@ def start_maa_update():
 
     with maa_maintenance_lock:
         if _job_running(maa_resource_update_job):
-            return {"ok": False, "message": "Maa 资源更新正在进行中"}
+            return {"ok": False, "message": "MAA 资源更新正在进行中"}
         if active_job():
             return {"ok": False, "message": "Mower 软件更新或进程操作正在进行中"}
         with maa_update_lock:
@@ -1356,7 +1383,7 @@ def start_maa_update():
                 ):
                     return {
                         "ok": False,
-                        "message": "请先检查 Maa 更新，发现新版本后再更新",
+                        "message": "请先检查 MAA 更新，发现新版本后再更新",
                     }
             thread = Thread(
                 target=_run_maa_update,
@@ -1397,7 +1424,7 @@ def get_maa_mirrorchyan_status():
     )
 
     if __system__ not in {"darwin", "linux", "windows"}:
-        return {"ok": False, "message": "当前系统不支持 Mirror酱下载或更新 Maa"}
+        return {"ok": False, "message": "当前系统不支持 Mirror酱下载或更新 MAA"}
     payload = request.get_json(silent=True) or {}
     mirror_token = str(
         payload.get("mirror_token") or config.conf.maa_mirrorchyan_token or ""
@@ -1485,16 +1512,16 @@ def get_maa_resource_update_info():
         "job": _maa_resource_update_snapshot(),
     }
     if __system__ == "windows" and installed:
-        result["message"] = "请在 Maa 主程序中更新 Maa 资源"
+        result["message"] = "请在 MAA 主程序中更新 MAA 资源"
         return result
     if not configured_target:
-        result["message"] = "请先设置 Maa 目录"
+        result["message"] = "请先设置 MAA 目录"
         return result
     if not installed:
-        result["message"] = "请先下载并设置有效的 Maa 目录"
+        result["message"] = "请先下载并设置有效的 MAA 目录"
         return result
     if not supported:
-        result["message"] = "当前平台不使用 Mower 的 Maa 资源更新功能"
+        result["message"] = "当前平台不使用 Mower 的 MAA 资源更新功能"
         return result
     return result
 
@@ -1510,20 +1537,20 @@ def check_maa_resource_update():
 
     _clear_update_check(maa_resource_update_check, maa_resource_update_check_lock)
     if __system__ not in {"darwin", "linux"}:
-        return {"ok": False, "message": "请在 Maa 主程序中检查并更新 Maa 资源"}
+        return {"ok": False, "message": "请在 MAA 主程序中检查并更新 MAA 资源"}
     payload = request.get_json(silent=True) or {}
     target_text = str(payload.get("maa_path") or config.conf.maa_path or "").strip()
     if not target_text:
-        return {"ok": False, "message": "请先设置 Maa 目录"}
+        return {"ok": False, "message": "请先设置 MAA 目录"}
     target = str(Path(resolve_config_path(target_text)).expanduser())
     if not has_maa_installation(target):
-        return {"ok": False, "message": "请先下载并设置有效的 Maa 目录"}
+        return {"ok": False, "message": "请先下载并设置有效的 MAA 目录"}
     source = str(payload.get("source") or "github").strip()
     mirror_token = str(
         payload.get("mirror_token") or config.conf.maa_mirrorchyan_token or ""
     ).strip()
     if source not in {"github", "mirrorchyan"}:
-        return {"ok": False, "message": "未知的 Maa 资源更新源"}
+        return {"ok": False, "message": "未知的 MAA 资源更新源"}
     if source == "mirrorchyan" and not mirror_token:
         return {"ok": False, "message": "请填写 Mirror酱 CDK"}
 
@@ -1555,9 +1582,9 @@ def check_maa_resource_update():
         "current": current,
         "latest": release.as_dict(),
         "message": (
-            f"发现 Maa 资源新版本 {release.version}（{source_label}）"
+            f"发现 MAA 资源新版本 {release.version}（{source_label}）"
             if release.available
-            else "当前 Maa 资源已是最新版本"
+            else "当前 MAA 资源已是最新版本"
         ),
     }
 
@@ -1572,7 +1599,7 @@ def start_maa_resource_update():
     from arknights_mower.utils.maa_update import MaaUpdateError, has_maa_installation
 
     if __system__ not in {"darwin", "linux"}:
-        return {"ok": False, "message": "请在 Maa 主程序中更新 Maa 资源"}
+        return {"ok": False, "message": "请在 MAA 主程序中更新 MAA 资源"}
     payload = request.get_json(silent=True) or {}
     target = str(payload.get("maa_path") or config.conf.maa_path or "").strip()
     source = str(payload.get("source") or "github").strip()
@@ -1580,12 +1607,12 @@ def start_maa_resource_update():
         payload.get("mirror_token") or config.conf.maa_mirrorchyan_token or ""
     ).strip()
     if not target:
-        return {"ok": False, "message": "请先设置 Maa 目录"}
+        return {"ok": False, "message": "请先设置 MAA 目录"}
     target = str(Path(resolve_config_path(target)).expanduser())
     if not has_maa_installation(target):
-        return {"ok": False, "message": "请先下载并设置有效的 Maa 目录"}
+        return {"ok": False, "message": "请先下载并设置有效的 MAA 目录"}
     if source not in {"github", "mirrorchyan"}:
-        return {"ok": False, "message": "未知的 Maa 资源更新源"}
+        return {"ok": False, "message": "未知的 MAA 资源更新源"}
     if source == "mirrorchyan" and not mirror_token:
         return {"ok": False, "message": "请填写 Mirror酱 CDK"}
     if source == "mirrorchyan" and mirror_token != config.conf.maa_mirrorchyan_token:
@@ -1594,14 +1621,14 @@ def start_maa_resource_update():
 
     with maa_maintenance_lock:
         if mower_thread and mower_thread.is_alive():
-            return {"ok": False, "message": "请先停止 Mower，再更新 Maa 资源"}
+            return {"ok": False, "message": "请先停止 Mower，再更新 MAA 资源"}
         if active_job():
             return {"ok": False, "message": "Mower 软件更新或进程操作正在进行中"}
         if _job_running(maa_update_job):
             return {"ok": False, "message": "MAA 下载或更新正在进行中"}
         with maa_resource_update_lock:
             if _job_running(maa_resource_update_job):
-                return {"ok": False, "message": "Maa 资源更新正在进行中"}
+                return {"ok": False, "message": "MAA 资源更新正在进行中"}
             check_id = str(payload.get("check_id") or "")
             current_version = read_maa_resource_info(target)["version"]
             checked_latest = _checked_latest_version(
@@ -1625,7 +1652,7 @@ def start_maa_resource_update():
             ):
                 return {
                     "ok": False,
-                    "message": "请先检查 Maa 资源更新，发现新版本后再更新",
+                    "message": "请先检查 MAA 资源更新，发现新版本后再更新",
                 }
             thread = Thread(
                 target=_run_maa_resource_update,
@@ -1638,7 +1665,7 @@ def start_maa_resource_update():
                     "id": uuid4().hex,
                     "status": "running",
                     "phase": "checking",
-                    "message": "正在检查 Maa 资源更新",
+                    "message": "正在检查 MAA 资源更新",
                     "current": 0,
                     "total": 0,
                     "progress": None,
@@ -2120,30 +2147,18 @@ def mastery_recommendation():
 def workshop_auto_config():
     import traceback
 
-    from arknights_mower.utils.mastery_recommendation import (
-        compute_default_workshop_config,
-        compute_workshop_config,
-    )
+    from arknights_mower.utils.workshop_automation import update_workshop_config
 
     try:
         req = request.json or {}
-        fodder_ops = req.get("fodder_operators", ["九色鹿"])
-        t5_ops = req.get("t5_operators", ["年"])
-        book_ops = req.get("book_operators", ["司霆惊蛰"])
-        planned_skills = req.get("planned_skills", [])
-        if planned_skills:
-            settings = compute_workshop_config(
-                fodder_operators=fodder_ops,
-                t5_operators=t5_ops,
-                book_operators=book_ops,
-            )
-        else:
-            settings = compute_default_workshop_config(
-                fodder_operators=fodder_ops,
-                t5_operators=t5_ops,
-                book_operators=book_ops,
-            )
-        return {"workshop_settings": settings, "t3_summary": []}
+        fodder_ops = req.get("fodder_operators", config.conf.fodder_operators)
+        t5_ops = req.get("t5_operators", config.conf.t5_operators)
+        book_ops = req.get("book_operators", config.conf.book_operators)
+        return update_workshop_config(
+            fodder_operators=fodder_ops,
+            t5_operators=t5_ops,
+            book_operators=book_ops,
+        )
     except Exception as e:
         return {"error": str(e), "traceback": traceback.format_exc()}, 500
 
@@ -2308,7 +2323,7 @@ def mastery_t3_debug():
     }
 
 
-@app.route("/workshop-preset", methods=["GET", "POST"])
+@app.route("/workshop-preset", methods=["GET"])
 def workshop_preset():
     import json as _json
 
@@ -2321,12 +2336,6 @@ def workshop_preset():
             except Exception:
                 pass
         return []
-    else:
-        data = request.json or []
-        preset_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(preset_path, "w", encoding="utf-8") as f:
-            _json.dump(data, f, ensure_ascii=False)
-        return {"success": True}
 
 
 @app.route("/cultivate-fetch")
@@ -2334,7 +2343,11 @@ def cultivate_fetch():
     from arknights_mower.solvers.cultivate_depot import cultivate
 
     try:
-        cultivate().start()
+        if not cultivate().start():
+            return {
+                "success": False,
+                "message": "未同步到干员数据，请检查森空岛账号及官服/B服选择",
+            }
         return {"success": True, "message": "数据拉取成功"}
     except Exception as e:
         return {"success": False, "message": str(e)}

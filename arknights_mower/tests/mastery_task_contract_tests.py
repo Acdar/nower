@@ -22,6 +22,7 @@ from flask import Flask
 
 import arknights_mower.views.task as task_module
 from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
+from arknights_mower.tests.mastery_plan_helpers import stub_support_planner
 from arknights_mower.utils.mastery_db import add_plan_checked, get_all_plans
 from arknights_mower.utils.scheduler_task import TaskTypes
 from arknights_mower.views.task import task_bp
@@ -136,6 +137,23 @@ class TestTaskEndpointContract(unittest.TestCase):
         self.assertIn("找到同时间任务请勿重复添加", r.data.decode("utf-8"))
         self.assertEqual(self.fake_scheduler.tasks, [])
 
+    def test_workshop_collisions_shift_by_two_seconds_and_wake_scheduler(self):
+        from arknights_mower.utils import config
+
+        payload = _task_payload("加工材料")
+        with patch.object(config.wake_scheduler, "set") as wake:
+            for name in ["九色鹿", "蚀清", "号角"]:
+                payload["task"]["meta_data"] = name
+                response = self.client.post("/task", json=payload)
+                self.assertEqual(response.data.decode(), "添加任务成功！")
+        tasks = self.fake_scheduler.tasks
+        self.assertEqual([task.meta_data for task in tasks], ["九色鹿", "蚀清", "号角"])
+        self.assertEqual(
+            [task.time - tasks[0].time for task in tasks],
+            [timedelta(seconds=s) for s in [0, 2, 4]],
+        )
+        self.assertEqual(wake.call_count, 3)
+
     def test_mower_not_running_rejected(self):
         saved = task_module.mower_thread
         task_module.mower_thread = None
@@ -209,6 +227,7 @@ class TestPlanApiDispatchLink(unittest.TestCase):
     """
 
     def setUp(self):
+        stub_support_planner(self)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name
         self.tmp.close()
