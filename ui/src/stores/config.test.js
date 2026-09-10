@@ -13,6 +13,29 @@ afterEach(() => {
 })
 
 describe('workshop config autosave', () => {
+  it('saves turning off crafter recovery priority without changing workshop selections', async () => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const loaded = ref(false)
+    const app = createApp({})
+    app.use(pinia)
+    app.provide('loaded', loaded)
+    store = app.runWithContext(() => useConfigStore())
+    for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
+    expect(store.workshop_low_priority_rest).toBe(true)
+    store.fodder_operators = ['空爆']
+    axios.post.mockResolvedValue({ data: {} })
+    loaded.value = true
+    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1))
+    store.workshop_low_priority_rest = false
+    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(2))
+    expect(axios.post.mock.calls[1][1]).toMatchObject({
+      workshop_low_priority_rest: false,
+      fodder_operators: ['空爆']
+    })
+    loaded.value = false
+  })
+
   it('tracks nested edits and sends the latest manual draft with the acknowledged revision', async () => {
     pinia = createPinia()
     setActivePinia(pinia)
@@ -54,5 +77,72 @@ describe('workshop config autosave', () => {
     loaded.value = false
     axios.post.mockResolvedValue({ data: {} })
     replies.shift()()
+  })
+})
+
+describe('weekly plan inventory config', () => {
+  it('sends source rules before switching and replaces them with target rules', async () => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const loaded = ref(false)
+    const app = createApp({})
+    app.use(pinia)
+    app.provide('loaded', loaded)
+    store = app.runWithContext(() => useConfigStore())
+
+    store.maa_weekly_plan_active = '活动'
+    store.maa_weekly_plan_options = ['活动', '常规']
+    store.maa_stage_inventory_enable = true
+    store.maa_stage_limit_rules = [
+      {
+        stage: 'ACT-1',
+        operator: 'and',
+        enabled: true,
+        items: [{ item_id: '30012', item_name: '固源岩', limit: 100 }]
+      }
+    ]
+    const targetInventory = {
+      enabled: false,
+      limit_rules: [
+        {
+          stage: '1-7',
+          operator: 'and',
+          enabled: true,
+          items: [{ item_id: '30011', item_name: '源岩', limit: 300 }]
+        }
+      ],
+      ratio_rules: []
+    }
+    axios.post.mockResolvedValue({
+      data: {
+        active: '常规',
+        plan: [],
+        inventory_config: targetInventory,
+        activity_fallbacks: {},
+        activity_fallback_switch_times: {},
+        activity_plan_end_times: {}
+      }
+    })
+
+    await store.update_weekly_plan_active('常规')
+
+    expect(axios.post).toHaveBeenCalledTimes(1)
+    expect(axios.post.mock.calls[0][0]).toContain('/weekly-plans/active')
+    expect(axios.post.mock.calls[0][1]).toMatchObject({
+      active: '常规',
+      source_inventory_config: {
+        enabled: true,
+        limit_rules: [
+          {
+            stage: 'ACT-1',
+            items: [{ item_id: '30012', limit: 100 }]
+          }
+        ],
+        ratio_rules: []
+      }
+    })
+    expect(store.maa_weekly_plan_active).toBe('常规')
+    expect(store.maa_stage_inventory_enable).toBe(false)
+    expect(store.maa_stage_limit_rules).toEqual(targetInventory.limit_rules)
   })
 })

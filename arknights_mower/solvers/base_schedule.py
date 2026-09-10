@@ -11,6 +11,7 @@ from typing import Literal, Optional
 
 import cv2
 import requests
+from packaging.version import InvalidVersion, Version
 
 from arknights_mower.data import (
     agent_list,
@@ -538,6 +539,14 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         snapshot = workshop_task_snapshot(task)
         if snapshot is None:
             logger.info("加工配置已更新，跳过旧的自动加工任务")
+            return
+        operator = self.op_data.operators.get(task.meta_data)
+        if (
+            operator is not None
+            and 0 <= operator.mood < 1
+            and not operator.current_room.startswith("dorm")
+        ):
+            logger.info(f"{task.meta_data}心情不足1点，跳过加工任务")
             return
         try:
             self.enter_room("factory")
@@ -1178,6 +1187,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         """
 
         from arknights_mower.utils.workshop_automation import (
+            restore_if_no_plans,
             workshop_task_snapshot,
         )
         from arknights_mower.utils.workshop_config import workshop_lock
@@ -1194,12 +1204,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 snapshot = workshop_task_snapshot(task)
             if snapshot is None or not snapshot.is_current():
                 return
-            cultivateDepotSolver().start()
-            if not snapshot.is_current():
-                return
             settings = snapshot.settings
-            unknown_cnt = 0
-            inventory_data = get_inventory_counts()
             is_9colored = agent == "九色鹿"
             if agent not in [s.operator for s in settings]:
                 logger.info(f"当前干员{agent}不在加工站配置中")
@@ -1213,8 +1218,21 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             if not item_list:
                 logger.info(f"{agent}没有符合材料范围的加工配置，跳过")
                 return
+            operator = self.op_data.operators[agent]
+            mood_budget = max(0, min(24, operator.mood))
+            if mood_budget < 1:
+                logger.info(f"{agent}心情不足1点，跳过加工任务")
+                return
+            cultivateDepotSolver().start()
+            restore_if_no_plans()
+            if not snapshot.is_current():
+                return
+            mood_rules, mood_rules_known = operator_mood_rules(agent)
+            unknown_cnt = 0
+            inventory_data = get_inventory_counts()
             seen = set()
             group = defaultdict(dict)
+            recipe_moods = {}
             for item in item_list:
                 for name in item.item_names:
                     if name in seen:
@@ -1228,6 +1246,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         logger.warning("跳过心情大于4消耗的材料")
                     else:
                         group[metadata["tab"]][name] = item
+                        recipe_moods[name] = mood_cost(
+                            name, metadata, mood_rules, mood_rules_known
+                        )
             blocked_materials = set()
 
             def available_groups():
@@ -1239,6 +1260,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             name: setting
                             for name, setting in entries.items()
                             if name not in blocked_materials
+                            and recipe_moods[name] <= mood_budget
                             and batch_limit(
                                 name, workshop_formula[name], setting, inventory_data
                             )
@@ -1250,11 +1272,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             tab_queue = deque(available_groups().items())
             reset_scan = True
             if not tab_queue:
-                logger.info(f"{agent}的材料已达上限或可用原料不足，跳过加工")
+                logger.info(
+                    f"{agent}当前心情{mood_budget:.2f}，没有可加工材料，跳过加工"
+                )
                 return
-            operator = self.op_data.operators[agent]
-            mood_budget = max(0, min(24, operator.mood))
-            mood_rules, mood_rules_known = operator_mood_rules(agent)
             tab_pos = {
                 "基建材料": (self.recog.w * 0.1, self.recog.h * 0.18),
                 "精英材料": (self.recog.w * 0.1, self.recog.h * 0.31),
@@ -1315,9 +1336,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             continue
                         ap_cost = current_material["apCost"]
                         material_tab = current_material["tab"]
-                        per_craft_mood = mood_cost(
-                            current_name, current_material, mood_rules, mood_rules_known
-                        )
+                        per_craft_mood = recipe_moods[current_name]
                         batch_count = min(
                             batch_count, int(mood_budget // per_craft_mood)
                         )
@@ -1424,12 +1443,17 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         )
                         inventory_data = get_inventory_counts()
                         blocked_materials.clear()
-                        tasks.insert(0, "select")
-                        tab_queue = deque(available_groups().items())
-                        reset_scan = True
                         mood_budget = max(0, mood_budget - batches * per_craft_mood)
                         operator.mood = mood_budget
                         operator.time_stamp = datetime.now()
+                        tab_queue = deque(available_groups().items())
+                        if not tab_queue:
+                            logger.info(
+                                f"{agent}当前心情{mood_budget:.2f}，已无可加工材料，结束加工"
+                            )
+                            break
+                        tasks.insert(0, "select")
+                        reset_scan = True
                 elif scene == Scene.FACTORY_FORMULA:
                     if tasks[0] in ["enter", "process"]:
                         self.back()
@@ -4263,10 +4287,78 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             )
             self.drop_send = True
 
+    def restore_maa_theme(self):
+        """本轮 MAA 任务收尾时恢复指定主题，为下次调度预留时间。"""
+        conf = config.conf
+        if not conf.maa_restore_theme_enable or self.MAA is None:
+            return
+        theme = conf.maa_restore_theme.strip()
+        if not theme:
+            logger.warning("未选择目标主题，跳过恢复主题")
+            return
+        if config.stop_maa.is_set() or config.stop_mower.is_set():
+            return
+
+        queued = False
+        try:
+            version = self.MAA.get_version()
+            try:
+                supported = Version(version) >= Version("6.17.3")
+            except InvalidVersion:
+                supported = False
+            if not supported:
+                logger.warning(
+                    f"恢复主题需要 MAA v6.17.3 或更高版本，当前为 {version}，跳过恢复"
+                )
+                return
+
+            deadline = min(
+                datetime.now() + timedelta(seconds=120),
+                self.tasks[0].time - timedelta(seconds=5),
+            )
+            if (deadline - datetime.now()).total_seconds() < 10:
+                logger.info("距离下次调度时间过近，跳过恢复主题")
+                return
+
+            # 大型任务可能被调度器中断；清空原队列后只运行恢复任务。
+            self.MAA.stop()
+            if config.stop_maa.is_set() or config.stop_mower.is_set():
+                return
+            task_id = self.MAA.append_task("SwitchTheme", {"themes": [theme]})
+            if not task_id:
+                logger.warning("添加恢复主题任务失败，请检查 MAA 核心及配套资源版本")
+                return
+            queued = True
+            if not self.MAA.start():
+                logger.warning("恢复主题任务启动失败")
+                return
+            logger.info(f"开始恢复游戏主题：{theme}")
+            while self.MAA.running():
+                if config.stop_maa.is_set():
+                    logger.info("收到停止指令，停止恢复主题")
+                    return
+                if (
+                    datetime.now() >= deadline
+                    or (self.tasks[0].time - datetime.now()).total_seconds() <= 5
+                ):
+                    logger.warning("恢复主题超时或即将开始下次调度，停止恢复")
+                    return
+                csleep(1)
+            logger.info("恢复主题任务结束，具体切换结果请查看 MAA 日志")
+        except MowerExit:
+            raise
+        except Exception:
+            logger.exception("恢复主题失败，继续原定调度")
+        finally:
+            if queued:
+                self.MAA.stop()
+                self.recog.reset_after_external_control()
+
     def maa_plan_solver(self, tasks="All", one_time=False):
         """清日常"""
         try:
             self.drop_send = False
+            restore_theme = False
             conf = config.conf
             if (
                 not one_time
@@ -4320,6 +4412,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         hard_stop = True
                     else:
                         self.sleep(5)
+                # MAA 运行期间只保存截图，没有连续执行 Mower 场景识别。
+                self.recog.reset_after_external_control()
+                restore_theme = not hard_stop
                 if hard_stop:
                     hard_stop_msg = "MAA任务未完成，等待3分钟"
                     logger.info(hard_stop_msg)
@@ -4361,9 +4456,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 logger.info("准备开始：肉鸽/保全/盐酸")
                 send_message("启动 肉鸽/保全/盐酸")
                 while True:
+                    restore_theme = False
                     self.MAA = None
                     self.initialize_maa()
-                    self.recog.update()
+                    self.recog.reset_after_external_control()
                     self.back_to_index()
                     if conf.RG:
                         # Roguelike 通用字段按协议条件下发（#264）：投资类字段仅在
@@ -4537,7 +4633,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         ):
                             maa_crash = False
                             self.maa_stop()
+                            restore_theme = True
                             break
+                    self.recog.reset_after_external_control()
                     if maa_crash:
                         logger.error("MAA 肉鸽/保全/盐酸运行中断")
                         send_message("MAA 肉鸽/保全/盐酸运行中断", level="ERROR")
@@ -4553,6 +4651,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     sf_solver = SecretFront(self.device, self.recog)
                     sf_solver.run(self.tasks[0].time - datetime.now())
 
+            if restore_theme:
+                self.restore_maa_theme()
             self.rest_until_next_task()
             self.MAA = None
         except MowerExit:

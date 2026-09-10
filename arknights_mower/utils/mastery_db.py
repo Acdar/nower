@@ -244,9 +244,12 @@ def add_plan_checked(
     ):
         return -1, f"目标专精等级无效: {target_level}（需 1/2/3）"
     from arknights_mower.utils.mastery_recommendation import (
+        UNTRAINABLE_CHAR_IDS,
         get_current_mastery_level,
     )
 
+    if char_id in UNTRAINABLE_CHAR_IDS:
+        return -1, "该干员为肉鸽赠送干员，无法在训练室专精技能"
     current_level = get_current_mastery_level(char_id, skill_index)
     if current_level is not None and current_level >= target_level:
         return -1, f"该干员技能已专{current_level}，无需再练到专{target_level}"
@@ -337,6 +340,25 @@ def get_plan_by_id(plan_id: int, path: Optional[str] = None) -> Optional[dict]:
     except Exception as e:
         logger.error(f"get_plan_by_id failed: {e}")
         return None
+
+
+def complete_satisfied_idle_plans(levels, path: Optional[str] = None) -> int:
+    """Close waiting plans whose target is already reached in the synchronized BOX."""
+    known = [
+        (char_id, index, level)
+        for (char_id, index), level in levels.items()
+        if type(level) is int and 1 <= level <= 3
+    ]
+    if not known:
+        return 0
+    with _conn(path) as conn:
+        cursor = conn.executemany(
+            "UPDATE mastery_plan SET status='completed' "
+            "WHERE status='idle' AND char_id=? AND skill_index=? AND target_level<=?",
+            known,
+        )
+        conn.commit()
+        return cursor.rowcount
 
 
 def get_active_plan(path: Optional[str] = None) -> Optional[dict]:
