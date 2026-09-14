@@ -80,6 +80,7 @@ export const useConfigStore = defineStore('config', () => {
   ]
   const workshop_deer_fodder = ref(defaultDeerFodder())
   const workshop_min_bonus = ref(80)
+  const workshop_protect_t2_device_rock = ref(false)
   const workshop_low_priority_rest = ref(true)
   const fodder_operators = ref(['九色鹿'])
   const t5_operators = ref(['年'])
@@ -160,6 +161,8 @@ export const useConfigStore = defineStore('config', () => {
   const skipNextWeeklyPlanSync = ref(false)
   let weeklyPlanSyncTimer = null
   let configSaveRequest = Promise.resolve()
+  let weeklyPlanSaveRequest = Promise.resolve()
+  const autosave_paused = ref(false)
 
   async function load_shop() {
     const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/shop`)
@@ -337,11 +340,15 @@ export const useConfigStore = defineStore('config', () => {
     }
   }
 
-  async function sync_active_weekly_plan() {
+  function sync_active_weekly_plan() {
     if (!maa_weekly_plan_active.value) {
       return
     }
-    return update_weekly_plan_active(maa_weekly_plan_active.value, maa_weekly_plan.value)
+    weeklyPlanSaveRequest = update_weekly_plan_active(
+      maa_weekly_plan_active.value,
+      maa_weekly_plan.value
+    )
+    return weeklyPlanSaveRequest
   }
 
   async function delete_weekly_plan(key) {
@@ -519,6 +526,7 @@ export const useConfigStore = defineStore('config', () => {
     load_workshop_config(response.data)
     workshop_deer_fodder.value = response.data.workshop_deer_fodder ?? defaultDeerFodder()
     workshop_min_bonus.value = response.data.workshop_min_bonus ?? 80
+    workshop_protect_t2_device_rock.value = response.data.workshop_protect_t2_device_rock ?? false
     workshop_low_priority_rest.value = response.data.workshop_low_priority_rest ?? true
     fodder_operators.value = response.data.fodder_operators || ['九色鹿']
     t5_operators.value = response.data.t5_operators || ['年']
@@ -582,7 +590,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_mall_blacklist: maa_mall_blacklist.value.join(','),
       maa_gap: maa_gap.value,
       simulator: simulator.value,
-      theme: theme.value,
+      ...(runtime_platform.value === 'android' ? {} : { theme: theme.value }),
       resting_threshold: resting_threshold.value / 100,
       fia_threshold: fia_threshold.value / 100,
       rescue_threshold: rescue_threshold.value / 100,
@@ -594,9 +602,15 @@ export const useConfigStore = defineStore('config', () => {
         y: tap_to_launch_game.value.y,
         command: tap_to_launch_game.value.command || defaultLaunchCommand
       },
-      exit_game_when_idle: exit_game_when_idle.value,
-      return_home_when_idle: return_home_when_idle.value,
-      close_simulator_when_idle: close_simulator_when_idle.value,
+      // Android edits these original Mower options in its native settings.
+      // Hidden WebUI drafts must not overwrite a newer native selection.
+      ...(runtime_platform.value === 'android'
+        ? {}
+        : {
+            exit_game_when_idle: exit_game_when_idle.value,
+            return_home_when_idle: return_home_when_idle.value,
+            close_simulator_when_idle: close_simulator_when_idle.value
+          }),
       maa_conn_preset: maa_conn_preset.value,
       maa_touch_option: maa_touch_option.value,
       maa_mall_ignore_blacklist_when_full: maa_mall_ignore_blacklist_when_full.value,
@@ -611,7 +625,7 @@ export const useConfigStore = defineStore('config', () => {
       rcl: rcl.value,
       rogue: rogue.value,
       sss: sss.value,
-      screenshot: screenshot.value,
+      ...(runtime_platform.value === 'android' ? {} : { screenshot: screenshot.value }),
       screenshot_interval: screenshot_interval.value,
       mail_subject: mail_subject.value,
       skland_enable: skland_enable.value,
@@ -655,6 +669,7 @@ export const useConfigStore = defineStore('config', () => {
       workshop_manual_settings_revision: workshop_manual_settings_revision.value,
       workshop_deer_fodder: workshop_deer_fodder.value,
       workshop_min_bonus: workshop_min_bonus.value,
+      workshop_protect_t2_device_rock: workshop_protect_t2_device_rock.value,
       workshop_low_priority_rest: workshop_low_priority_rest.value,
       fodder_operators: fodder_operators.value,
       t5_operators: t5_operators.value,
@@ -682,7 +697,12 @@ export const useConfigStore = defineStore('config', () => {
         skipNextWeeklyPlanSync.value = false
         return
       }
-      if (!loaded.value || syncingWeeklyPlan.value || !maa_weekly_plan_active.value) {
+      if (
+        !loaded.value ||
+        autosave_paused.value ||
+        syncingWeeklyPlan.value ||
+        !maa_weekly_plan_active.value
+      ) {
         return
       }
       if (weeklyPlanSyncTimer) {
@@ -710,13 +730,25 @@ export const useConfigStore = defineStore('config', () => {
     return configSaveRequest
   }
 
+  async function flush_config_saves() {
+    if (weeklyPlanSyncTimer) {
+      clearTimeout(weeklyPlanSyncTimer)
+      weeklyPlanSyncTimer = null
+      await sync_active_weekly_plan()
+    }
+    await weeklyPlanSaveRequest
+    await configSaveRequest
+  }
+
   watchEffect(() => {
-    if (loaded.value) {
+    if (loaded.value && !autosave_paused.value) {
       save_config().catch((error) => console.error('配置保存失败', error))
     }
   })
 
   return {
+    autosave_paused,
+    flush_config_saves,
     adb,
     load_config,
     save_config,
@@ -785,6 +817,7 @@ export const useConfigStore = defineStore('config', () => {
     apply_workshop_response,
     workshop_deer_fodder,
     workshop_min_bonus,
+    workshop_protect_t2_device_rock,
     workshop_low_priority_rest,
     fodder_operators,
     t5_operators,

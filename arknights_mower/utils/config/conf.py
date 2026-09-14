@@ -478,6 +478,8 @@ class RIICPart(ConfModel):
     "九色鹿垫刀素材，独立于自动生成的配置"
     workshop_min_bonus: int = Field(default=80, ge=0, le=1000)
     "加工站一键设置的副产品概率加成下限（百分比）"
+    workshop_protect_t2_device_rock: bool = False
+    "禁止加工消耗装置、固源岩（仅 T2），材料预算也排除对应合成配方"
     workshop_low_priority_rest: bool = True
     "加工干员使用最低宿舍恢复优先级，覆盖床位分配与实际选人"
     t5_operators: list[str] = ["年"]
@@ -658,6 +660,10 @@ class Conf(
     @model_validator(mode="before")
     @classmethod
     def migrate_legacy_keys(cls, data):
+        if isinstance(data, dict) and os.environ.get("MOWER_ANDROID") == "1":
+            from mower_android.managed import normalize
+
+            data = normalize(data)
         if not isinstance(data, dict):
             return data
         # visit_friend(bool) 已退役：迁移为 visit_friend_enable(bool)。原 true 语义是 mower

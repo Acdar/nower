@@ -24,6 +24,7 @@ from arknights_mower.utils.scheduler_task import (  # noqa: E402
     SchedulerTask,
     TaskTypes,
     find_next_task,
+    set_type_enum,
 )
 
 with patch.dict("sys.modules", {"RecruitSolver": MagicMock()}):
@@ -704,6 +705,47 @@ class TestBaseScheduler(unittest.TestCase):
             self.assertTrue(
                 all(not condition for condition in solver.op_data.plan_condition)
             )
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_detected_party_end_overwrites_unexpired_prediction(self):
+        solver = BaseSchedulerSolver()
+        predicted_end = datetime.now() + timedelta(hours=1)
+        solver._party_time = predicted_end
+        solver.op_data = MagicMock()
+        solver.op_data.party_time = predicted_end
+
+        # 刷新前的临时清空仍保留旧预测，维持 PR #765 的防抖语义。
+        solver.party_time = None
+        self.assertEqual(solver.op_data.party_time, predicted_end)
+
+        # 会客室界面确认无倒计时后，旧预测必须被清掉。
+        solver.set_detected_party_time(None)
+        self.assertIsNone(solver.party_time)
+        self.assertIsNone(solver.op_data.party_time)
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_party_time_read_failure_means_party_ended(self):
+        solver = BaseSchedulerSolver()
+        solver.read_time = MagicMock(return_value=None)
+
+        self.assertIsNone(solver.read_party_time())
+        solver.read_time.assert_called_once_with(((1768, 438), (1902, 480)), None)
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_operator_time_read_failure_means_not_working_or_depleted(self):
+        solver = BaseSchedulerSolver()
+        solver.read_time = MagicMock(return_value=None)
+        before = datetime.now()
+
+        with patch.object(base_schedule.logger, "info") as log_info:
+            result = solver.read_operator_time("room_1_2", 1, ((1, 2), (3, 4)))
+
+        self.assertGreaterEqual(result, before)
+        self.assertLessEqual(result, datetime.now())
+        solver.read_time.assert_called_once_with(((1, 2), (3, 4)), None)
+        log_info.assert_called_once_with(
+            "B102 2号位未显示干员倒计时，按非工作状态或心情耗尽处理"
+        )
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
     def test_backup_plan_solver_GreyytheLightningbearer(self):
@@ -2338,3 +2380,36 @@ class TestWorkshopMaterialScope(unittest.TestCase):
                 scene.assert_not_called()
                 errors.assert_not_called()
                 self.assertEqual(settings[0].items[0].item_names, [material])
+
+
+class TestManualClueTask(unittest.TestCase):
+    """手动「线索任务」由 infra_main 派发，与定时触发共用 clue_new()。
+
+    前端下拉提交的是显示名，set_type_enum 只按 display_value 匹配、对不上会静默
+    退化成空任务，所以名字契约和派发一起钉住。
+    """
+
+    def test_display_name_resolves_to_clue(self):
+        self.assertIs(set_type_enum("线索任务"), TaskTypes.CLUE)
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_infra_main_dispatches_clue_task(self):
+        task = SchedulerTask(
+            time=datetime.now(), task_plan={}, task_type=TaskTypes.CLUE
+        )
+        solver = BaseSchedulerSolver()
+        solver.task = task
+        solver.tasks = [task]
+        # __init__ 被 stub 掉，party_time 的 setter 需要 op_data 存在才能走下去
+        solver.op_data = None
+        with (
+            patch.object(solver, "find", return_value=((0, 0), (10, 10))),
+            patch.object(solver, "clue_new") as clue_new,
+            patch.object(solver, "skip") as skip,
+        ):
+            solver.infra_main()
+        clue_new.assert_called_once_with()
+        self.assertIsNotNone(solver.last_clue)  # 手动触发同样刷新定时器
+        # 与定时触发共用同一条路径，收尾也要一致
+        skip.assert_any_call(["collect_notification"])
+        self.assertEqual(solver.tasks, [])  # 任务已消费

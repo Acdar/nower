@@ -1,5 +1,6 @@
 import json
 import os
+from functools import lru_cache
 from typing import Optional
 
 from arknights_mower.utils.path import _install_dir, _internal_dir, get_path
@@ -76,30 +77,50 @@ def get_skill_real_name(char_id: str, skill_index: int):
     return None
 
 
-def get_current_mastery_level(char_id: str, skill_index: int) -> Optional[int]:
-    """cultivate.json 中干员技能当前专精等级；文件缺失/干员不在/读失败 → None。
+@lru_cache(maxsize=2)
+def _read_cultivate_characters(path, mtime_ns, size):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {char["id"]: char for char in data.get("data", {}).get("characters", [])}
 
-    #65/B7：计划创建校验当前等级用。与 get_mastery_recommendations 同读
-    cultivate.json 的 skills[i].level；推荐层把缺失当 0，本函数缺失/读不到
-    返回 None 跳过校验（创建不误拒，执行层已到target检测按截图兜底）。
-    """
-    cultivate_path = get_path("@app/tmp/cultivate.json")
-    if not os.path.exists(cultivate_path):
-        return None
+
+def _get_cultivate_character(char_id):
+    # 批量添加计划时共用 BOX 快照；同步文件变化后自动失效。
+    path = get_path("@app/tmp/cultivate.json")
     try:
-        with open(cultivate_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        stat = os.stat(path)
+        return _read_cultivate_characters(
+            str(path), stat.st_mtime_ns, stat.st_size
+        ).get(char_id)
     except Exception:
         return None
-    for char in data.get("data", {}).get("characters", []):
-        if char.get("id") != char_id:
-            continue
-        skills = char.get("skills", [])
-        if not 0 <= skill_index < len(skills):
-            return None
-        level = skills[skill_index].get("level")
-        return level if isinstance(level, int) else None
+
+
+def get_current_mastery_level(char_id: str, skill_index: int) -> Optional[int]:
+    """读取 skills[i].level（专精 0～3），不是基础技能等级；缺失时返回 None。"""
+    char = _get_cultivate_character(char_id)
+    if char is None:
+        return None
+    skills = char.get("skills", [])
+    if not 0 <= skill_index < len(skills):
+        return None
+    level = skills[skill_index].get("level")
+    return level if type(level) is int else None
+
+
+def _mastery_requirement_error(char):
+    level = char.get("mainSkillLevel")
+    if type(level) is not int or level < 1:
+        return "无法确认基础技能等级，请先同步干员数据"
+    if level < 7:
+        return f"基础技能仅 {level} 级，需手动升至 7 级并同步干员数据后再添加专精计划"
     return None
+
+
+def get_mastery_requirement_error(char_id):
+    """校验已有 BOX 中的真实基础技能等级；未读取 BOX 的旧手动入口保持兼容。"""
+    char = _get_cultivate_character(char_id)
+    return _mastery_requirement_error(char) if char is not None else None
 
 
 def _decompose_to_t3(materials, composite, item_table, inventory):
@@ -188,6 +209,18 @@ def get_mastery_recommendations():
         if count > 0:
             inventory[item_id] = count
 
+    from arknights_mower.data import workshop_formula
+    from arknights_mower.utils.mastery_materials import MaterialBudget
+    from arknights_mower.utils.workshop_material_policy import (
+        protected_workshop_materials,
+    )
+
+    material_budget = MaterialBudget(
+        skill_data,
+        inventory,
+        workshop_formula,
+        blocked_materials=protected_workshop_materials(),
+    )
     operators = []
     skill_name_cache = {}
 
@@ -320,6 +353,7 @@ def get_mastery_recommendations():
                     "remaining_levels": end_stage - start_stage,
                     "total_time": total_time,
                     "full_chain_achievable": full_chain_achievable,
+                    "material_summary": material_budget.calculate(chain_needed_list),
                     "chain_needed_materials": chain_needed_list,
                     "chain_missing_materials": chain_missing_list,
                     "chain_missing_t3": chain_missing_t3,
@@ -337,7 +371,8 @@ def get_mastery_recommendations():
                     "sub_profession": "",
                     "elite": evolve_phase,
                     "level": char.get("level", 1),
-                    "main_skill_level": char.get("mainSkillLevel", 7),
+                    "main_skill_level": char.get("mainSkillLevel"),
+                    "mastery_error": _mastery_requirement_error(char),
                     "potential": char.get("potentialRank", 0) + 1,
                     "recommendations": recommendations,
                 }
@@ -363,23 +398,30 @@ def _workshop_lookahead_active(plan):
         return False
 
 
+def _remaining_mastery_materials(plan, recommendation):
+    """Remaining costs through the plan target, excluding an already-paid step."""
+    stages = recommendation.get("stages")
+    if stages is None:
+        return recommendation.get("chain_needed_materials", [])
+    paid_level = 0
+    if plan.get("status") in ("training", "waiting_collect"):
+        runtime = plan.get("support_runtime") or {}
+        if isinstance(runtime, str):
+            runtime = json.loads(runtime)
+        paid_level = runtime.get("level") or recommendation.get("current_level", 0) + 1
+    return [
+        material
+        for stage in stages
+        if paid_level < stage["to_level"] - 7 <= plan.get("target_level", 3)
+        for material in stage.get("needed_materials", [])
+    ]
+
+
 def _workshop_training_reserve(plan, recommendation):
-    """The current training step is already paid; retain subsequent steps' inputs."""
     from collections import defaultdict
 
-    stages = recommendation.get("stages")
-    materials = (
-        [
-            material
-            for stage in stages[1:]
-            if stage["to_level"] - 7 <= plan.get("target_level", 3)
-            for material in stage.get("needed_materials", [])
-        ]
-        if stages
-        else recommendation.get("chain_needed_materials", [])
-    )
     reserved = defaultdict(int)
-    for material in materials:
+    for material in _remaining_mastery_materials(plan, recommendation):
         reserved[material["name"]] += material["count"]
     return reserved
 
@@ -483,6 +525,7 @@ def compute_workshop_config(
     recommendations = {
         (op["char_id"], r["skill_index"]): r
         for op in operators
+        if not op.get("mastery_error")
         for r in op.get("recommendations", [])
     }
     reserved = {}
@@ -493,7 +536,10 @@ def compute_workshop_config(
         reserved = _workshop_training_reserve(current, current_rec)
 
     raw_demand = defaultdict(int)
-    for mat in recommendations.get(plan_key, {}).get("chain_needed_materials", []):
+    selected_rec = recommendations.get(plan_key)
+    if selected_rec is None:
+        return []
+    for mat in _remaining_mastery_materials(selected, selected_rec):
         raw_demand[mat["name"]] += mat["count"]
 
     demand_t5_raw = {n: c for n, c in raw_demand.items() if n in t5_names}
@@ -520,6 +566,35 @@ def compute_workshop_config(
         return max(
             0, inventory.get(id_by_name.get(name, ""), 0) - reserved.get(name, 0)
         )
+
+    from arknights_mower.utils.mastery_materials import MaterialBudget
+    from arknights_mower.utils.workshop_material_policy import (
+        protected_workshop_materials,
+    )
+
+    budget = MaterialBudget(
+        skill_data,
+        inventory,
+        workshop_formula,
+        blocked_materials=protected_workshop_materials(),
+    )
+    summary = budget.calculate(
+        [
+            {
+                "id": id_by_name.get(name, name),
+                "count": raw_demand.get(name, 0) + reserved.get(name, 0),
+            }
+            for name in raw_demand.keys() | reserved.keys()
+        ]
+    )
+    if not summary["craftable"]:
+        from arknights_mower.utils.log import logger
+
+        logger.info(
+            f"专精计划 {selected['char_id']} 技能{selected['skill_index'] + 1} "
+            "材料仍不足，暂不合成，等待后续仓库扫描"
+        )
+        return []
 
     t4_indirect = defaultdict(int)
     for t5_name, t5_demand in demand_t5_raw.items():
@@ -692,7 +767,7 @@ def auto_schedule_mastery_tasks():
     # 的孤儿文件，只靠它的话新装/绕过前端新增的计划永远不在 plan_set，扫描自动开始失效。
     from arknights_mower.utils.mastery_db import get_all_plans
 
-    plan_set = {(p["char_id"], p["skill_index"]) for p in get_all_plans()}
+    plan_set = {(p["char_id"], p["skill_index"]): p for p in get_all_plans()}
     if not plan_set:
         return result
 
@@ -727,17 +802,25 @@ def auto_schedule_mastery_tasks():
             pass
 
     for op in operators:
+        if op.get("mastery_error"):
+            continue
         for rec in op.get("recommendations", []):
             if (op["char_id"], rec["skill_index"]) not in plan_set:
                 continue
-            if rec.get("current_level", 0) >= 3:
+            plan = plan_set[(op["char_id"], rec["skill_index"])]
+            if rec.get("current_level", 0) >= plan.get("target_level", 3):
                 continue
 
+            from collections import Counter
+
+            needed = Counter()
+            for mat in _remaining_mastery_materials(plan, rec):
+                needed[mat["name"]] += mat["count"]
             all_materials_sufficient = True
-            for mat in rec.get("chain_needed_materials", []):
-                mat_id = name_to_id.get(mat["name"], "")
+            for name, count in needed.items():
+                mat_id = name_to_id.get(name, "")
                 owned = inventory.get(mat_id, 0)
-                if owned < mat["count"]:
+                if owned < count:
                     all_materials_sufficient = False
                     break
 

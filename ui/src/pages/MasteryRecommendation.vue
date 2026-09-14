@@ -81,8 +81,7 @@
         style="min-width: 100px"
       />
       <n-checkbox v-model:checked="showOnlyPlanned">只看计划</n-checkbox>
-      <n-checkbox v-model:checked="filterAchievable">材料充足</n-checkbox>
-      <n-checkbox v-model:checked="decomposeT3">缺料拆解为T3</n-checkbox>
+      <n-checkbox v-model:checked="filterAchievable">材料充足或可合成</n-checkbox>
     </n-space>
 
     <n-divider />
@@ -112,18 +111,17 @@
     <n-empty v-else-if="displayList.length === 0" :description="emptyText" />
 
     <div v-else class="mastery-list">
-      <!-- 计划内 T3 缺料汇总 -->
-      <n-card
-        v-if="plannedT3Summary.length"
-        size="small"
-        title="计划缺料汇总（T3）"
-        style="margin-bottom: 8px"
-      >
-        <n-space :size="4" wrap>
-          <n-tag v-for="m in plannedT3Summary" :key="m.id" type="warning" size="small">
-            {{ m.name }} x{{ m.count }}
-          </n-tag>
-        </n-space>
+      <n-card v-if="planEntries.length" size="small" style="margin-bottom: 12px">
+        <n-spin :show="materialsLoading">
+          <n-alert v-if="materialsError" type="warning">{{ materialsError }}</n-alert>
+          <MasteryMaterials
+            v-else
+            :summary="planMaterials"
+            :missing-skills="missingPlanSkills"
+            expand-crafting
+            title="计划剩余总材料消耗"
+          />
+        </n-spin>
       </n-card>
 
       <n-collapse accordion>
@@ -152,6 +150,7 @@
                 quaternary
                 type="warning"
                 @click.stop="addAllToPlan(op)"
+                :disabled="!!op.mastery_error"
                 v-if="!allPlanned(op)"
                 >全加计划</n-button
               >
@@ -165,21 +164,27 @@
                   <n-space align="center" :size="8">
                     <n-text strong>{{ rec.skill_name }}</n-text>
                     <n-text depth="3" style="font-size: 12px"
-                      >Lv{{ rec.current_level + 7 }} → 专精3级</n-text
+                      >{{ masteryLevelLabel(op.main_skill_level, rec.current_level) }} →
+                      专三</n-text
                     >
                   </n-space>
                   <n-space :size="4">
-                    <n-tag :type="rec.full_chain_achievable ? 'success' : 'warning'" size="small">
-                      {{ rec.full_chain_achievable ? '材料充足' : '材料不足' }}
+                    <n-tag :type="materialStatusType(rec.material_summary)" size="small">
+                      {{ materialStatus(rec.material_summary) }}
                     </n-tag>
                     <n-button
                       size="tiny"
                       :type="isSkillPlanned(op.char_id, rec.skill_index) ? 'success' : 'default'"
                       @click.stop="toggleSkillPlan(op, rec)"
+                      :disabled="!!op.mastery_error && !isSkillPlanned(op.char_id, rec.skill_index)"
                     >
                       {{ isSkillPlanned(op.char_id, rec.skill_index) ? '已计划' : '加计划' }}
                     </n-button>
-                    <n-button type="primary" size="tiny" @click.stop="confirmSkill(op, rec)"
+                    <n-button
+                      type="primary"
+                      size="tiny"
+                      :disabled="!!op.mastery_error"
+                      @click.stop="confirmSkill(op, rec)"
                       >一键专精</n-button
                     >
                     <n-button
@@ -192,52 +197,12 @@
                 </n-space>
               </template>
               <n-space vertical :size="4">
+                <n-text v-if="op.mastery_error" type="warning">{{ op.mastery_error }}</n-text>
                 <n-text depth="2"
                   >总训练时间: {{ formatTime(rec.total_time) }} |
                   {{ rec.remaining_levels }}级专精</n-text
                 >
-                <n-text depth="3" class="section-label">所需材料:</n-text>
-                <n-grid :x-gap="8" :y-gap="4" cols="3 m:4 l:5 xl:6" responsive="screen">
-                  <n-gi v-for="mat in rec.chain_needed_materials" :key="mat.id">
-                    <n-thing>
-                      <template #avatar>
-                        <n-avatar
-                          :src="'/depot/' + mat.name + '.webp'"
-                          :size="24"
-                          fallback-src="/depot/源岩.webp"
-                        />
-                      </template>
-                      <template #header>
-                        <n-text :depth="chainHas(rec, mat.id) ? 1 : 3" style="font-size: 11px">{{
-                          mat.name
-                        }}</n-text>
-                      </template>
-                      <template #description>
-                        <n-text
-                          :type="chainHas(rec, mat.id) ? 'success' : 'error'"
-                          style="font-size: 11px"
-                          >x{{ mat.count }}</n-text
-                        >
-                      </template>
-                    </n-thing>
-                  </n-gi>
-                </n-grid>
-                <div v-if="currentMissing(rec).length" class="missing-section">
-                  <n-text depth="3" type="error" style="font-size: 11px"
-                    >缺少{{ decomposeT3 ? '(T3拆解)' : '' }}:</n-text
-                  >
-                  <n-space :size="2">
-                    <n-tag v-for="m in currentMissing(rec)" :key="m.id" type="error" size="small">
-                      {{ m.name }}x{{ decomposeT3 ? m.count : m.count }}
-                      <n-text
-                        v-if="decomposeT3 && m.total"
-                        depth="3"
-                        style="font-size: 10px; margin-left: 2px"
-                        >(需{{ m.total }}有{{ m.owned }})</n-text
-                      >
-                    </n-tag>
-                  </n-space>
-                </div>
+                <MasteryMaterials :summary="rec.material_summary" />
               </n-space>
             </n-card>
           </div>
@@ -273,20 +238,7 @@
           trainingWarning(cd.op?.name)
         }}</n-text>
         <n-divider />
-        <n-text :type="cd.rec?.full_chain_achievable ? 'success' : 'warning'"
-          >材料: {{ cd.rec?.full_chain_achievable ? '充足 ✓' : '不足 ✗' }}</n-text
-        >
-        <n-text v-if="currentMissing(cd.rec).length" style="margin-top: 4px">
-          缺少:
-          <n-tag
-            v-for="m in currentMissing(cd.rec)"
-            :key="m.id"
-            type="error"
-            size="small"
-            style="margin-left: 4px"
-            >{{ m.name }}x{{ m.count }}</n-tag
-          >
-        </n-text>
+        <MasteryMaterials :summary="cd.rec?.material_summary" />
       </n-space>
       <template #footer>
         <n-space justify="end">
@@ -353,13 +305,13 @@
                         style="width: 178px"
                       />
                       <label class="ml" style="font-size: 13px">训练速度</label>
-                      <n-input-number
+                      <mower-input-number
                         v-model:value="value.efficiency"
                         :min="0"
                         :max="100"
                         style="width: 80px"
                         :show-button="false"
-                        ><template #suffix>%</template></n-input-number
+                        ><template #suffix>%</template></mower-input-number
                       >
                     </div>
                     <div class="task-col">
@@ -401,15 +353,36 @@
         </n-text>
       </div>
       <n-text depth="2" style="margin-top: 10px">减半换人缓冲时间（分钟）</n-text>
-      <n-input-number
-        v-model:value="masterySettings.mastery_swap_buffer"
-        :min="0"
-        :max="60"
-        size="small"
-        style="width: 120px; margin-top: 4px"
-      />
+      <div
+        v-for="item in masteryBufferFields"
+        :key="item.key"
+        style="
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-top: 8px;
+        "
+      >
+        <n-text depth="2">{{ item.label }}</n-text>
+        <mower-input-number
+          :value="masterySettings.mastery_swap_buffers[item.key]"
+          @update:value="
+            (value) =>
+              (masterySettings.mastery_swap_buffers[item.key] =
+                value ?? DEFAULT_MASTERY_SWAP_BUFFERS[item.key])
+          "
+          :min="0"
+          :max="60"
+          clearable
+          size="small"
+          style="width: 120px; flex-shrink: 0"
+        />
+      </div>
       <n-text depth="3" style="font-size: 11px; margin-top: 2px">
-        减半对象需在位时间 = 5小时 + 缓冲时间，缓冲越大越保守
+        默认{{
+          autoCentralBonus ? '分别为 15、30' : '为 10'
+        }}分钟，可自行调整；清空单项恢复该项默认值。
       </n-text>
       <template #footer>
         <n-space justify="end" align="center">
@@ -440,6 +413,7 @@
       preset="card"
       title="专精计划"
       style="width: min(600px, 95vw)"
+      content-style="max-height: 75vh; overflow-y: auto"
       :mask-closable="false"
       @update:show="onPlanModalShow"
     >
@@ -480,7 +454,13 @@
               />
               <n-text strong style="font-size: 13px">{{ op.name }}</n-text>
               <n-text depth="3" style="font-size: 11px">{{ op.rarity }}★</n-text>
-              <n-button size="tiny" quaternary @click="addAllToPlan(op, true)">全加</n-button>
+              <n-button
+                size="tiny"
+                quaternary
+                :disabled="!!op.mastery_error"
+                @click="addAllToPlan(op, true)"
+                >全加</n-button
+              >
             </n-space>
             <n-space :size="4" style="margin-left: 8px">
               <n-button
@@ -489,6 +469,7 @@
                 size="tiny"
                 :type="isSkillPlanned(op.char_id, rec.skill_index) ? 'success' : 'default'"
                 @click="toggleSkillPlan(op, rec, true)"
+                :disabled="!!op.mastery_error && !isSkillPlanned(op.char_id, rec.skill_index)"
               >
                 {{ rec.skill_name }}
               </n-button>
@@ -525,7 +506,7 @@
         </n-text>
         <n-space align="center">
           <n-text>副产品概率加成至少</n-text>
-          <n-input-number
+          <mower-input-number
             :value="workshopMinBonus"
             @update:value="workshopMinBonus = $event ?? 80"
             :min="0"
@@ -536,7 +517,7 @@
             :disabled="workshopDefaultsLoading"
             :input-props="{ 'aria-label': '副产品概率加成下限' }"
             style="width: 100px"
-            ><template #suffix>%</template></n-input-number
+            ><template #suffix>%</template></mower-input-number
           >
           <n-button size="small" @click="setWorkshopOperators" :loading="workshopDefaultsLoading"
             >一键设置</n-button
@@ -554,6 +535,19 @@
               关闭后按原有宿舍优先级安排。
             </help-text>
           </n-space>
+        </n-space>
+        <n-space align="center" :size="6">
+          <n-switch
+            :value="workshopProtectT2"
+            :disabled="workshopPolicySaving"
+            @update:value="setWorkshopMaterialPolicy"
+            size="small"
+            aria-label="不使用装置/固源岩进行合成"
+          />
+          <n-text>不使用装置/固源岩进行合成</n-text>
+          <help-text>
+            仅保留 T2 装置、固源岩，其他等级照常合成。开启后，材料预算也不使用这两种原料。
+          </help-text>
         </n-space>
         <div>
           <n-text depth="3">非 T5 材料加工干员</n-text>
@@ -630,7 +624,9 @@ import {
   workshopTraineeWarning
 } from '@/utils/workshopOperators'
 import { masteryScheduleContext, masteryTraineeWarning } from '@/utils/masterySupport'
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import MasteryMaterials from '@/components/MasteryMaterials.vue'
+import { materialStatus, materialStatusType } from '@/utils/masteryMaterials'
 import {
   NAlert,
   NAvatar,
@@ -646,7 +642,6 @@ import {
   NGrid,
   NIcon,
   NInput,
-  NInputNumber,
   NModal,
   NScrollbar,
   NSelect,
@@ -676,9 +671,12 @@ import {
   buildMasteryRoutePayload,
   prepareMasteryRoutes,
   completeMasterySupports,
-  syncMasteryRouteDefaults
+  syncMasteryRouteDefaults,
+  DEFAULT_MASTERY_SWAP_BUFFERS,
+  normalizeMasterySwapBuffers
 } from '@/utils/masteryRoute'
 import { render_op_label } from '@/utils/op_select'
+import { masteryLevelLabel } from '@/utils/masteryLevel'
 
 const ListIcon = List
 const SettingsIcon = Settings
@@ -715,7 +713,6 @@ const filterRarity = ref([])
 const filterProfession = ref([])
 const filterAchievable = ref(false)
 const showOnlyPlanned = ref(false)
-const decomposeT3 = ref(false)
 // 空闲状态三态：all=全部 idle=空闲 busy=非空闲
 const idleFilter = ref('all')
 const idleFilterOptions = [
@@ -726,11 +723,26 @@ const idleFilterOptions = [
 const {
   workshop_min_bonus: workshopMinBonus,
   workshop_low_priority_rest: workshopLowPriorityRest,
+  workshop_protect_t2_device_rock: workshopProtectT2,
   workshop_deer_fodder: deerFodder,
   fodder_operators: fodderOps,
   t5_operators: t5Ops,
   book_operators: bookOps
 } = storeToRefs(configStore)
+const workshopPolicySaving = ref(false)
+async function setWorkshopMaterialPolicy(value) {
+  workshopProtectT2.value = value
+  workshopPolicySaving.value = true
+  try {
+    await configStore.save_config()
+    await store.fetchRecommendations()
+    await refreshT3Summary()
+  } catch (error) {
+    message.error(`合成设置保存失败：${error.message || error}`)
+  } finally {
+    workshopPolicySaving.value = false
+  }
+}
 const workshopLoading = ref(false)
 const showWorkshopSettings = ref(false)
 const workshopRecommendations = ref(null)
@@ -848,8 +860,39 @@ function getStatusType(status) {
   return map[status] || 'default'
 }
 
+async function warnMaterialShortage(additions) {
+  const keys = [
+    ...new Set([...Object.keys(plan.value).filter((key) => plan.value[key]), ...additions])
+  ]
+  try {
+    const response = await axios.post(
+      `${import.meta.env.VITE_HTTP_URL}/mastery-t3-summary`,
+      {
+        planned_skills: keys
+      },
+      { timeout: 5000 }
+    )
+    const summary = response.data?.material_summary
+    if (!summary) throw new Error('材料数据不可用')
+    if (!summary.available) {
+      message.warning(
+        summary.craftable
+          ? '计划总需求超出成品库存，可由现有材料合成；仍可加入计划。'
+          : '计划总材料不足（含技巧概要），缺口可在主页查看；仍可加入计划。'
+      )
+    }
+  } catch {
+    message.warning('暂时无法核对总材料库存，仍可加入计划，请稍后刷新查看。')
+  }
+}
+
 async function toggleSkillPlan(op, rec, draft = false) {
   const k = planKey(op.char_id, rec.skill_index)
+  if (!plan.value[k] && op.mastery_error) {
+    message.warning(op.mastery_error)
+    return
+  }
+  if (!plan.value[k]) await warnMaterialShortage([k])
   if (!plan.value[k] && workshopTrainingWarning(op.name)) {
     message.warning(workshopTrainingWarning(op.name))
   }
@@ -903,10 +946,18 @@ async function toggleSkillPlan(op, rec, draft = false) {
 }
 
 async function addAllToPlan(op, draft = false) {
+  if (op.mastery_error) {
+    message.warning(op.mastery_error)
+    return
+  }
   if (trainingWarning(op.name)) {
     message.warning(trainingWarning(op.name))
   }
   const recs = op.recommendations
+  const additions = recs
+    .map((rec) => planKey(op.char_id, rec.skill_index))
+    .filter((key) => !plan.value[key])
+  if (additions.length) await warnMaterialShortage(additions)
   if (
     recs.some((rec) => !plan.value[planKey(op.char_id, rec.skill_index)]) &&
     workshopTrainingWarning(op.name)
@@ -1215,7 +1266,18 @@ const level_list = [
   { value: 3, label: '专三' }
 ]
 // 全局路线设置（#91 修订）：中枢加成（0/5）+ 换人缓冲时间，存路线配置设置行，不走 conf。
-const masterySettings = reactive({ central_bonus: 0, mastery_swap_buffer: 10 })
+const masterySettings = reactive({
+  central_bonus: 0,
+  mastery_swap_buffers: { ...DEFAULT_MASTERY_SWAP_BUFFERS }
+})
+const masteryBufferFields = computed(() =>
+  autoCentralBonus.value
+    ? [
+        { key: 'central', label: '中枢加成 +5%' },
+        { key: 'central_unhalved_m2', label: '中枢加成 +5%，专二未继承减半' }
+      ]
+    : [{ key: 'no_central', label: '无中枢加成' }]
+)
 
 const defaultsCache = ref(null)
 const bestTrainers = ref({})
@@ -1285,7 +1347,7 @@ for (const profession of profKeys) {
 
 // #115：modal 级中枢加成/缓冲与逐职业路线同源走草稿语义——改了不保存关掉要还原
 watch(
-  () => [masterySettings.central_bonus, masterySettings.mastery_swap_buffer],
+  () => [masterySettings.central_bonus, ...Object.values(masterySettings.mastery_swap_buffers)],
   () => {
     if (_autoSaveReady) _dirtyMasterySettings = true
   }
@@ -1312,7 +1374,7 @@ async function loadRoute() {
   const settings = r.data?.settings || {}
   _autoSaveReady = false
   masterySettings.central_bonus = settings.central_bonus ?? 0
-  masterySettings.mastery_swap_buffer = settings.mastery_swap_buffer ?? 10
+  masterySettings.mastery_swap_buffers = normalizeMasterySwapBuffers(settings)
   bestTrainers.value = r.data?.best_trainers || {}
   defaultsError.value = r.data?.defaults_error || ''
   const { routes: merged, suggestedProfessions } = prepareMasteryRoutes(
@@ -1363,7 +1425,7 @@ async function saveRouteAndClose() {
       flushRouteSettings(),
       axios.post(`${import.meta.env.VITE_HTTP_URL}/mastery-route/settings`, {
         central_bonus: autoCentralBonus.value,
-        mastery_swap_buffer: masterySettings.mastery_swap_buffer
+        mastery_swap_buffers: { ...masterySettings.mastery_swap_buffers }
       })
     ])
     _dirtyMasterySettings = false // 已落库，关弹窗不再触发「未保存还原」
@@ -1403,7 +1465,7 @@ async function calculateOptimalRoutes() {
 }
 
 // ─── 显示列表 ───
-const allOperatorList = ref([])
+const allOperatorList = computed(() => store.recommendations)
 
 // ─── 空闲干员筛选 ───
 // 空闲 = 不在排班表（主/副表槽位 + 候补 replacement）& 不在专精路线配置（协助位 name/换人 swap_name）
@@ -1466,7 +1528,7 @@ const displayList = computed(() => {
     list = list
       .map((op) => ({
         ...op,
-        recommendations: op.recommendations.filter((r) => r.full_chain_achievable)
+        recommendations: op.recommendations.filter((r) => r.material_summary?.craftable)
       }))
       .filter((op) => op.recommendations.length > 0)
   return list
@@ -1478,39 +1540,59 @@ function visibleRecs(op) {
   return op.recommendations
 }
 
-const plannedT3Summary = ref([])
+const planMaterials = ref(null)
+const missingPlanSkills = computed(() => {
+  const keys = new Set(planMaterials.value?.missing_skills || [])
+  return planEntries.value.filter((entry) => keys.has(entry.key))
+})
+const materialsLoading = ref(false)
+const materialsError = ref('')
+let materialRequest = 0
+let materialTimer
 
 async function refreshT3Summary() {
-  const keys = Object.keys(plan.value).filter((k) => plan.value[k])
+  const request = ++materialRequest
+  const keys = planEntries.value.map((entry) => entry.key)
   if (!keys.length) {
-    plannedT3Summary.value = []
+    planMaterials.value = null
+    materialsLoading.value = false
     return
   }
+  materialsLoading.value = true
+  materialsError.value = ''
   try {
-    const r = await axios.post(`${import.meta.env.VITE_HTTP_URL}/mastery-t3-summary`, {
+    const response = await axios.post(`${import.meta.env.VITE_HTTP_URL}/mastery-t3-summary`, {
       planned_skills: keys
     })
-    plannedT3Summary.value = r.data?.t3_summary || []
-  } catch {
-    plannedT3Summary.value = []
+    if (request !== materialRequest) return
+    if (response.data.error) throw new Error(response.data.error)
+    planMaterials.value = response.data.material_summary
+  } catch (error) {
+    if (request === materialRequest) {
+      planMaterials.value = null
+      materialsError.value = error.response?.data?.error || '材料计算失败，请刷新后重试'
+    }
+  } finally {
+    if (request === materialRequest) materialsLoading.value = false
   }
 }
 
 watch(
-  plan,
+  [plan, planStatus, () => store.recommendations],
   () => {
-    if (store.recommendations.length) refreshT3Summary()
+    ++materialRequest
+    clearTimeout(materialTimer)
+    materialsLoading.value = !!Object.values(plan.value).some(Boolean)
+    materialTimer = setTimeout(refreshT3Summary, 200)
   },
   { deep: true }
 )
+onUnmounted(() => {
+  ++materialRequest
+  clearTimeout(materialTimer)
+})
 
 // ─── 工具函数 ───
-function chainHas(rec, matId) {
-  return !rec.chain_missing_materials?.some((m) => m.id === matId)
-}
-function currentMissing(rec) {
-  return decomposeT3.value ? rec.chain_missing_t3 || [] : rec.chain_missing_materials || []
-}
 function formatTime(s) {
   const h = Math.floor(s / 3600),
     m = Math.floor((s % 3600) / 60)
@@ -1533,6 +1615,10 @@ const showConfirm = ref(false)
 const cd = reactive({ op: null, rec: null })
 
 function confirmSkill(op, rec) {
+  if (op.mastery_error) {
+    message.warning(op.mastery_error)
+    return
+  }
   cd.op = op
   cd.rec = rec
   showConfirm.value = true
@@ -1541,6 +1627,7 @@ function confirmSkill(op, rec) {
 async function doAddTask() {
   showConfirm.value = false
   const { op, rec } = cd
+  await warnMaterialShortage([planKey(op.char_id, rec.skill_index)])
   if (workshopTrainingWarning(op.name)) message.warning(workshopTrainingWarning(op.name))
   if (trainingWarning(op.name)) message.warning(trainingWarning(op.name))
   try {
@@ -1576,13 +1663,6 @@ onMounted(async () => {
       console.error('mount: loadRoute failed', e)
     }
   }
-  allOperatorList.value = store.recommendations.map((op) => ({
-    char_id: op.char_id,
-    name: op.name,
-    rarity: op.rarity,
-    profession: op.profession,
-    recommendations: op.recommendations
-  }))
   await refreshT3Summary()
 })
 

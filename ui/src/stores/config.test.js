@@ -13,6 +13,30 @@ afterEach(() => {
 })
 
 describe('workshop config autosave', () => {
+  it('defaults T2 protection off and saves it without changing manual materials', async () => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const loaded = ref(false)
+    const app = createApp({})
+    app.use(pinia)
+    app.provide('loaded', loaded)
+    store = app.runWithContext(() => useConfigStore())
+    for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
+    expect(store.workshop_protect_t2_device_rock).toBe(false)
+    const manual = [{ operator: '空爆', items: [{ item_names: ['固源岩组', '异铁组'] }] }]
+    store.workshop_manual_settings = manual
+    axios.post.mockResolvedValue({ data: {} })
+    loaded.value = true
+    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1))
+    store.workshop_protect_t2_device_rock = true
+    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledTimes(2))
+    expect(axios.post.mock.calls[1][1]).toMatchObject({
+      workshop_protect_t2_device_rock: true,
+      workshop_manual_settings: manual
+    })
+    loaded.value = false
+  })
+
   it('saves turning off crafter recovery priority without changing workshop selections', async () => {
     pinia = createPinia()
     setActivePinia(pinia)
@@ -144,5 +168,36 @@ describe('weekly plan inventory config', () => {
     expect(store.maa_weekly_plan_active).toBe('常规')
     expect(store.maa_stage_inventory_enable).toBe(false)
     expect(store.maa_stage_limit_rules).toEqual(targetInventory.limit_rules)
+  })
+})
+
+describe('native Android setting ownership', () => {
+  it('omits native idle, screenshot and theme fields only on Android', () => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const app = createApp({})
+    app.use(pinia)
+    app.provide('loaded', ref(false))
+    store = app.runWithContext(() => useConfigStore())
+    for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
+    store.return_home_when_idle = true
+    store.screenshot = 2.5
+    store.theme = 'dark'
+    store.runtime_platform = 'android'
+    expect(store.build_config()).not.toHaveProperty('return_home_when_idle')
+    expect(store.build_config()).not.toHaveProperty('exit_game_when_idle')
+    expect(store.build_config()).not.toHaveProperty('close_simulator_when_idle')
+    expect(store.build_config()).not.toHaveProperty('screenshot')
+    expect(store.build_config()).not.toHaveProperty('theme')
+    for (const platform of ['linux', 'windows', 'darwin']) {
+      store.runtime_platform = platform
+      expect(store.build_config()).toMatchObject({
+        return_home_when_idle: true,
+        exit_game_when_idle: false,
+        close_simulator_when_idle: false,
+        screenshot: 2.5,
+        theme: 'dark'
+      })
+    }
   })
 })
