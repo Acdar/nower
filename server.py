@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import atexit
 import datetime
 import json
 import mimetypes
@@ -870,6 +869,30 @@ def stage_inventory_rules():
     }
 
 
+def _describe_task(task) -> str:
+    """把队首任务压成一行可读名称，供 /status 的倒计时类客户端显示。
+
+    plan 非空时展开成「房间:干员,干员」，多个房间用「 | 」连接；否则退回
+    任务类型名（format() 已把空任务换成 meta_data），与调度器日志口径一致。
+    """
+    try:
+        formatted = task.format()
+    except Exception:  # 任务对象异常不应拖垮状态接口
+        logger.exception("生成任务名称失败")
+        return ""
+    plan = getattr(formatted, "plan", None) or {}
+    if plan:
+        parts = []
+        for room, operators in plan.items():
+            if isinstance(operators, (list, tuple)):
+                names = ", ".join(str(name) for name in operators if name)
+            else:
+                names = str(operators)
+            parts.append(f"{room}:{names}" if names else str(room))
+        return " | ".join(parts)
+    return str(getattr(formatted, "type", "") or "")
+
+
 @app.route("/status")
 def get_status():
     response = {
@@ -877,6 +900,7 @@ def get_status():
         "plan_condition": [],
         "status": "stopped",
         "next_task_time": None,
+        "next_task_name": None,
         "remaining_seconds": None,
     }
     if mower_thread and mower_thread.is_alive():
@@ -902,6 +926,7 @@ def get_status():
                         base_scheduler.tasks[0].time - datetime.datetime.now()
                     ).total_seconds()
                 )
+                response["next_task_name"] = _describe_task(base_scheduler.tasks[0])
     return response
 
 
