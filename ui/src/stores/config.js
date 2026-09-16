@@ -16,6 +16,10 @@ export const useConfigStore = defineStore('config', () => {
   const free_blacklist = ref([])
   const maa_adb_path = ref('')
   const maa_enable = ref(false)
+  const stage_plan_enable = ref(true)
+  const stage_plan_runner = ref('maa')
+  const maa_mall_enable = ref(true)
+  const maa_mall_mode = ref('maa')
   const maa_path = ref('')
   const maa_mirrorchyan_token = ref('')
   const maa_update_channel = ref('stable')
@@ -50,6 +54,7 @@ export const useConfigStore = defineStore('config', () => {
   const package_type = ref('official')
   const reload_room = ref('')
   const run_order_delay = ref(10)
+  const low_frame_rate_mode = ref(false)
   const dorm_order = ref([])
   const start_automatically = ref(false)
   const maa_mall_buy = ref('')
@@ -413,6 +418,8 @@ export const useConfigStore = defineStore('config', () => {
   async function load_config() {
     const response = await axios.get(`${import.meta.env.VITE_HTTP_URL}/conf`)
     runtime_platform.value = response.data.runtime_platform || ''
+    low_frame_rate_mode.value =
+      response.data.low_frame_rate_mode ?? runtime_platform.value === 'android'
     adb.value = response.data.adb
     drone_count_limit.value = response.data.drone_count_limit
     drone_room.value = response.data.drone_room
@@ -423,6 +430,16 @@ export const useConfigStore = defineStore('config', () => {
       response.data.free_blacklist == '' ? [] : response.data.free_blacklist.split(',')
     maa_adb_path.value = response.data.maa_adb_path
     maa_enable.value = response.data.maa_enable != 0
+    stage_plan_enable.value =
+      response.data.stage_plan_enable !== undefined
+        ? Boolean(response.data.stage_plan_enable)
+        : response.data.maa_enable != 0
+    stage_plan_runner.value = response.data.stage_plan_runner === 'mower' ? 'mower' : 'maa'
+    maa_mall_enable.value =
+      response.data.maa_mall_enable !== undefined
+        ? Boolean(response.data.maa_mall_enable)
+        : response.data.maa_enable != 0
+    maa_mall_mode.value = response.data.maa_mall_mode === 'mower' ? 'mower' : 'maa'
     maa_path.value = response.data.maa_path
     maa_mirrorchyan_token.value = response.data.maa_mirrorchyan_token || ''
     maa_update_channel.value = response.data.maa_update_channel === 'beta' ? 'beta' : 'stable'
@@ -554,8 +571,15 @@ export const useConfigStore = defineStore('config', () => {
       enable_party: enable_party.value ? 1 : 0,
       leifeng_mode: leifeng_mode.value ? 1 : 0,
       free_blacklist: free_blacklist.value.join(','),
-      maa_adb_path: maa_adb_path.value,
-      maa_enable: maa_enable.value ? 1 : 0,
+      maa_enable:
+        (stage_plan_enable.value && stage_plan_runner.value === 'maa') ||
+        (maa_mall_enable.value && maa_mall_mode.value === 'maa')
+          ? 1
+          : 0,
+      stage_plan_enable: stage_plan_enable.value,
+      stage_plan_runner: stage_plan_runner.value,
+      maa_mall_enable: maa_mall_enable.value,
+      maa_mall_mode: maa_mall_mode.value,
       maa_path: maa_path.value,
       maa_mirrorchyan_token: maa_mirrorchyan_token.value,
       maa_update_channel: maa_update_channel.value,
@@ -584,6 +608,7 @@ export const useConfigStore = defineStore('config', () => {
       custom_smtp_server: custom_smtp_server.value,
       reload_room: reload_room.value.join(','),
       run_order_delay: run_order_delay.value,
+      low_frame_rate_mode: low_frame_rate_mode.value,
       dorm_order: dorm_order.value.join(','),
       start_automatically: start_automatically.value,
       maa_mall_buy: maa_mall_buy.value.join(','),
@@ -760,6 +785,10 @@ export const useConfigStore = defineStore('config', () => {
     free_blacklist,
     maa_adb_path,
     maa_enable,
+    stage_plan_enable,
+    stage_plan_runner,
+    maa_mall_enable,
+    maa_mall_mode,
     maa_path,
     maa_mirrorchyan_token,
     maa_update_channel,
@@ -793,6 +822,7 @@ export const useConfigStore = defineStore('config', () => {
     package_type,
     reload_room,
     run_order_delay,
+    low_frame_rate_mode,
     dorm_order,
     start_automatically,
     maa_mall_buy,

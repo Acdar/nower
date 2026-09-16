@@ -170,7 +170,7 @@ def simulate(saved, restart_after_mood_read=False):
                 base_scheduler.op_data.operators[k].dorm_recovery_room = getattr(
                     v, "dorm_recovery_room", ""
                 )
-            base_scheduler.op_data.dorm = saved["dorm"]
+            base_scheduler.op_data.restore_dorm_state(saved["dorm"])
             base_scheduler.party_time = saved["party_time"]
             base_scheduler.daily_visit_friend = saved["daily_visit_friend"]
             base_scheduler.daily_report = saved["daily_report"]
@@ -277,9 +277,10 @@ def simulate(saved, restart_after_mood_read=False):
                         from arknights_mower.utils.scheduler_task import scheduling
 
                         scheduling(base_scheduler.tasks)
-                    if config.conf.maa_enable != 1:
+                    if config.conf.should_run_mower_stage_plan:
                         base_scheduler.mower_plan_solver()
-                    elif config.conf.maa_enable == 1:
+
+                    if base_scheduler.has_maa_tasks():
                         subject = f"下次任务在{base_scheduler.tasks[0].time.strftime('%H:%M:%S')}"
                         context = f"下一次任务:{base_scheduler.tasks[0].plan}"
                         logger.info(context)
