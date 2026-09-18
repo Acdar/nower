@@ -119,7 +119,7 @@ class SKLand:
                     logger.info(f"{role.get('nickName')}获得了{awards_result}")
         if len(self.reward) > 0 or len(self.reward_ef) > 0:
             return self.record_log()
-        if self.all_recorded and self.all_recorded_ef:
+        if self.all_recorded:
             return True
         return False
 
@@ -225,22 +225,25 @@ class SKLand:
                     res.append("账号{}配置不完整，请检查".format(item.account))
                     return res
             if bool(self.start()):
-                for info in self.reward:
-                    res.append(
-                        "{}{}签到成功".format(
-                            info.get("nickname") or info.get("nickName"),
-                            info.get("game"),
+                if self.reward:
+                    for info in self.reward:
+                        res.append(
+                            "{}{}签到成功".format(
+                                info.get("nickname") or info.get("nickName"),
+                                info.get("game"),
+                            )
                         )
-                    )
-                if not self.test_writecsv:
-                    res.append(
-                        "签到数据写入失败，可能是根目录下的tmp文件夹不存在或tmp/skland.csv被占用"
-                    )
-                    self.test_writecsv = True
+                    if not self.test_writecsv:
+                        res.append("签到数据写入失败")
+                        self.test_writecsv = True
+                else:
+                    res.append("勾选的账号今天均已签到~")
+                return res
+            else:
+                res.append("签到未完成，请检查账号配置或网络")
                 return res
         except Exception as e:
             msg = "测试出错-{}".format(e)
             logger.exception(msg)
             res.append(msg)
-        res.append("勾选的账号今天均已签到~")
         return res

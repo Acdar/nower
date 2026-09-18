@@ -296,7 +296,15 @@ def simulate(saved, restart_after_mood_read=False):
                         # #884 重构把这处等待当成死代码删除后回归）。
                         base_scheduler.rest_until_next_task()
 
-                elif remaining_time > 0:
+                if len(base_scheduler.tasks) > 0:
+                    base_scheduler.tasks.sort(key=lambda x: x.time, reverse=False)
+                    remaining_time = (
+                        base_scheduler.tasks[0].time - datetime.now()
+                    ).total_seconds()
+                else:
+                    remaining_time = 0
+
+                if remaining_time > 0:
                     now_time = datetime.now().time()
                     try:
                         min_time = datetime.strptime(
