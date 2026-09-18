@@ -286,6 +286,15 @@ def simulate(saved, restart_after_mood_read=False):
                         logger.info(context)
                         logger.info(subject)
                         base_scheduler.maa_plan_solver()
+                    elif (
+                        base_scheduler.tasks
+                        and base_scheduler.tasks[0].time > datetime.now()
+                    ):
+                        # 没有 MAA 任务时也必须在这里休息到下一个任务。否则主循环会
+                        # 立刻再次调用 run()，而 run() 每轮都会补一个「纠错」空任务，
+                        # 导致 mower 在基建全局视角反复空转（c9014796 修过的旧问题，
+                        # #884 重构把这处等待当成死代码删除后回归）。
+                        base_scheduler.rest_until_next_task()
 
                 elif remaining_time > 0:
                     now_time = datetime.now().time()

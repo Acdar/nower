@@ -304,9 +304,19 @@ class BaseMixin:
         )
 
     def wait_for_agent_page(
-        self, *, full_scan=True, train=False, before=None, observation=None
+        self,
+        *,
+        full_scan=True,
+        train=False,
+        before=None,
+        observation=None,
+        attempts=6,
     ):
-        """先复核当前页；滑动后不把连续两张相同的旧画面当成新页。"""
+        """先复核当前页；滑动后不把连续两张相同的旧画面当成新页。
+
+        attempts 只在明确知道画面变化幅度的场景（如翻页后的停稳确认）
+        才调小，默认仍保留完整的 6 次预算。
+        """
         read = self.agent_page_reader(full_scan=full_scan, train=train)
         previous = (
             observation.consume(self.recog, full_scan=full_scan, train=train)
@@ -316,7 +326,7 @@ class BaseMixin:
         stable = False
         ret = []
         capture_time = 0
-        for attempt in range(6):
+        for attempt in range(attempts):
             if attempt:
                 self.wait_for_next_observation(capture_time)
             else:
@@ -364,7 +374,18 @@ class BaseMixin:
                 raise AgentSelectionNotReady("可识别干员不足，返回房间重试")
             start, end = page[-2][1][0], page[0][1][0]
             self.swipe_noinertia(start, (end[0] - start[0], 0))
-            return (1, None) if return_page else 1
+            # 指尖离开后列表仍会滑行；翻到最后几页、列表被边界夹住时还会
+            # 回弹到边界。此时把画面里的坐标直接交给调用方，点击就会落在
+            # 「拉的时候」的旧位置，必须等整页停稳后再交出稳定页。
+            # 普通设备帧率高，两帧一致即可确认停稳，不需要适配路径的预算。
+            actual = self.wait_for_agent_page(
+                full_scan=full_scan, train=train, attempts=3
+            )
+            if return_page:
+                return 1, self.observe_agent_page(
+                    actual, full_scan=full_scan, train=train
+                )
+            return 1
         columns = sorted({scope[0][0] for _, scope in page})
         if len(columns) < 2:
             raise AgentSelectionNotReady("可识别干员列不足，返回房间重试")
@@ -403,7 +424,12 @@ class BaseMixin:
     ):
         if not self.low_frame_rate_mode:
             return self._scan_agent_fast(
-                agent, error_count, max_agent_count, full_scan, train
+                agent,
+                error_count,
+                max_agent_count,
+                full_scan,
+                train,
+                observation,
             )
         # 无目标时仍返回已复核的页面供调用方判断，但不进行点击。
         ret = self.wait_for_agent_page(
@@ -425,25 +451,35 @@ class BaseMixin:
             # 点击可能改变卡片位置；下一名必须从新页面重新定位。
             ret = self.wait_for_agent_page(full_scan=full_scan, train=train)
 
-    def _scan_agent_fast(self, agent, error_count, max_agent_count, full_scan, train):
+    def _scan_agent_fast(
+        self, agent, error_count, max_agent_count, full_scan, train, observation=None
+    ):
         """普通设备沿用单帧批量选人及缩小扫描区域的识别重试。"""
-        try:
-            self.recog.update()
-            while self.find("connecting"):
-                self.sleep()
-            ret = (
-                operator_list_train(self.recog.img)
-                if train
-                else operator_list(self.recog.img, full_scan=full_scan)
+        if observation is not None:
+            # 刚翻页：点击坐标必须取自停稳后的画面。翻页时列表可能仍在
+            # 滑行、末页被边界夹住时还会回弹，沿用旧帧就会点到拖动中的
+            # 位置，因此这里不再退回单帧点击，读不到稳定页时交给外层重试。
+            ret = self.wait_for_agent_page(
+                full_scan=full_scan, train=train, observation=observation
             )
-        except MowerExit:
-            raise
-        except Exception:
-            if error_count >= 2:
+        else:
+            try:
+                self.recog.update()
+                while self.find("connecting"):
+                    self.sleep()
+                ret = (
+                    operator_list_train(self.recog.img)
+                    if train
+                    else operator_list(self.recog.img, full_scan=full_scan)
+                )
+            except MowerExit:
                 raise
-            return self._scan_agent_fast(
-                agent, error_count + 1, max_agent_count, False, train
-            )
+            except Exception:
+                if error_count >= 2:
+                    raise
+                return self._scan_agent_fast(
+                    agent, error_count + 1, max_agent_count, False, train
+                )
         selected = []
         for name, scope in ret:
             if name and name in agent:

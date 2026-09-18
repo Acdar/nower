@@ -175,6 +175,22 @@ def test_fast_scan_retains_narrow_region_retry(monkeypatch):
     solver.tap.assert_called_once()
 
 
+def test_fast_swipe_settles_page_before_clicking(monkeypatch):
+    """普通模式翻页后不能沿用拖动中的坐标：点击只能取自停稳后的页。"""
+    monkeypatch.setattr(config.conf, "low_frame_rate_mode", False)
+    before = page(("杜林", "芬", "香草", "炎熔"))
+    gliding = page(("杜林", "芬", "香草", "炎熔"), offset=-430)
+    settled = page()
+    solver = solver_for(monkeypatch, [gliding, settled, settled, settled, settled])
+    moved, observed = solver.swipe_agent_page(before, ["砾"], return_page=True)
+    assert moved == 1
+    # 交给调用方的必须是停稳后的页，而不是手指离开时的画面。
+    assert observed.page[0][1] == tuple(map(tuple, settled[0][1]))
+    assert solver.recog.captures == 3
+    assert solver.scan_agent(["砾"], observation=observed)[0] == ["砾"]
+    solver.tap.assert_called_once_with(settled[0][1], interval=0)
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_stop_is_checked_by_real_tap_in_both_modes(monkeypatch, enabled):
     monkeypatch.setattr(config.conf, "low_frame_rate_mode", enabled)
@@ -238,6 +254,11 @@ def test_fast_training_search_stops_at_unchanged_end_page(monkeypatch):
     )
     solver.swipe_noinertia = MagicMock()
     solver.verify_agent = MagicMock()
+    # 翻页后必然先确认整页停稳（见 test_fast_swipe_settles_page_before_clicking），
+    # 本用例只关心调用方在整页未变化时的滑动预算。
+    settled = page(("杜林", "芬", "苍苔", "炎熔"))
+    solver.wait_for_agent_page = MagicMock(return_value=settled)
+    solver.observe_agent_page = MagicMock(return_value=None)
     with pytest.raises(AgentSelectionNotReady, match="末尾"):
         solver.choose_train_ope("砾")
     assert solver.swipe_noinertia.call_count == 3
