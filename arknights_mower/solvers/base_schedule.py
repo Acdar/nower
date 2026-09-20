@@ -209,6 +209,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.global_plan = {}
         self.local_operation_followup_time = None
         self.restart_after_mood_read = False
+        # 无运行缓存启动时，current_room 为空仅表示“尚未读取”，不能据此触发
+        # is_working() == False 一类副表条件。首次心情/房间扫描完成后再解除。
+        self.defer_backup_plan_until_mood_read = False
 
     def find_next_task(
         self,
@@ -306,7 +309,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         if self.op_data is None or self.op_data.operators is None:
             self.initialize_operators()
         self.op_data.correct_dorm()
-        self.backup_plan_solver(PlanTriggerTiming.BEGINNING)
+        if not getattr(self, "defer_backup_plan_until_mood_read", False):
+            self.backup_plan_solver(PlanTriggerTiming.BEGINNING)
         logMsg = "||".join([str(t) for t in self.tasks])
         logger.debug("当前任务: " + logMsg)
         save_log(logMsg, "{}" if not self.task else str(self.task), level="INFO")
@@ -854,6 +858,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.skip(["planned", "todo_task", "collect_notification"])
                 else:
                     mood_result = self.agent_get_mood(skip_dorm=True)
+                    # agent_get_mood 已读取所有需要刷新的房间；从此 current_room
+                    # 可以用于副表条件。若配置了读取后重启，重启流程会用这份新缓存
+                    # 在 simulate() 初始化阶段统一刷新副表。
+                    self.defer_backup_plan_until_mood_read = False
                     if self.restart_after_mood_read:
                         self.restart_after_mood_read = False
                         logger.info("缓存清零重启后心情读取完成，准备载入心情数据重启")
@@ -5935,7 +5943,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 f"仓库扫描: 已为 {dispatched} 个材料足够的空闲专精计划安排开始训练"
             )
 
-    def _idle_sleep(self, remaining_time):
+    def _idle_sleep(self, remaining_time, allow_wakeup=True):
         """任务之间真正的休眠——全工程里唯一维护 `sleeping` 状态的地方。
 
         所有「等到下一个任务」的等待都必须经过这里，这样 /status 读到的
@@ -5944,14 +5952,15 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         #141：web 一键专精派发 now 任务后设 `config.wake_scheduler` 事件打断休眠，
         让调度器下一轮立即执行新任务（不依赖 csleep——csleep 全工程共用，不能全局
         加唤醒检查）。轮询每 ~1s，保持 csleep 的停止检查粒度；结束时照常 recog.update
-        刷新场景缓存（原 self.sleep 结尾行为）。
+        刷新场景缓存（原 self.sleep 结尾行为）。维护等待传 allow_wakeup=False，避免普通
+        配置唤醒导致维护期间提前执行任务；停止信号仍由 csleep 正常响应。
         """
         self.sleeping = True
         try:
             end_time = datetime.now() + timedelta(seconds=remaining_time)
             while datetime.now() < end_time:
                 refresh_resource_at_boundary()
-                if config.wake_scheduler.is_set():
+                if allow_wakeup and config.wake_scheduler.is_set():
                     config.wake_scheduler.clear()
                     break
                 csleep(min(1, (end_time - datetime.now()).total_seconds()))

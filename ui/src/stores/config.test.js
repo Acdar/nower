@@ -243,11 +243,12 @@ describe('low frame rate adaptation', () => {
     await vi.waitFor(() => expect(axios.post).toHaveBeenCalled())
     store.low_frame_rate_mode = !expected
     await nextTick()
-    await vi.waitFor(() => expect(axios.post.mock.lastCall[1].low_frame_rate_mode).toBe(!expected))
+    const savedValue = store.performance_mode === 'auto' ? expected : !expected
+    await vi.waitFor(() => expect(axios.post.mock.lastCall[1].low_frame_rate_mode).toBe(savedValue))
     loaded.value = false
     response.low_frame_rate_mode = axios.post.mock.lastCall[1].low_frame_rate_mode
     await store.load_config()
-    expect(store.low_frame_rate_mode).toBe(!expected)
+    expect(store.low_frame_rate_mode).toBe(savedValue)
   })
 
   it('loads and saves stage plan and mall settings with backward-compatible defaults', async () => {
@@ -331,5 +332,27 @@ describe('low frame rate adaptation', () => {
     expect(store.stage_plan_runner).toBe('mower')
     expect(store.maa_mall_enable).toBe(false)
     expect(store.maa_mall_mode).toBe('mower')
+  })
+})
+
+describe('version update mood policy', () => {
+  it('defaults to 80% and 12 hours and serializes user edits', () => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const app = createApp({})
+    app.use(pinia)
+    app.provide('loaded', ref(false))
+    store = app.runWithContext(() => useConfigStore())
+    for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
+
+    expect(store.version_update_resting_threshold).toBe(80)
+    expect(store.version_update_threshold_advance_hours).toBe(12)
+    store.version_update_resting_threshold = 85
+    store.version_update_threshold_advance_hours = 18
+
+    expect(store.build_config()).toMatchObject({
+      version_update_resting_threshold: 0.85,
+      version_update_threshold_advance_hours: 18
+    })
   })
 })
