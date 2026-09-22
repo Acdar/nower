@@ -1,3 +1,4 @@
+import copy
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -8,7 +9,10 @@ from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
     find_next_task,
+    plan_metadata,
+    rebalance_plan_swap_dorms,
     scheduling,
+    try_add_release_dorm,
     try_reorder,
 )
 
@@ -207,9 +211,10 @@ class TestScheduling(unittest.TestCase):
 
         # op_data.config.ope_resting_priority=["森蚺","夕"]
         plan = try_reorder(op_data, {})
-        self.assertEqual(len(plan), 3)
+        self.assertEqual(len(plan), 2)
         self.assertEqual(plan["dormitory_1"][2], "夕")
-        self.assertEqual(plan["dormitory_1"][4], "凯尔希")
+        self.assertEqual(plan["dormitory_1"][3], "森蚺")
+        self.assertEqual(plan["dormitory_1"][4], "见行者")
 
     def test_reorder_3(self):
         # 如果高优都占了，则不动
@@ -224,11 +229,201 @@ class TestScheduling(unittest.TestCase):
         try_reorder(op_data, {})
         plan = try_reorder(op_data, {})
         self.assertEqual(plan["dormitory_1"][2], "夕")
-        self.assertEqual(plan["dormitory_1"][3], "见行者")
+        self.assertEqual(plan["dormitory_1"][3], "焰尾")
+        self.assertEqual(plan["dormitory_2"][2], "Current")
+
+    def add_dorm_overlay_backup(self, op_data):
+        op_data.global_plan["default_plan"].config.free_room = True
+        backup = Plan(
+            {
+                "dormitory_1": [
+                    Room("Current", "", []),
+                    Room("Current", "", []),
+                    Room("真言", "", []),
+                    Room("Current", "", []),
+                    Room("Current", "", []),
+                ]
+            },
+            PlanConfig("", "", "", experimental_dorm_logic=True),
+        )
+        op_data.global_plan["backup_plans"] = [backup]
+        op_data.backup_plans = [backup]
+        self.assertIsNone(op_data.swap_plan([False], refresh=True))
+        return next(
+            dorm for dorm in op_data.dorm if dorm.position == ("dormitory_1", 2)
+        )
+
+    @staticmethod
+    def task_writes_slot(tasks, room, index):
+        for task in tasks:
+            room_plan = task.plan.get(room)
+            if room_plan and index < len(room_plan) and room_plan[index] != "Current":
+                return True
+        return False
+
+    def test_effective_free_slot_round_trip_and_capacity(self):
+        op_data = self.init_opdata()
+        target = self.add_dorm_overlay_backup(op_data)
+        before_low = op_data.available_free("low")
+
+        self.assertTrue(op_data.is_effective_free_slot(target))
+        self.assertIsNone(op_data.swap_plan([True], refresh=True))
+        self.assertFalse(op_data.is_effective_free_slot(target))
+        self.assertEqual(before_low - 1, op_data.available_free("low"))
+
+        self.assertIsNone(op_data.swap_plan([False], refresh=True))
+        self.assertTrue(op_data.is_effective_free_slot(target))
+        self.assertEqual(before_low, op_data.available_free("low"))
+
+    def test_active_high_resting_migrates_when_backup_removes_bed(self):
+        op_data = self.init_opdata()
+        target = self.add_dorm_overlay_backup(op_data)
+        op_data.operators["红"].current_room = ""
+        op_data.operators["红"].current_index = -1
+        high = op_data.operators["夕"]
+        high.current_room = "dormitory_1"
+        high.current_index = 2
+        target.name = "夕"
+        target.time = datetime.now() + timedelta(hours=1)
+
+        self.assertEqual(1, op_data.active_high_resting_count())
+        self.assertIsNone(op_data.swap_plan([True], refresh=True))
+        migration = rebalance_plan_swap_dorms(op_data)
+        self.assertTrue(migration)
+        self.assertEqual(1, op_data.active_high_resting_count())
+        self.assertIsNone(op_data.swap_plan([False], refresh=True))
+        rebalance_plan_swap_dorms(op_data)
+        self.assertEqual(1, op_data.active_high_resting_count())
+
+    def test_backup_removed_bed_is_restored_and_occupant_is_migrated(self):
+        op_data = self.init_opdata()
+        target = self.add_dorm_overlay_backup(op_data)
+        high = op_data.operators["夕"]
+        high.current_room, high.current_index = target.position
+        target.name = "夕"
+        target.time = datetime.now() + timedelta(hours=1)
+
+        self.assertIsNone(op_data.swap_plan([True], refresh=True))
+        self.assertFalse(
+            any(dorm.position == ("dormitory_1", 2) for dorm in op_data.dorm)
+        )
+        plan = rebalance_plan_swap_dorms(op_data)
+        self.assertEqual("真言", plan["dormitory_1"][2])
+        destination = next(dorm for dorm in op_data.dorm if dorm.name == "夕")
+        room, index = destination.position
+        self.assertEqual("夕", plan[room][index])
+        self.assertEqual(target.time, destination.time)
+
+    def test_single_recovery_target_stays_in_room_when_its_bed_closes(self):
+        op_data = self.init_opdata()
+        closing = self.add_dorm_overlay_backup(op_data)
+        target = op_data.operators["麒麟R夜刀"]
+        target.current_room, target.current_index = closing.position
+        target.dorm_recovery_room = "dormitory_1"
+        target.dorm_recovery_fixed = ("塑心", "冰酿")
+        closing.name = target.name
+        closing.time = datetime.now() + timedelta(hours=1)
+        previous = copy.deepcopy(op_data.dorm)
+
+        self.assertIsNone(op_data.swap_plan([True], refresh=True))
+        plan = rebalance_plan_swap_dorms(op_data, previous)
+
+        destination = next(dorm for dorm in op_data.dorm if dorm.name == target.name)
+        self.assertEqual(destination.position[0], "dormitory_1")
+        self.assertEqual(target.dorm_recovery_room, "dormitory_1")
+        self.assertEqual(plan["dormitory_1"][2], "真言")
+        self.assertEqual(plan["dormitory_1"][destination.position[1]], target.name)
+
+    def test_single_recovery_move_to_other_room_requests_recovery_again(self):
+        op_data = self.init_opdata()
+        target_bed = op_data.dorm[0]
+        target = op_data.operators["麒麟R夜刀"]
+        target.current_room, target.current_index = target_bed.position
+        target.dorm_recovery_room = target_bed.position[0]
+        target.dorm_recovery_fixed = ("塑心", "冰酿")
+        target_bed.name = target.name
+        target_bed.time = datetime.now() + timedelta(hours=1)
+        previous = copy.deepcopy(op_data.dorm)
+        op_data.dorm = [
+            bed for bed in op_data.dorm if bed.position[0] != target.current_room
+        ]
+
+        plan = rebalance_plan_swap_dorms(op_data, previous)
+
+        destination = next(dorm for dorm in op_data.dorm if dorm.name == target.name)
+        self.assertNotEqual(destination.position[0], target.current_room)
+        self.assertEqual(target.dorm_recovery_room, "")
+        self.assertEqual(
+            plan[destination.position[0]][destination.position[1]], target.name
+        )
+
+    def test_single_recovery_target_is_exempt_from_capacity_drop(self):
+        op_data = self.init_opdata()
+        protected_bed, preferred_bed = op_data.dorm[:2]
+        protected = op_data.operators["麒麟R夜刀"]
+        protected.current_room, protected.current_index = protected_bed.position
+        protected.dorm_recovery_room = protected_bed.position[0]
+        protected.dorm_recovery_fixed = ("塑心", "冰酿")
+        protected.mood = 23
+        protected.time_stamp = datetime.now()
+        protected_bed.name = protected.name
+        preferred = op_data.operators["夕"]
+        preferred.current_room, preferred.current_index = preferred_bed.position
+        preferred.mood = 1
+        preferred.time_stamp = datetime.now()
+        preferred_bed.name = preferred.name
+        previous = copy.deepcopy(op_data.dorm[:2])
+        op_data.dorm = [protected_bed]
+
+        rebalance_plan_swap_dorms(op_data, previous)
+
+        self.assertEqual(op_data.dorm[0].name, protected.name)
+        self.assertEqual(protected.dorm_recovery_room, protected.current_room)
+
+    def test_backup_overlay_blocks_task_rebuild_and_free_room_writes(self):
+        op_data = self.init_opdata()
+        target = self.add_dorm_overlay_backup(op_data)
+        now = datetime.now()
+        red = op_data.operators["红"]
+        red.current_room = "dormitory_1"
+        red.current_index = 2
+        red.mood = red.upper_limit
+        red.time_stamp = now
+        target.name = "红"
+        target.time = now + timedelta(hours=1)
+
+        waiting = op_data.operators["陈"]
+        waiting.current_room = ""
+        waiting.current_index = -1
+        waiting.mood = 1
+        waiting.time_stamp = now
+
+        self.assertIsNone(op_data.swap_plan([True], refresh=True))
+
+        rebuilt = plan_metadata(op_data, [])
+        self.assertFalse(self.task_writes_slot(rebuilt, "dormitory_1", 2))
+
+        release_tasks = []
+        try_add_release_dorm(
+            {"meeting": ["红"]}, now + timedelta(hours=2), op_data, release_tasks
+        )
+        self.assertFalse(self.task_writes_slot(release_tasks, "dormitory_1", 2))
+
+        free_room_tasks = []
+        try_add_release_dorm({}, None, op_data, free_room_tasks)
+        self.assertFalse(self.task_writes_slot(free_room_tasks, "dormitory_1", 2))
+
+        self.assertIsNone(op_data.swap_plan([False], refresh=True))
+        restored_tasks = []
+        try_add_release_dorm({}, None, op_data, restored_tasks)
+        self.assertTrue(self.task_writes_slot(restored_tasks, "dormitory_1", 2))
 
     def init_opdata(self):
         agent_base_config = PlanConfig(
-            "稀音,黑键,伊内丝,承曦格雷伊", "稀音,柏喙,伊内丝", "见行者"
+            "稀音,黑键,伊内丝,承曦格雷伊",
+            "稀音,柏喙,伊内丝",
+            "见行者",
+            experimental_dorm_logic=True,
         )
         plan_config = {
             "central": [

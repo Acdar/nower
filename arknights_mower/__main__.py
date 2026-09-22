@@ -1,3 +1,4 @@
+import copy
 import os
 from datetime import datetime, timedelta
 from threading import Lock, Timer
@@ -405,7 +406,16 @@ def simulate(saved, restart_after_mood_read=False):
                 base_scheduler.op_data.operators[k].dorm_recovery_room = getattr(
                     v, "dorm_recovery_room", ""
                 )
+                base_scheduler.op_data.operators[k].resting_from_train = getattr(
+                    v, "resting_from_train", False
+                )
+                base_scheduler.op_data.operators[k].dorm_recovery_fixed = getattr(
+                    v, "dorm_recovery_fixed", ()
+                )
             base_scheduler.op_data.restore_dorm_state(saved["dorm"])
+            base_scheduler.op_data.facility_states = copy.deepcopy(
+                saved.get("facility_states", {})
+            )
             base_scheduler.party_time = saved["party_time"]
             base_scheduler.daily_visit_friend = saved["daily_visit_friend"]
             base_scheduler.daily_report = saved["daily_report"]
@@ -503,10 +513,26 @@ def simulate(saved, restart_after_mood_read=False):
                         from arknights_mower.utils.scheduler_task import scheduling
 
                         scheduling(base_scheduler.tasks)
-                    if config.conf.should_run_mower_stage_plan:
+                    if len(base_scheduler.tasks) > 0:
+                        base_scheduler.tasks.sort(key=lambda x: x.time, reverse=False)
+                        remaining_time = (
+                            base_scheduler.tasks[0].time - datetime.now()
+                        ).total_seconds()
+                    else:
+                        remaining_time = 0
+
+                    if remaining_time > 0 and config.conf.should_run_mower_stage_plan:
                         base_scheduler.mower_plan_solver()
 
-                    if base_scheduler.has_maa_tasks():
+                    if len(base_scheduler.tasks) > 0:
+                        base_scheduler.tasks.sort(key=lambda x: x.time, reverse=False)
+                        remaining_time = (
+                            base_scheduler.tasks[0].time - datetime.now()
+                        ).total_seconds()
+                    else:
+                        remaining_time = 0
+
+                    if remaining_time >= 540 and base_scheduler.has_maa_tasks():
                         subject = f"下次任务在{base_scheduler.tasks[0].time.strftime('%H:%M:%S')}"
                         context = f"下一次任务:{base_scheduler.tasks[0].plan}"
                         logger.info(context)
@@ -576,7 +602,8 @@ def simulate(saved, restart_after_mood_read=False):
 
                 if save_current_state():
                     return result
-                logger.warning("心情数据保存失败，继续当前Mower流程")
+                logger.warning("心情数据保存失败，直接刷新副表后继续当前Mower流程")
+                base_scheduler.backup_plan_solver()
             reconnect_tries = 0
         except MowerExit:
             return
@@ -592,7 +619,7 @@ def simulate(saved, restart_after_mood_read=False):
             reconnect_tries += 1
             if reconnect_tries < reconnect_max_tries:
                 logger.warning("出现错误.尝试重启Mower")
-                # #84：内层重连循环加次数上限，最后失败抛错而非无限重启
+                # 内层重连循环加次数上限，最后失败抛错而非无限重启
                 retry = 0
                 while retry < reconnect_max_tries:
                     retry += 1

@@ -19,7 +19,6 @@ const {
   performance_effective_mode,
   selection_poll_interval,
   selection_transition_timeout,
-  dorm_order,
   drone_room,
   drone_count_limit,
   drone_interval,
@@ -42,11 +41,14 @@ const {
   screenshot,
   screenshot_interval,
   run_order_grandet_mode,
+  product_switching,
   webview,
   runtime_platform,
   fix_mumu12_adb_disconnect,
   touch_method,
   free_room,
+  experimental_dorm_logic,
+  dorm_order,
   merge_interval,
   fia_fool,
   refresh_backup_plan_after_mood,
@@ -722,6 +724,47 @@ if (return_home_when_idle.value) {
                 跑单前返回主界面以保持登录状态
               </n-checkbox>
             </n-form-item>
+            <n-form-item :show-label="false">
+              <n-checkbox v-model:checked="product_switching.grandet_mode">
+                葛朗台切产物
+                <help-text>
+                  开启时按损耗容限节省无人机，并等待当前一份自然完成；关闭时直接使用足量无人机完成当前一份后切换。
+                </help-text>
+              </n-checkbox>
+            </n-form-item>
+            <n-form-item>
+              <template #label>
+                <span>葛朗台无人机损耗容限</span>
+                <help-text>
+                  允许最后一架无人机浪费的加速时间。默认 30 秒，即当前一份余下至少 2 分 30
+                  秒时使用无人机完成，否则等待自然完成。
+                </help-text>
+              </template>
+              <mower-input-number
+                v-model:value="product_switching.drone_loss_seconds"
+                :disabled="!product_switching.grandet_mode"
+                :min="0"
+                :max="180"
+              >
+                <template #suffix>秒</template>
+              </mower-input-number>
+            </n-form-item>
+            <n-form-item>
+              <template #label>
+                <span>葛朗台切换等待缓冲</span>
+                <help-text>
+                  葛朗台切产物开启时，在计算出的自然完成时间之外额外等待，避免动画或网络延迟导致过早切换。
+                </help-text>
+              </template>
+              <mower-input-number
+                v-model:value="product_switching.waiting_seconds"
+                :disabled="!product_switching.grandet_mode"
+                :min="0"
+                :max="60"
+              >
+                <template #suffix>秒</template>
+              </mower-input-number>
+            </n-form-item>
             <n-form-item>
               <template #label>
                 <span>无人机使用房间</span>
@@ -829,8 +872,33 @@ if (return_home_when_idle.value) {
             <n-form-item :show-label="false">
               <n-checkbox v-model:checked="free_room">
                 宿舍不养闲人
-                <help-text>干员心情回满后，立即释放宿舍空位</help-text>
+                <help-text>
+                  <template v-if="experimental_dorm_logic">
+                    有可用的未满心情干员时，按统一休息优先级和心情替换动态床位中的满心情普通干员，也会补入空床位。
+                    主班按轮休任务回班，固定宿舍岗位不清除；执行时机受任务队列及合并间隔影响。
+                  </template>
+                  <template v-else>
+                    使用稳定版逻辑，把未满心情的空闲干员安排到可释放的动态宿舍床位。
+                    加工名单中的干员是否使用最低休息优先级，由自动加工页面的设置控制。
+                  </template>
+                </help-text>
               </n-checkbox>
+            </n-form-item>
+            <n-form-item :show-label="false">
+              <n-checkbox v-model:checked="experimental_dorm_logic">
+                测试宿舍逻辑
+                <help-text>
+                  默认关闭。开启后使用统一休息优先级、床位抢占保护、绑组宿舍临时
+                  Free、主副表独立房间排序及新版不养闲人逻辑。
+                </help-text>
+              </n-checkbox>
+            </n-form-item>
+            <n-form-item v-if="!experimental_dorm_logic">
+              <template #label>
+                <span>宿舍优先级排序</span>
+                <help-text>稳定版全局设置，对主表及全部副表共同生效。</help-text>
+              </template>
+              <slick-dorm-select v-model="dorm_order"></slick-dorm-select>
             </n-form-item>
             <n-form-item v-if="free_room">
               <template #label>
@@ -856,8 +924,7 @@ if (return_home_when_idle.value) {
               <n-checkbox v-model:checked="refresh_backup_plan_after_mood">
                 读取心情后先刷新副表
                 <help-text
-                  >开启后，仅在缓存清零重启时，Mower
-                  会先读取心情并按载入心情数据模式自动重启，再触发副表和后续排班。</help-text
+                  >默认开启。缓存清零重启时，会先读取心情并按载入心情数据模式自动重启，再触发副表和后续排班；若关闭，则沿用普通首次规划流程。</help-text
                 >
               </n-checkbox>
             </n-form-item>
@@ -868,15 +935,6 @@ if (return_home_when_idle.value) {
                   >勾选后专精时的协助位不会使用设置的专精工具人，在基建排班时会根据排班表来替换训练室的协助位。</help-text
                 >
               </n-checkbox>
-            </n-form-item>
-            <n-form-item>
-              <template #label>
-                <span>宿舍优先级排序</span>
-                <help-text>
-                  <div>正常情况千万不需要，除非你有特殊情况</div>
-                </help-text>
-              </template>
-              <slick-dorm-select v-model="dorm_order"></slick-dorm-select>
             </n-form-item>
             <n-form-item>
               <template #label>
@@ -984,9 +1042,16 @@ if (return_home_when_idle.value) {
     max-width: 600px;
   }
 
-  @media (min-width: 1400px) {
+  @container (min-width: 1180px) {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 5px;
+  }
+
+  @supports not (container-type: inline-size) {
+    @media (min-width: 1400px) {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 5px;
+    }
   }
 }
 
@@ -1072,11 +1137,14 @@ h4 {
 }
 
 .waiting-table {
+  width: 100%;
+  max-width: 100%;
+
   th,
   td {
     padding: 4px;
-    min-width: 70px;
-    width: 100px;
+    min-width: 50px;
+    width: 80px;
 
     &:first-child {
       width: auto;
@@ -1087,35 +1155,35 @@ h4 {
 </style>
 
 <style>
-/*小于1400的内容！*/
-@media (max-width: 1399px) {
-  .grid-two {
-    margin: 0 0 -10px 0;
-    width: 100%;
-    max-width: 600px;
-  }
-
-  .grid-left {
-    display: grid;
-    row-gap: 10px;
-    grid-template-columns: 100%;
-  }
-
-  .grid-right {
-    display: grid;
-    row-gap: 10px;
-    grid-template-columns: 100%;
-    margin-top: 10px;
-  }
+/* 默认单栏布局（窄屏或可用宽度不足） */
+.grid-two {
+  margin: 0 0 -10px 0;
+  width: 100%;
+  max-width: 600px;
 }
 
-/*双栏 大于1400的内容 */
-@media (min-width: 1400px) {
+.grid-left {
+  display: grid;
+  row-gap: 10px;
+  grid-template-columns: 100%;
+}
+
+.grid-right {
+  display: grid;
+  row-gap: 10px;
+  grid-template-columns: 100%;
+  margin-top: 10px;
+}
+
+/* 容器查询：内容区可用宽度足够容纳双栏时（>= 1180px）智能双栏 */
+@container (min-width: 1180px) {
   .grid-two {
     display: grid;
     grid-template-columns: minmax(0px, 1fr) minmax(0px, 1fr);
     align-items: flex-start;
     gap: 5px;
+    max-width: 1210px;
+    margin: 0;
   }
 
   .grid-left {
@@ -1130,6 +1198,36 @@ h4 {
     gap: 5px;
     grid-template-columns: 100%;
     max-width: 600px;
+    margin-top: 0;
+  }
+}
+
+/* 不支持容器查询时的兜底 */
+@supports not (container-type: inline-size) {
+  @media (min-width: 1400px) {
+    .grid-two {
+      display: grid;
+      grid-template-columns: minmax(0px, 1fr) minmax(0px, 1fr);
+      align-items: flex-start;
+      gap: 5px;
+      max-width: 1210px;
+      margin: 0;
+    }
+
+    .grid-left {
+      display: grid;
+      gap: 5px;
+      grid-template-columns: 100%;
+      max-width: 600px;
+    }
+
+    .grid-right {
+      display: grid;
+      gap: 5px;
+      grid-template-columns: 100%;
+      max-width: 600px;
+      margin-top: 0;
+    }
   }
 }
 

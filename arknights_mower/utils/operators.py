@@ -1,3 +1,4 @@
+import ast
 import copy
 from datetime import datetime, timedelta
 from itertools import product
@@ -5,14 +6,162 @@ from itertools import product
 from evalidate import Expr, base_eval_model
 
 from arknights_mower.utils import config
+from arknights_mower.utils.manufacture_product import (
+    MANUFACTURE_PRODUCTS,
+    TRADE_PRODUCTS,
+)
 from arknights_mower.utils.plan import BaseProduct, Plan, PlanConfig
+from arknights_mower.utils.resting_priority import (
+    RestingTier,
+    resting_key,
+    resting_mood,
+    resting_tier,
+)
 
 from ..data import agent_arrange_order, agent_list, base_room_list
-from ..solvers.record import save_action_to_sqlite_decorator
+from ..solvers.record import get_inventory_counts, save_action_to_sqlite_decorator
 from ..utils.log import logger
+from ..utils.news_checker import NewsChecker
 
 # 赤金交易订单干员常量
 TRADE_ORDER_AGENTS = ["但书", "龙舌兰", "佩佩", "可露希尔"]
+DORMITORY_ROOMS = [f"dormitory_{index}" for index in range(1, 5)]
+FACILITY_TYPE_IDS = {
+    "贸易站": "trade",
+    "制造站": "manufacture",
+    "发电站": "power",
+}
+
+_MAX_EXPRESSION_LENGTH = 2048
+_MAX_EXPRESSION_NODES = 128
+_MAX_INTEGER_LITERAL_BITS = 256
+_MAX_STRING_LITERAL_LENGTH = 512
+_MAX_POWER_EXPONENT = 64
+_MAX_NUMERIC_RESULT_BITS = 4096
+_NUMERIC_EXPRESSION_CALLS = {
+    "current_mood",
+    "facility_operator_count",
+    "facility_product_count",
+    "facility_product_type_count",
+    "group_max_mood",
+    "group_min_mood",
+    "inventory_count",
+    "major_maintenance_remaining_hours",
+}
+
+
+def dorm_room_order(values, rooms=None):
+    """将旧床位顺序折叠为宿舍房间顺序。
+
+    旧值如 ``dormitory_2_3`` 保留其首次出现的房间；缺失的房间
+    按 1→4 补齐。这样升级后仍保留原先的房间相对优先级，同时
+    床位数随主副表变化时不再使排序失效。
+    """
+    rooms = list(rooms or DORMITORY_ROOMS)
+    result = []
+    for value in values:
+        room = value
+        parts = value.rsplit("_", 1)
+        if len(parts) == 2 and parts[0] in rooms and parts[1].isdigit():
+            room = parts[0]
+        if room in rooms and room not in result:
+            result.append(room)
+    result.extend(room for room in rooms if room not in result)
+    return result
+
+
+def _integer_literal(node: ast.AST) -> int | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.UAdd, ast.USub))
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, int)
+    ):
+        value = node.operand.value
+        return value if isinstance(node.op, ast.UAdd) else -value
+    return None
+
+
+def _numeric_result_bits(node: ast.AST) -> int | None:
+    """保守估算整数结果位数；非数值或无法确定时返回 None。"""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool):
+            return 1
+        if isinstance(node.value, int):
+            return max(1, node.value.bit_length())
+        if isinstance(node.value, (float, complex)):
+            return 64
+        return None
+    if isinstance(node, ast.UnaryOp):
+        return _numeric_result_bits(node.operand)
+    if isinstance(node, (ast.Compare, ast.BoolOp)):
+        return 1
+    if isinstance(node, ast.IfExp):
+        body_bits = _numeric_result_bits(node.body)
+        else_bits = _numeric_result_bits(node.orelse)
+        if body_bits is None or else_bits is None:
+            return None
+        return max(body_bits, else_bits)
+    if isinstance(node, ast.BinOp):
+        left_bits = _numeric_result_bits(node.left)
+        right_bits = _numeric_result_bits(node.right)
+        if left_bits is None or right_bits is None:
+            return None
+        if isinstance(node.op, ast.Pow):
+            exponent = _integer_literal(node.right)
+            if exponent is None or not 0 <= exponent <= _MAX_POWER_EXPONENT:
+                return None
+            return max(1, left_bits * exponent)
+        if isinstance(node.op, ast.Mult):
+            return left_bits + right_bits
+        if isinstance(node.op, (ast.Add, ast.Sub)):
+            return max(left_bits, right_bits) + 1
+        if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+            return max(left_bits, right_bits)
+        return None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        return 64 if node.func.attr in _NUMERIC_EXPRESSION_CALLS else None
+    return None
+
+
+def _validate_expression_resources(expression: str) -> None:
+    """在 evalidate 执行前拦截可能产生超大中间值的表达式。"""
+    if len(expression) > _MAX_EXPRESSION_LENGTH:
+        raise ValueError("表达式过长")
+    tree = ast.parse(expression, mode="eval")
+    nodes = list(ast.walk(tree))
+    if len(nodes) > _MAX_EXPRESSION_NODES:
+        raise ValueError("表达式过于复杂")
+
+    for node in nodes:
+        if isinstance(node, ast.Constant):
+            if (
+                isinstance(node.value, int)
+                and node.value.bit_length() > _MAX_INTEGER_LITERAL_BITS
+            ):
+                raise ValueError("整数常量过大")
+            if (
+                isinstance(node.value, (str, bytes))
+                and len(node.value) > _MAX_STRING_LITERAL_LENGTH
+            ):
+                raise ValueError("字符串常量过长")
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            result_bits = _numeric_result_bits(node)
+            if result_bits is None:
+                raise ValueError("乘法仅支持数值表达式")
+            if result_bits > _MAX_NUMERIC_RESULT_BITS:
+                raise ValueError("乘法结果过大")
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+            exponent = _integer_literal(node.right)
+            result_bits = _numeric_result_bits(node)
+            if exponent is None or not 0 <= exponent <= _MAX_POWER_EXPONENT:
+                raise ValueError(
+                    f"幂运算指数必须是 0 到 {_MAX_POWER_EXPONENT} 的整数常量"
+                )
+            if result_bits is None or result_bits > _MAX_NUMERIC_RESULT_BITS:
+                raise ValueError("幂运算结果过大")
 
 
 def build_global_plan():
@@ -22,6 +171,7 @@ def build_global_plan():
     from ..utils.plan import Plan, PlanConfig, Room
 
     plan1 = {}
+    default_products = {}
     plan = config.plan.model_dump(exclude_none=True)
     conf = config.conf
     plan_config = PlanConfig(
@@ -33,12 +183,16 @@ def build_global_plan():
         workaholic=config.plan.conf.workaholic,
         free_blacklist=conf.free_blacklist,
         ope_resting_priority=config.plan.conf.ope_resting_priority,
+        dorm_order=config.plan.conf.dorm_order,
+        experimental_dorm_logic=conf.experimental_dorm_logic,
         resting_threshold=conf.resting_threshold,
         refresh_trading_config=config.plan.conf.refresh_trading,
         refresh_drained=config.plan.conf.refresh_drained,
         free_room=conf.free_room,
     )
     for room, obj in plan[plan["default"]].items():
+        if product_id := obj.get("product"):
+            default_products[room] = product_id
         plan1[room] = [
             Room(
                 op["agent"],
@@ -50,13 +204,16 @@ def build_global_plan():
             for op in obj["plans"]
         ]
     # 默认任务
-    plan["default_plan"] = Plan(plan1, plan_config)
+    plan["default_plan"] = Plan(plan1, plan_config, products=default_products)
     # 备用自定义任务
     backup_plans: list[Plan] = []
 
     for i in plan["backup_plans"]:
         backup_plan: dict[str, Room] = {}
+        backup_products = {}
         for room, obj in i["plan"].items():
+            if product_id := obj.get("product"):
+                backup_products[room] = product_id
             backup_plan[room] = [
                 Room(
                     op["agent"],
@@ -75,6 +232,9 @@ def build_global_plan():
             workaholic=i["conf"]["workaholic"],
             free_blacklist=i["conf"]["free_blacklist"],
             ope_resting_priority=i["conf"]["ope_resting_priority"],
+            dorm_order=i["conf"].get("dorm_order", ""),
+            dorm_order_override=i["conf"].get("dorm_order_override", False),
+            experimental_dorm_logic=conf.experimental_dorm_logic,
             resting_standby=i["conf"].get("resting_standby", ""),
             resting_threshold=conf.resting_threshold,
             refresh_trading_config=i["conf"]["refresh_trading"],
@@ -84,6 +244,7 @@ def build_global_plan():
         backup_trigger = get_logic_exp(i["trigger"]) if "trigger" in i else None
         backup_task = i.get("task")
         backup_trigger_timing = i.get("trigger_timing")
+        backup_exit_trigger_timing = i.get("exit_trigger_timing")
         backup_plans.append(
             Plan(
                 backup_plan,
@@ -91,7 +252,9 @@ def build_global_plan():
                 trigger=backup_trigger,
                 task=backup_task,
                 trigger_timing=backup_trigger_timing,
+                exit_trigger_timing=backup_exit_trigger_timing,
                 name=i.get("name"),
+                products=backup_products,
             )
         )
     plan["backup_plans"] = backup_plans
@@ -119,6 +282,8 @@ class Operators:
         self.exhaust_group = set()
         self.rest_in_full_group = set()
         self.dorm = []
+        self.displaced_dorms = []
+        self.group_dorm = []
         self.workaholic_agent = set()
         self.free_blacklist = []
         self.global_plan = plan
@@ -129,9 +294,12 @@ class Operators:
         self.clues = []
         self.current_room_changed_callback = None
         self.party_time = None
+        self.facility_states = {}
         self.profession_filter = set(agent_arrange_order["职介选择开关"])
         self.eval_model = base_eval_model.clone()
-        self.eval_model.nodes.extend(["Call", "Attribute", "Is", "IsNot"])
+        self.eval_model.nodes.extend(
+            ["Call", "Attribute", "Is", "IsNot", "Mult", "FloorDiv", "Pow"]
+        )
         self.eval_model.attributes.extend(
             [
                 "operators",
@@ -140,6 +308,17 @@ class Operators:
                 "is_resting",
                 "current_mood",
                 "current_room",
+                "inventory_count",
+                "facility_type",
+                "facility_product",
+                "facility_operator_count",
+                "facility_product_count",
+                "facility_product_type_count",
+                "facility_has_mastery_plan",
+                "facility_is_training",
+                "major_maintenance_remaining_hours",
+                "group_min_mood",
+                "group_max_mood",
             ]
         )
         self.power_plant_count = 0
@@ -148,12 +327,18 @@ class Operators:
     def __repr__(self):
         return f"Operators(operators={self.operators})"
 
+    @property
+    def experimental_dorm_logic(self):
+        return bool(getattr(self.config, "experimental_dorm_logic", False))
+
     def swap_plan(self, condition, refresh=False):
         self.plan = copy.deepcopy(self.global_plan["default_plan"].plan)
+        self.products = copy.deepcopy(self.global_plan["default_plan"].products)
         self.config: PlanConfig = copy.deepcopy(self.global_plan["default_plan"].config)
         for index, success in enumerate(condition):
             if success:
                 self.plan, self.config = self.merge_plan(index, self.config, self.plan)
+                self.products.update(self.global_plan["backup_plans"][index].products)
         self.plan_condition = condition
         if refresh:
             self.first_init = True
@@ -175,6 +360,9 @@ class Operators:
         return default_plan, ext_config.merge_config(plan.config)
 
     def init_and_validate(self, update=False):
+        experimental = self.experimental_dorm_logic
+        saved_dorms = copy.deepcopy(self.all_dorms()) if update and experimental else []
+        self.displaced_dorms = []
         self.groups = {}
         self.exhaust_agent = set()
         self.exhaust_group = set()
@@ -182,6 +370,9 @@ class Operators:
         self.workaholic_agent = set()
         self.shadow_copy = copy.deepcopy(self.operators)
         self.operators = {}
+        if not update or experimental:
+            self.dorm = []
+        self.group_dorm = []
         for room in self.plan.keys():
             for idx, data in enumerate(self.plan[room]):
                 if data.agent not in agent_list and data.agent != "Free":
@@ -251,7 +442,15 @@ class Operators:
                             _replacement in self.operators
                             and self.operators[_replacement].is_high()
                         ):
-                            return f"替换组不可用高效组干员: 房间->{room}, 干员->{_replacement}"
+                            if (
+                                not experimental
+                                or not self.is_same_group_dorm_replacement(
+                                    self.operators[data.agent], _replacement
+                                )
+                            ):
+                                return f"替换组不可用高效组干员: 房间->{room}, 干员->{_replacement}"
+                            # 同组主班已按原岗位建模，不能用空岗位低优对象覆盖。
+                            continue
                         self.add(Operator(_replacement, ""))
                     else:
                         if _replacement not in self.operators:
@@ -266,36 +465,62 @@ class Operators:
             return "菲亚梅塔替换缺失"
         if len(missing_replacements):
             return f"以下干员替换组缺失：{','.join(missing_replacements)}"
-        dorm_names = [k for k in self.plan.keys() if k.startswith("dorm")]
+        # 测试逻辑的床位集合由当前合并后的排班生成；因此副表
+        # 可以增减 Free 位置。宿舍常驻成员填写同组主班替班时，该
+        # 固定位在常驻成员随组离岗期间也作为动态 Free 床位。
+        bed_plan = self.plan
+        dorm_names = [k for k in bed_plan.keys() if k.startswith("dorm")]
         dorm_names.sort(key=lambda d: d, reverse=False)
         added = []
         # 竖向遍历出效率高到低
-        if not update:
+        for dorm in dorm_names if (not update or experimental) else []:
+            free_found = False
+            for _idx, _dorm in enumerate(bed_plan[dorm]):
+                if _dorm.agent == "Free" and _idx <= 1:
+                    if "波登可" not in [_agent.agent for _agent in bed_plan[dorm]]:
+                        return "宿舍必须安排2个宿管"
+                if _dorm.agent != "Free" and free_found:
+                    return "Free必须连续且安排在宿管后"
+                if (
+                    _dorm.agent == "Free"
+                    and not free_found
+                    and (dorm + str(_idx)) not in added
+                ):
+                    self.dorm.append(Dormitory((dorm, _idx)))
+                    added.append(dorm + str(_idx))
+                    free_found = True
+                    continue
+            if not free_found:
+                return "宿舍必须安排至少一个Free"
+        # 稳定逻辑保留原先的“每间宿舍首张 Free 优先”排序。
+        for dorm in dorm_names if (not update or experimental) else []:
+            for _idx, _dorm in enumerate(bed_plan[dorm]):
+                if _dorm.agent == "Free" and (dorm + str(_idx)) not in added:
+                    self.dorm.append(Dormitory((dorm, _idx)))
+                    added.append(dorm + str(_idx))
+        if experimental:
             for dorm in dorm_names:
-                free_found = False
-                for _idx, _dorm in enumerate(self.plan[dorm]):
-                    if _dorm.agent == "Free" and _idx <= 1:
-                        if "波登可" not in [_agent.agent for _agent in self.plan[dorm]]:
-                            return "宿舍必须安排2个宿管"
-                    if _dorm.agent != "Free" and free_found:
-                        return "Free必须连续且安排在宿管后"
-                    if (
-                        _dorm.agent == "Free"
-                        and not free_found
-                        and (dorm + str(_idx)) not in added
-                    ):
-                        self.dorm.append(Dormitory((dorm, _idx)))
-                        added.append(dorm + str(_idx))
-                        free_found = True
-                        continue
-                if not free_found:
-                    return "宿舍必须安排至少一个Free"
-            # VIP休息位用完后横向遍历
-            for dorm in dorm_names:
-                for _idx, _dorm in enumerate(self.plan[dorm]):
-                    if _dorm.agent == "Free" and (dorm + str(_idx)) not in added:
-                        self.dorm.append(Dormitory((dorm, _idx)))
-                        added.append(dorm + str(_idx))
+                for index, _slot in enumerate(bed_plan[dorm]):
+                    key = dorm + str(index)
+                    if self.is_auto_free_dorm_slot(dorm, index) and key not in added:
+                        self.dorm.append(Dormitory((dorm, index)))
+                        added.append(key)
+        if update:
+            for key, value in self.shadow_copy.items():
+                if key not in self.operators:
+                    self.add(Operator(key, ""))
+        # 测试逻辑只保存四间宿舍的相对顺序；同一房间内按床位
+        # 索引稳定排列，单回目标由入驻顺序确认逻辑重置。
+        if experimental:
+            room_order = dorm_room_order(self.config.dorm_order)
+            self.config.dorm_order = room_order
+            self.dorm.sort(
+                key=lambda dorm: (
+                    room_order.index(dorm.position[0]),
+                    dorm.position[1],
+                )
+            )
+        if not experimental and not update:
             dorm_order = [name for name in config.conf.dorm_order.split(",") if name]
             current_dorm_names = {
                 dorm.position[0] + "_" + str(dorm.position[1]) for dorm in self.dorm
@@ -311,10 +536,6 @@ class Operators:
                     return (
                         "宿舍优先级和当前宿舍不匹配，请清除优先级自动排序或者自己更正"
                     )
-        else:
-            for key, value in self.shadow_copy.items():
-                if key not in self.operators:
-                    self.add(Operator(key, ""))
         # 跑单
         for x, y in self.plan.items():
             if not x.startswith("room"):
@@ -325,6 +546,11 @@ class Operators:
             total_count = 0
             _replacement = []
             for name in self.groups[key]:
+                operator = self.operators[name]
+                if experimental and self.is_auto_free_dorm_operator(operator):
+                    # 同组姓名只负责开启“随组离岗时转为 Free”，并不实际
+                    # 占用该干员，也不参与组内替班唯一性校验。
+                    continue
                 _candidate = next(
                     (
                         r
@@ -347,8 +573,22 @@ class Operators:
                 and not total_count
             ):
                 return f"{key} 宿舍绑组需要至少一名可轮休的非宿舍干员"
-            if total_count > len(self.dorm):
-                return f"{key} 分组无法排班,分组总数(不包含0心情工作){total_count}大于总宿舍数{len(self.dorm)}"
+            required_beds = total_count
+            effective_dorm_count = sum(
+                1
+                for dorm in self.dorm
+                if self.is_effective_free_slot(
+                    dorm, active_groups={key} if experimental else None
+                )
+            )
+            if required_beds > effective_dorm_count:
+                if not experimental:
+                    return f"{key} 分组无法排班,分组总数(不包含0心情工作){total_count}大于当前有效宿舍数{effective_dorm_count}"
+                return f"{key} 分组无法排班,所需宿舍数{required_beds}大于当前有效宿舍数{effective_dorm_count}"
+        if experimental:
+            self.group_dorm = []
+        if update and experimental:
+            self.displaced_dorms = self.restore_dorm_state(saved_dorms)
         # 设定令夕模式的心情阈值
         self.init_mood_limit()
         for name in self.workaholic_agent:
@@ -414,13 +654,148 @@ class Operators:
 
     def evaluate_expression(self, expression):
         try:
+            _validate_expression_resources(expression)
             model = {e: e for e in base_room_list}
+            model.update({e: e for e in MANUFACTURE_PRODUCTS | TRADE_PRODUCTS})
+            model.update({e: e for e in FACILITY_TYPE_IDS.values()})
             model["op_data"] = self
             result = Expr(expression, self.eval_model).eval(model)
             return result
         except Exception as e:
             logger.exception(f"附表格式出错: {e}")
             return None
+
+    def inventory_count(self, item_name: str) -> int:
+        """返回副表条件可用的仓库数量。"""
+        if item_name == "全部经验（计算）":
+            experience_values = {
+                "基础作战记录": 200,
+                "初级作战记录": 400,
+                "中级作战记录": 1000,
+                "高级作战记录": 2000,
+            }
+            counts = get_inventory_counts(list(experience_values))
+            return sum(
+                counts.get(name, 0) * value for name, value in experience_values.items()
+            )
+        allowed_items = {"赤金", "源石碎片", "固源岩", "装置", "龙门币"}
+        if item_name not in allowed_items:
+            raise ValueError(f"不支持的副表仓库资源：{item_name}")
+        return get_inventory_counts([item_name]).get(item_name, 0)
+
+    def major_maintenance_remaining_hours(self) -> float:
+        """返回距离下一次停服大版本维护的小时数。"""
+        info = NewsChecker.get_maintenance()
+        if info is None or info.update_type != "major" or info.is_flash_update:
+            return float("inf")
+        return max(0.0, (info.start - datetime.now()).total_seconds() / 3600)
+
+    def _group_moods(self, group: str) -> list[float]:
+        members = self.groups.get(group)
+        if not members:
+            raise ValueError(f"不存在的绑组：{group}")
+        moods = [
+            self.operators[name].current_mood()
+            for name in members
+            if not self.operators[name].workaholic
+        ]
+        if not moods:
+            raise ValueError(f"绑组内没有可统计心情的干员：{group}")
+        return moods
+
+    def group_min_mood(self, group: str) -> float:
+        """排除0心情工作干员后返回指定绑组的最小心情。"""
+        return min(self._group_moods(group))
+
+    def group_max_mood(self, group: str) -> float:
+        """排除0心情工作干员后返回指定绑组的最大心情。"""
+        return max(self._group_moods(group))
+
+    def update_facility_state(
+        self, room: str, facility: str, product: str, updated_at: str | None = None
+    ) -> None:
+        """记录生产设施最近一次从游戏界面识别到的实际状态。"""
+        supported = (facility == "manufacture" and product in MANUFACTURE_PRODUCTS) or (
+            facility == "trade" and product in TRADE_PRODUCTS
+        )
+        if room not in base_room_list or not supported:
+            raise ValueError(f"不支持的设施状态：{room}, {facility}, {product}")
+        self.facility_states[room] = {
+            "facility": facility,
+            "product": product,
+            "updated_at": updated_at or datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def facility_product(self, room: str) -> str | None:
+        """返回指定设施产物；未读取实际状态时使用主表配置。"""
+        if room not in base_room_list:
+            raise ValueError(f"不支持的设施位置：{room}")
+        cached = self.facility_states.get(room, {}).get("product")
+        if cached in MANUFACTURE_PRODUCTS | TRADE_PRODUCTS:
+            return cached
+        return self.global_plan["default_plan"].products.get(room)
+
+    def facility_type(self, room: str) -> str | None:
+        """从当前排班复用指定位置的设施类型。"""
+        if room not in base_room_list:
+            raise ValueError(f"不支持的设施位置：{room}")
+        room_plan = self.plan.get(room) or []
+        if not room_plan:
+            return None
+        return FACILITY_TYPE_IDS.get(getattr(room_plan[0], "facility", None))
+
+    def facility_operator_count(self, room: str) -> int:
+        """根据已有干员位置缓存返回指定设施的进驻干员数量。"""
+        if room not in base_room_list:
+            raise ValueError(f"不支持的设施位置：{room}")
+        return sum(
+            operator.current_room == room for operator in self.operators.values()
+        )
+
+    @staticmethod
+    def _validate_training_room(room: str) -> None:
+        if room != "train":
+            raise ValueError(f"不支持的训练室位置：{room}")
+
+    def facility_has_mastery_plan(self, room: str) -> bool:
+        """复用专精计划库，判断训练室是否存在未完结的计划。"""
+        self._validate_training_room(room)
+        from arknights_mower.utils.mastery_db import get_reconcile_plans
+
+        return bool(get_reconcile_plans())
+
+    def facility_is_training(self, room: str) -> bool:
+        """复用专精计划状态，判断训练室是否正在训练。"""
+        self._validate_training_room(room)
+        from arknights_mower.utils.mastery_db import get_active_plan
+
+        plan = get_active_plan()
+        return plan is not None and plan.get("status") == "training"
+
+    def facility_product_count(self, product: str) -> int:
+        """返回当前生产指定产物或订单类型的设施数量。"""
+        if product not in MANUFACTURE_PRODUCTS | TRADE_PRODUCTS:
+            raise ValueError(f"不支持的产物或订单类型：{product}")
+        rooms = (
+            self.global_plan["default_plan"].products.keys()
+            | self.facility_states.keys()
+        )
+        return sum(self.facility_product(room) == product for room in rooms)
+
+    def facility_product_type_count(self) -> int:
+        """返回当前产物和订单类型的种类数，缓存为空时使用主表。"""
+        rooms = (
+            self.global_plan["default_plan"].products.keys()
+            | self.facility_states.keys()
+        )
+        return len(
+            {
+                product
+                for room in rooms
+                if (product := self.facility_product(room))
+                in MANUFACTURE_PRODUCTS | TRADE_PRODUCTS
+            }
+        )
 
     def get_current_room(self, room, bypass=False, current_index=None):
         room_data = {
@@ -474,13 +849,31 @@ class Operators:
             for dorm in saved_dorms
             if hasattr(dorm, "position")
         }
-        for dorm in self.dorm:
+        restored = set()
+        for dorm in self.all_dorms():
             if saved := saved_by_position.get(tuple(dorm.position)):
-                dorm.name = saved.name
-                dorm.time = saved.time
+                if self.is_effective_free_slot(dorm) and self.is_recovery_dorm(
+                    dorm, saved.name
+                ):
+                    dorm.name = saved.name
+                    dorm.time = saved.time
+                    restored.add(tuple(dorm.position))
+        return [
+            dorm
+            for dorm in saved_dorms
+            if dorm.name and tuple(dorm.position) not in restored
+        ]
 
     @save_action_to_sqlite_decorator
-    def update_detail(self, name, mood, current_room, current_index, update_time=False):
+    def update_detail(
+        self,
+        name,
+        mood,
+        current_room,
+        current_index,
+        update_time=False,
+        related_operator=None,
+    ):
         """更新对象的详细信息，并记录到SQLite数据库
         参数:
         name(str): 对象的名称。
@@ -526,8 +919,12 @@ class Operators:
         agent.current_room = current_room
         agent.current_index = current_index
         agent.mood = mood
+        if current_room == "train" and current_index == 0:
+            agent.resting_from_train = True
+        elif (current_room and not to_dorm) or mood >= 24:
+            agent.resting_from_train = False
         if mood >= 24:
-            agent.dorm_recovery_room = ""
+            agent.clear_dorm_recovery()
         # 如果是高效组且没有记录时间，则返还index
         if to_dorm:
             idx, dorm = self.get_dorm_by_name(name)
@@ -543,8 +940,13 @@ class Operators:
 
     def refresh_dorm_time(self, room, index, agent):
         _name = agent["agent"]
-        for idx, dorm in enumerate(self.dorm):
+        # 此方法也会作为无界函数绑定到轻量读房测试对象，避免依赖对象上存在
+        # all_dorms 方法；旧对象没有 group_dorm 时按普通 Free 床位处理。
+        dorms = [*self.dorm, *getattr(self, "group_dorm", [])]
+        for dorm in dorms:
             if dorm.position[0] == room and dorm.position[1] == index:
+                if not Operators.is_recovery_dorm(self, dorm, _name):
+                    continue
                 if _name in self.operators.keys() or _name in agent_list:
                     _agent = self.operators[_name]
                     dorm.name = _name
@@ -576,22 +978,22 @@ class Operators:
             return
 
     def correct_dorm(self):
-        for idx, dorm in enumerate(self.dorm):
+        for dorm in self.all_dorms():
             if dorm.name != "" and dorm.name in self.operators.keys():
+                if not self.is_recovery_dorm(dorm, dorm.name):
+                    dorm.reset()
+                    continue
                 op = self.operators[dorm.name]
                 if not (
                     dorm.position[0] == op.current_room
                     and dorm.position[1] == op.current_index
                 ):
-                    self.dorm[idx].name = ""
-                    self.dorm[idx].time = None
+                    dorm.name = ""
+                    dorm.time = None
                 else:
-                    if (
-                        self.dorm[idx].time is not None
-                        and self.dorm[idx].time < datetime.now()
-                    ):
+                    if dorm.time is not None and dorm.time < datetime.now():
                         op.mood = op.upper_limit
-                        op.time_stamp = self.dorm[idx].time
+                        op.time_stamp = dorm.time
                         op.depletion_rate = 0
                         logger.debug(
                             f"检测到{op.name}心情恢复满，设置心情至{op.upper_limit}"
@@ -607,8 +1009,8 @@ class Operators:
     def get_refresh_index(self, room, plan):
         ret = []
         if room.startswith("dorm") and self.config.free_room:
-            return [i for i, x in enumerate(self.plan[room]) if x == "Free"]
-        for idx, dorm in enumerate(self.dorm):
+            return [i for i, slot in enumerate(self.plan[room]) if slot.agent == "Free"]
+        for idx, dorm in enumerate(self.all_dorms()):
             if dorm.position[0] == room:
                 for i, _name in enumerate(plan):
                     if _name not in self.operators.keys():
@@ -626,10 +1028,11 @@ class Operators:
     def get_dorm_by_name(self, name):
         _op = self.operators[name]
         logger.debug(name)
-        for idx, dorm in enumerate(self.dorm):
+        for idx, dorm in enumerate(self.all_dorms()):
             if (
                 dorm.position[0] == _op.current_room
                 and dorm.position[1] == _op.current_index
+                and self.is_recovery_dorm(dorm, name)
             ):
                 logger.debug(idx)
                 logger.debug(dorm)
@@ -660,6 +1063,8 @@ class Operators:
             operator.current_room = exist.current_room
             operator.current_index = exist.current_index
             operator.dorm_recovery_room = getattr(exist, "dorm_recovery_room", "")
+            operator.resting_from_train = getattr(exist, "resting_from_train", False)
+            operator.dorm_recovery_fixed = getattr(exist, "dorm_recovery_fixed", ())
         self.operators[operator.name] = operator
         # 需要用尽心情干员逻辑
         if operator.exhaust_require and not (
@@ -689,12 +1094,11 @@ class Operators:
             and not operator.workaholic
             and not operator.exhaust_require
             and not operator.rest_in_full
-            and not operator.is_workshop()
+            and (self.experimental_dorm_logic or not operator.is_workshop())
         ):
             operator.resting_priority = "standby"
 
-    @staticmethod
-    def _can_group_standby(op):
+    def _can_group_standby(self, op):
         """仅显式配置的主班绑组候补可待命；原低优及特殊恢复规则不变。"""
         return (
             op.is_high()
@@ -704,7 +1108,7 @@ class Operators:
             and not op.workaholic
             and not op.exhaust_require
             and not op.rest_in_full
-            and not op.is_workshop()
+            and (self.experimental_dorm_logic or not op.is_workshop())
         )
 
     def is_group_standby(self, name):
@@ -724,7 +1128,7 @@ class Operators:
             and member.resting_priority == "high"
             and not member.room.startswith("dorm")
             and not member.workaholic
-            and not member.is_workshop()
+            and (self.experimental_dorm_logic or not member.is_workshop())
             and member.is_resting()
             and self.get_dorm_by_name(member.name)[0] is not None
             for member in (self.operators[n] for n in self.groups.get(op.group, []))
@@ -745,6 +1149,47 @@ class Operators:
             for name in self.groups.get(group, [])
         )
 
+    def is_auto_free_dorm_operator(self, operator):
+        """同组主班出现在宿舍替班中时，该固定位按 Free 使用。
+
+        填入的同组名字只是开关，不绑定该干员。宿舍常驻成员
+        随组离岗后，这个位置交给统一床位分配和不养闲人逻辑。
+        """
+        if (
+            not self.experimental_dorm_logic
+            or not operator.group
+            or not operator.room.startswith("dorm")
+            or operator.name == "菲亚梅塔"
+        ):
+            return False
+        return any(
+            (candidate := self.operators.get(name)) is not None
+            and candidate.is_high()
+            and candidate.group == operator.group
+            and not candidate.room.startswith("dorm")
+            for name in operator.replacement
+        )
+
+    def is_auto_free_dorm_slot(self, room, index):
+        slots = self.plan.get(room, [])
+        if not room.startswith("dorm") or not 0 <= index < len(slots):
+            return False
+        resident = self.operators.get(slots[index].agent)
+        return resident is not None and self.is_auto_free_dorm_operator(resident)
+
+    def is_dynamic_dorm_position(self, room, index, name=None):
+        """判断某位置在当前阵容中是否按动态床位处理。"""
+        slots = self.plan.get(room, [])
+        if not room.startswith("dorm") or not 0 <= index < len(slots):
+            return False
+        slot = slots[index]
+        if slot.agent == "Free":
+            return True
+        if not self.is_auto_free_dorm_slot(room, index):
+            return False
+        # 固定宿舍干员本人在位时仍是宿管，不是休息者。
+        return name is None or name not in (slot.agent, "Current")
+
     def is_dorm_replacement(self, name):
         """已在固定宿舍岗位上的替班不能被其他岗位借走。"""
         op = self.operators[name]
@@ -761,12 +1206,88 @@ class Operators:
         return bool(
             slot.group
             and slot.agent not in ("Free", "菲亚梅塔")
+            and not self.is_auto_free_dorm_slot(room, index)
             and name in slot.replacement
+        )
+
+    def is_same_group_dorm_replacement(self, operator, name):
+        """同组、可轮休的主班干员可接住宿舍固定位置并在该位置休息。"""
+        if not self.experimental_dorm_logic:
+            return False
+        candidate = self.operators.get(name)
+        return bool(
+            operator.group
+            and operator.room.startswith("dorm")
+            and candidate is not None
+            and candidate.is_high()
+            and candidate.group == operator.group
+            and not candidate.room.startswith("dorm")
+            and not candidate.workaholic
+        )
+
+    def group_dorm_bed_count(self, names):
+        """返回本组随组离岗后会转换为动态 Free 的固定位置数。"""
+        if not self.experimental_dorm_logic:
+            return 0
+        return sum(
+            self.is_auto_free_dorm_operator(self.operators[name]) for name in names
+        )
+
+    def all_dorms(self):
+        """返回全部潜在动态床位。"""
+        return self.dorm
+
+    def get_group_dorm(self, room, index):
+        return next(
+            (
+                dorm
+                for dorm in getattr(self, "group_dorm", [])
+                if dorm.position == (room, index)
+            ),
+            None,
+        )
+
+    def is_recovery_dorm(self, dorm, name):
+        """动态位置只跟踪实际休息者，不跟踪回归的固定宿舍成员。"""
+        if dorm in self.dorm:
+            room, index = dorm.position
+            return self.is_dynamic_dorm_position(room, index, name)
+        if not self.experimental_dorm_logic:
+            return False
+        if not name or name not in self.operators:
+            return False
+        room, index = dorm.position
+        slots = self.plan.get(room, [])
+        if not 0 <= index < len(slots):
+            return False
+        resident = self.operators.get(slots[index].agent)
+        return resident is not None and self.is_same_group_dorm_replacement(
+            resident, name
         )
 
     def replacement_candidates(self, operator):
         """仅绑组宿舍的替班按心情排序；菲亚梅塔充能名单保留原顺序。"""
         candidates = list(operator.replacement)
+        if not self.experimental_dorm_logic:
+            if (
+                not operator.room.startswith("dorm")
+                or not operator.group
+                or operator.name == "菲亚梅塔"
+            ):
+                return candidates
+            now = datetime.now()
+
+            def legacy_mood_order(name):
+                candidate = self.operators.get(name)
+                if (
+                    candidate is None
+                    or candidate.time_stamp is None
+                    or not 0 <= candidate.mood <= 24
+                ):
+                    return (1, 0)
+                return (0, candidate.current_mood(now))
+
+            return sorted(candidates, key=legacy_mood_order)
         if (
             not operator.room.startswith("dorm")
             or not operator.group
@@ -777,14 +1298,15 @@ class Operators:
 
         def mood_order(name):
             candidate = self.operators.get(name)
+            same_group = self.is_same_group_dorm_replacement(operator, name)
             if (
                 candidate is None
                 or candidate.time_stamp is None
                 or not 0 <= candidate.mood <= 24
             ):
-                return (1, 0)
+                return (not same_group, 1, 0)
             # 与菲亚梅塔共用当前心情估算；宿舍替班按绝对心情排序，不扣下限。
-            return (0, candidate.current_mood(now))
+            return (not same_group, 0, candidate.current_mood(now))
 
         return sorted(candidates, key=mood_order)
 
@@ -810,39 +1332,67 @@ class Operators:
         )
         return current_mood / total_mood
 
+    def is_effective_free_slot(self, dorm, active_groups=None, inactive_groups=None):
+        """判断潜在动态床位当前或本次规划中是否已经开放。"""
+        room, index = dorm.position
+        if room not in self.plan or not 0 <= index < len(self.plan[room]):
+            return False
+        slot = self.plan[room][index]
+        if slot.agent == "Free":
+            return True
+        if not self.is_auto_free_dorm_slot(room, index):
+            return False
+        resident = self.operators[slot.agent]
+        inactive_groups = set(inactive_groups or ())
+        if resident.group in inactive_groups:
+            return False
+        if resident.group in set(active_groups or ()) or self.group_is_resting(
+            resident.group
+        ):
+            return True
+        # 已经有普通休息者实际入住或被本轮预约时，在固定成员回班前仍有效。
+        return bool(dorm.name and dorm.name != resident.name)
+
     def available_free(self, free_type="high", time=None):
         if not time:
             time = datetime.now()
 
-        dorm_count = sum(1 for key in self.plan if key.startswith("dorm"))
-        total = len(self.dorm)
+        effective_dorms = [
+            dorm for dorm in self.dorm if self.is_effective_free_slot(dorm)
+        ]
+        dorm_count = len({dorm.position[0] for dorm in effective_dorms})
+        total = len(effective_dorms)
 
         count_high = 0
         count_low = 0
         free_name = []
-
         # 一次性遍历 dorm。低优占位也必须消耗 low 配额，否则调度器会持续把
-        # 已占用床位误判为空位；但它仍可被高优主力接管，不能据此阻止大组下班。
-        for dorm in self.dorm:
+        # 已占用床位误判为空位；恢复完成的普通填充干员由不养闲人处理。
+        for dorm in effective_dorms:
             if dorm.name == "" or dorm.name not in self.operators:
                 continue
             op = self.operators[dorm.name]
-            if op.is_workshop():
+            if not self.experimental_dorm_logic:
+                if op.is_workshop():
+                    continue
+                if dorm.time is not None and dorm.time < time:
+                    if op.is_high():
+                        free_name.append(dorm.name)
+                    continue
+                if op.resting_priority == "high":
+                    count_high += 1
+                else:
+                    count_low += 1
                 continue
-            if dorm.time is not None and dorm.time < time:
-                if op.is_high():
-                    free_name.append(dorm.name)
-                continue
-            if op.resting_priority == "high":
+            if resting_tier(self, op.name) <= RestingTier.MAIN:
                 count_high += 1
             else:
                 count_low += 1
         available_high = max(0, dorm_count - count_high)
         available_low = total - count_low - max(count_high, dorm_count)
-
-        if len(free_name) > 0:
+        if not self.experimental_dorm_logic:
             for name in free_name:
-                logger.debug(f"检测到房间休息完毕，释放{dorm.name}宿舍位")
+                logger.debug(f"检测到房间休息完毕，释放{name}宿舍位")
                 if name in agent_list:
                     self.operators[name].mood = self.operators[name].upper_limit
                     self.operators[name].depletion_rate = 0
@@ -850,58 +1400,127 @@ class Operators:
         return available_high if free_type == "high" else available_low
 
     def active_high_resting_count(self, time=None):
-        """当前不能被其他主力直接接管的主力床位数。"""
+        """正在占用恢复床位的主班人数。"""
         if time is None:
             time = datetime.now()
+        if not self.experimental_dorm_logic:
+            return sum(
+                1
+                for dorm in self.dorm
+                if self.is_effective_free_slot(dorm)
+                and dorm.name in self.operators
+                and self.operators[dorm.name].is_high()
+                and not self.operators[dorm.name].is_workshop()
+                and not (dorm.time is not None and dorm.time < time)
+            )
         return sum(
             1
             for dorm in self.dorm
-            if dorm.name in self.operators
+            if self.is_effective_free_slot(dorm)
+            and dorm.name in self.operators
             and self.operators[dorm.name].is_high()
-            and not self.operators[dorm.name].is_workshop()
-            and not (dorm.time is not None and dorm.time < time)
+            and resting_tier(self, dorm.name) != RestingTier.IDLE
         )
 
-    def _slot_takable(self, dorm, protect_resting, requester=None):
-        """床位能否被接管；低优之间保护正在休息者，高优可接管低优床位。"""
+    def _slot_takable(self, dorm, protect_resting, requester=None, active_groups=None):
+        """按严格层级接管；主班免额外心情门槛，同级恢复者不互踢。"""
+        if not self.is_effective_free_slot(dorm, active_groups=active_groups):
+            return False
         name = dorm.name
         if name == "" or name not in self.operators:
             return True
         op = self.operators[name]
-        if dorm.time is not None and dorm.time < datetime.now():
+        if not self.experimental_dorm_logic:
+            if dorm.time is not None and dorm.time < datetime.now():
+                return True
+            if op.is_workshop() and requester is not None:
+                incoming = self.operators[requester]
+                return not incoming.is_workshop() and (
+                    incoming.is_high() or incoming.current_mood() <= 22
+                )
+            if not op.is_high():
+                return not (protect_resting and op.is_resting())
+            return False
+        # 已预留、尚未执行入驻的床位不能被本轮后续组重复分配。
+        if (op.current_room, op.current_index) != dorm.position:
+            return False
+        tier = resting_tier(self, name)
+        # 候补及以上只按层级、心情换床位顺序；一旦入住便不被其他休息者踢出。
+        if tier <= RestingTier.STANDBY:
+            return False
+        if requester is None:
+            return False
+        incoming_tier = resting_tier(self, requester)
+        if incoming_tier >= tier:
+            return False
+        if incoming_tier <= RestingTier.LOW_MAIN:
             return True
-        if op.is_workshop() and requester is not None:
-            incoming = self.operators[requester]
-            return not incoming.is_workshop() and (
-                incoming.is_high() or incoming.current_mood() <= 22
-            )
-        if not op.is_high():
-            return not (protect_resting and op.is_resting())
-        return False
+        if tier == RestingTier.IDLE:
+            return resting_mood(self.operators[requester]) <= 22
+        return (
+            incoming_tier == RestingTier.STANDBY
+            and tier == RestingTier.REPLACEMENT
+            and not protect_resting
+        )
 
-    def _find_dorm_slot(self, name, used, *, group_resting=False):
+    def _find_dorm_slot(self, name, used, *, group_resting=False, active_groups=None):
         operator = self.operators[name]
-        is_high = operator.resting_priority == "high" and not operator.is_workshop()
-        # 仅显式候补在随组下班时可接管普通替班；原低优保护规则不变。
+        if not self.experimental_dorm_logic:
+            is_high = operator.resting_priority == "high" and not operator.is_workshop()
+            can_take_over = is_high or (
+                group_resting and self._can_group_standby(operator)
+            )
+            max_count = sum(1 for key in self.plan if key.startswith("dorm"))
+            if not is_high:
+                for i in range(max_count, len(self.dorm)):
+                    if i not in used and self._slot_takable(
+                        self.dorm[i],
+                        protect_resting=not can_take_over,
+                        requester=name,
+                    ):
+                        return i
+            return next(
+                (
+                    i
+                    for i, dorm in enumerate(self.dorm)
+                    if i not in used
+                    and self._slot_takable(
+                        dorm, protect_resting=not can_take_over, requester=name
+                    )
+                ),
+                None,
+            )
+        if resting_tier(self, name) == RestingTier.EXCLUDED:
+            return None
+        is_high = resting_tier(self, name) <= RestingTier.MAIN
+        # 候补接管普通替班只用于随组分床；主班跨级接管由共享判定处理。
         can_take_over = is_high or (group_resting and self._can_group_standby(operator))
         max_count = sum(1 for key in self.plan if key.startswith("dorm"))
+        order = list(range(len(self.dorm)))
         if not is_high:
-            for i in range(max_count, len(self.dorm)):
-                if i not in used and self._slot_takable(
-                    self.dorm[i], protect_resting=not can_take_over, requester=name
-                ):
-                    return i
-        return next(
-            (
-                i
-                for i, dorm in enumerate(self.dorm)
-                if i not in used
-                and self._slot_takable(
-                    dorm, protect_resting=not can_take_over, requester=name
-                )
-            ),
-            None,
-        )
+            order = order[max_count:] + order[:max_count]
+        candidates = [
+            i
+            for i in order
+            if i not in used
+            and self._slot_takable(
+                self.dorm[i],
+                protect_resting=not can_take_over,
+                requester=name,
+                active_groups=active_groups,
+            )
+        ]
+        now = datetime.now()
+
+        def takeover_cost(index):
+            bed = self.dorm[index]
+            if not bed.name:
+                return (0, 0, 0)
+            tier, mood = resting_key(self, bed.name, now)
+            # 先使用空位，再接管层级最低、同级心情最高的占位者。
+            return (1, -tier, -mood)
+
+        return min(candidates, key=takeover_cost, default=None)
 
     def group_standby_candidates(self, names):
         """有需要恢复的高优成员带组时，可在缺床情况下待命的候补成员。"""
@@ -914,7 +1533,7 @@ class Operators:
             and op.is_high()
             and op.resting_priority == "high"
             and not op.workaholic
-            and not op.is_workshop()
+            and (self.experimental_dorm_logic or not op.is_workshop())
             and not op.room.startswith("dorm")
             and 0 <= op.mood < op.upper_limit
             and op.current_mood() < op.upper_limit
@@ -926,21 +1545,36 @@ class Operators:
             and self._can_group_standby(self.operators[name])
         }
 
-    def assign_dorm_group(self, names):
+    def assign_dorm_group(self, names, active_groups=None):
         """先保障必需床位；候补有床则休息，无床则随组离岗待命。"""
         used = set()
         assignments = []
         optional = self.group_standby_candidates(names)
         # 可待命者最后分床；其余成员沿用低优先选床顺序。
-        ordered_names = sorted(
-            names,
-            key=lambda name: (
-                self.operators[name].resting_priority == "standby",
-                self.operators[name].resting_priority == "high",
-            ),
-        )
+        if self.experimental_dorm_logic:
+            ordered_names = sorted(
+                names,
+                key=lambda name: (
+                    self.operators[name].resting_priority == "standby",
+                    self.operators[name].resting_priority == "high",
+                    resting_key(self, name),
+                ),
+            )
+        else:
+            ordered_names = sorted(
+                names,
+                key=lambda name: (
+                    self.operators[name].resting_priority == "standby",
+                    self.operators[name].resting_priority == "high",
+                ),
+            )
         for name in ordered_names:
-            index = self._find_dorm_slot(name, used, group_resting=True)
+            index = self._find_dorm_slot(
+                name,
+                used,
+                group_resting=True,
+                active_groups=active_groups,
+            )
             if index is None:
                 if name in optional:
                     continue
@@ -1088,7 +1722,7 @@ class Dormitory:
 
 class Operator:
     def is_workshop(self):
-        """Whether this crafter uses the optional lowest dorm recovery priority."""
+        """稳定版中可选的加工干员最低宿舍恢复优先级。"""
         conf = config.conf
         if not conf.workshop_low_priority_rest:
             return False
@@ -1140,6 +1774,8 @@ class Operator:
         self.replacement = replacement
         self.resting_priority = resting_priority
         self.dorm_recovery_room = ""
+        self.resting_from_train = False
+        self.dorm_recovery_fixed = ()
         self._current_room = None
         self.current_room = current_room
         self.exhaust_require = exhaust_require
@@ -1161,7 +1797,7 @@ class Operator:
     @current_room.setter
     def current_room(self, value):
         if self._current_room != value:
-            self.dorm_recovery_room = ""
+            self.clear_dorm_recovery()
             self._current_room = value
             if Operators.current_room_changed_callback and (
                 self.refresh_order_room[0] or self.refresh_drained
@@ -1170,6 +1806,10 @@ class Operator:
                 logger.debug(
                     f"触发当前房间变更回调: {self.name} 现在在 {self._current_room}, 刷新交易所房间: {self.refresh_order_room}, 刷新疲劳: {self.refresh_drained}"
                 )
+
+    def clear_dorm_recovery(self):
+        self.dorm_recovery_room = ""
+        self.dorm_recovery_fixed = ()
 
     def is_high(self):
         # 是否为高效组

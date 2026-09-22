@@ -6,7 +6,7 @@ import { swap } from '@/utils/common'
 import { apply_operator_replace, collect_plan_operators } from '@/utils/plan_edit'
 
 const config_store = useConfigStore()
-const { free_blacklist, theme } = storeToRefs(config_store)
+const { free_blacklist, theme, experimental_dorm_logic } = storeToRefs(config_store)
 
 const plan_store = usePlanStore()
 const {
@@ -21,6 +21,7 @@ const {
   refresh_trading,
   refresh_drained,
   ope_resting_priority,
+  dorm_order,
   operators,
   plan
 } = storeToRefs(plan_store)
@@ -124,7 +125,9 @@ function create_sub_plan() {
       workaholic: [],
       refresh_trading: [],
       refresh_drained: [],
-      ope_resting_priority: []
+      ope_resting_priority: [],
+      dorm_order: [],
+      dorm_order_override: false
     },
     plan: fill_empty({}),
     trigger: {
@@ -133,6 +136,7 @@ function create_sub_plan() {
       right: ''
     },
     trigger_timing: 'AFTER_PLANNING',
+    exit_trigger_timing: null,
     task: {},
     name: `plan${backup_plans.value.length}`
   })
@@ -144,6 +148,12 @@ function delete_sub_plan() {
   sub_plan.value = 'main'
 }
 
+function update_dorm_order_override(value) {
+  if (sub_plan.value !== 'main') {
+    current_conf.value.dorm_order_override = value.length > 0
+  }
+}
+
 const current_conf = ref({
   ling_xi: ling_xi.value,
   rest_in_full: rest_in_full.value,
@@ -151,7 +161,8 @@ const current_conf = ref({
   resting_standby: resting_standby.value,
   workaholic: workaholic.value,
   exhaust_require: exhaust_require.value,
-  refresh_trading: refresh_trading.value
+  refresh_trading: refresh_trading.value,
+  dorm_order: dorm_order.value
 })
 
 watchEffect(() => {
@@ -166,7 +177,8 @@ watchEffect(() => {
       refresh_trading: refresh_trading.value,
       free_blacklist: free_blacklist.value,
       refresh_drained: refresh_drained.value,
-      ope_resting_priority: ope_resting_priority.value
+      ope_resting_priority: ope_resting_priority.value,
+      dorm_order: dorm_order.value
     }
   } else {
     current_conf.value = backup_plans.value[sub_plan.value].conf
@@ -185,6 +197,7 @@ watchEffect(() => {
     free_blacklist.value = current_conf.value.free_blacklist
     refresh_drained.value = current_conf.value.refresh_drained
     ope_resting_priority.value = current_conf.value.ope_resting_priority
+    dorm_order.value = current_conf.value.dorm_order
   } else {
     backup_plans.value[sub_plan.value].conf = current_conf.value
   }
@@ -498,7 +511,13 @@ function movePlanForward() {
       <slick-operator-select v-model="current_conf.workaholic"></slick-operator-select>
     </n-form-item>
     <n-form-item>
-      <template #label><span>宿舍低优先级干员</span><help-text>请查阅文档</help-text></template>
+      <template #label>
+        <span>宿舍低优先级干员</span>
+        <help-text>
+          低于普通主班，高于宿舍休息候补；同级按当前心情从低到高安排。
+          仍需床位，可接管更低层级的床位，不受 22 心情门槛限制；同级不互踢。
+        </help-text>
+      </template>
       <slick-operator-select v-model="current_conf.resting_priority"></slick-operator-select>
     </n-form-item>
     <n-form-item>
@@ -554,11 +573,31 @@ function movePlanForward() {
       <template #label>
         <span>干员休息优先级</span>
         <help-text>
-          <p>会按照优先级放入宿舍的时候重新排序</p>
-          <p>宿舍重新排序触发此设置优先级最高，所以非高效组谨慎填写</p>
+          <template v-if="experimental_dorm_logic">
+            <p>名单中的干员属于最高休息层级；名单内部按当前心情从低到高排序，不按填写顺序。</p>
+            <p>可接管更低层级的动态床位，但仍须满足下班条件。非主班干员请谨慎填写。</p>
+          </template>
+          <template v-else>
+            <p>稳定版逻辑按名单顺序优先安排休息；名单中的干员排在其他主班与替班之前。</p>
+          </template>
         </help-text>
       </template>
       <slick-operator-select v-model="current_conf.ope_resting_priority"></slick-operator-select>
+    </n-form-item>
+    <n-form-item v-if="experimental_dorm_logic">
+      <template #label>
+        <span>宿舍优先级排序</span>
+        <help-text>
+          <p>仅在当前主表或副表生效，按宿舍房间排序；同一房间内按床位位置排列。</p>
+          <p>主表默认顺序为宿舍 1→2→3→4；副表留空时继承此前生效的顺序，不会覆盖前一张副表。</p>
+          <p>副表实际选择或拖动顺序后，才会显式覆盖此前顺序。</p>
+        </help-text>
+      </template>
+      <slick-dorm-select
+        v-model="current_conf.dorm_order"
+        room-only
+        @update:model-value="update_dorm_order_override"
+      ></slick-dorm-select>
     </n-form-item>
   </n-form>
   <n-modal

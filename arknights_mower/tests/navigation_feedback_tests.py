@@ -78,6 +78,20 @@ def test_real_secondary_confirmation_is_preserved(first):
     assert [c.args[0] for c in solver.tap.call_args_list] == [BLUE, (1280, 1070)]
 
 
+@pytest.mark.parametrize("first", ["confirm_blue", "confirm_train"])
+def test_dimmed_confirmation_with_secondary_popup(first):
+    # 遮罩下主确认按钮残影（fading）与二次确认弹窗（arrange_confirm）共存时，必须正常进入二次确认
+    solver = solver_for(
+        [
+            {first: BLUE},
+            {first: BLUE, "fading": True, "arrange_confirm": BLUE},
+            {"room_detail": DETAIL},
+        ]
+    )
+    solver.tap_confirm("train")
+    assert [c.args[0] for c in solver.tap.call_args_list] == [BLUE, (1280, 1070)]
+
+
 def test_empty_transition_does_not_skip_delayed_secondary_confirmation():
     solver = solver_for(
         [
@@ -144,12 +158,12 @@ def test_order_entrance_lost_tap_can_retry():
 
 
 def test_unrelated_factory_button_is_not_trade_success():
-    solver = solver_for([{"factory_accelerate": BLUE}, {"bill_accelerate": BLUE}])
+    solver = solver_for([{"manufacture_accelerate": BLUE}, {"bill_accelerate": BLUE}])
     solver._wait_drone_interface(accelerate_template="bill_accelerate")
     assert solver.tap.call_count == 1
 
 
-@pytest.mark.parametrize("template", ["factory_accelerate", "bill_accelerate"])
+@pytest.mark.parametrize("template", ["manufacture_accelerate", "bill_accelerate"])
 def test_ready_drone_page_receives_no_input(template):
     solver = solver_for([{template: BLUE}])
     solver._wait_drone_interface()

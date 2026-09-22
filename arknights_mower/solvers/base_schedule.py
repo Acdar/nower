@@ -62,6 +62,15 @@ from arknights_mower.utils.email import maa_template, send_message, task_templat
 from arknights_mower.utils.graph import SceneGraphSolver
 from arknights_mower.utils.image import cropimg, loadres, thres2
 from arknights_mower.utils.log import logger
+from arknights_mower.utils.manufacture_product import (
+    DRONE_SECONDS,
+    MANUFACTURE_PRODUCTS,
+    TRADE_PRODUCTS,
+    current_unit_remaining,
+    drone_plan,
+    parse_product_task_meta,
+    product_task_meta,
+)
 from arknights_mower.utils.operation_timing import (
     record_selection_retry,
     timed_room,
@@ -76,12 +85,20 @@ from arknights_mower.utils.path import get_path, resolve_config_path
 from arknights_mower.utils.plan import PlanTriggerTiming
 from arknights_mower.utils.recognize import RecognizeError, Recognizer, Scene
 from arknights_mower.utils.resource_pkg import refresh_resource_at_boundary
+from arknights_mower.utils.resting_priority import (
+    RestingTier,
+    busy_resting_names,
+    resting_key,
+    resting_mood,
+    resting_tier,
+)
 from arknights_mower.utils.scheduler_task import (
     SchedulerTask,
     TaskTypes,
     find_next_task,
     plan_metadata,
     protect_support_swaps,
+    rebalance_plan_swap_dorms,
     scheduling,
     try_add_release_dorm,
     try_reorder,
@@ -162,6 +179,12 @@ _COLLECTIBLE_START_KEYS = (
 )
 
 
+class ProductSwitchDeferred(Exception):
+    def __init__(self, message: str, minutes: int = 15):
+        super().__init__(message)
+        self.minutes = minutes
+
+
 class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     """
     收集基建的产物：物资、赤金、信赖
@@ -209,9 +232,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.global_plan = {}
         self.local_operation_followup_time = None
         self.restart_after_mood_read = False
-        # 无运行缓存启动时，current_room 为空仅表示“尚未读取”，不能据此触发
-        # is_working() == False 一类副表条件。首次心情/房间扫描完成后再解除。
-        self.defer_backup_plan_until_mood_read = False
+        self.train_room_state = None
 
     def find_next_task(
         self,
@@ -311,6 +332,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.op_data.correct_dorm()
         if not getattr(self, "defer_backup_plan_until_mood_read", False):
             self.backup_plan_solver(PlanTriggerTiming.BEGINNING)
+            # 首次启动先随心情读取刷新实际产物；恢复缓存后也以实际状态为准。
+            self.queue_product_switches()
         logMsg = "||".join([str(t) for t in self.tasks])
         logger.debug("当前任务: " + logMsg)
         save_log(logMsg, "{}" if not self.task else str(self.task), level="INFO")
@@ -371,9 +394,14 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     continue
                 required += 1
             remove_name = set()
+            effective_dorms = [
+                dorm
+                for dorm in self.op_data.dorm
+                if self.op_data.is_effective_free_slot(dorm)
+            ]
             # 按心情降序排序
             sorted_dorms = sorted(
-                self.op_data.dorm,
+                effective_dorms,
                 key=lambda dorm: (
                     self.op_data.operators[dorm.name].mood
                     if dorm.name in self.op_data.operators
@@ -414,10 +442,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
 
                 # 检查条件是否满足
                 if current_resting - len(remove_name) + required <= len(
-                    self.op_data.dorm
+                    effective_dorms
                 ):
                     break
-            if current_resting - len(remove_name) + required > len(self.op_data.dorm):
+            if current_resting - len(remove_name) + required > len(effective_dorms):
                 msg = f"无法完成 {self.task.meta_data} 的排班，宿舍可用空位不足，请减少使用回满词条"
                 send_message(msg, level="ERROR")
                 return
@@ -481,6 +509,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         TaskTypes.SKILL_UPGRADE,
                         TaskTypes.SWAP_SUPPORT,
                         TaskTypes.REFRESH_TIME,
+                        TaskTypes.SWITCH_PRODUCT,
                     )
                 ]
                 # #144：清队后补立即空任务——队列只剩远期专精重检时，让下一次
@@ -557,6 +586,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     time=self.task.time,
                     task_type=TaskTypes.FIAMMETTA,
                     task_plan={fia_room: [target, "菲亚梅塔"]},
+                    meta_data=target,
                 )
             )
             # 充能结束后整组立即上班
@@ -700,6 +730,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 self.task = None
                 self.skip()
                 return True
+            product_tasks = []
+            remove_current_task = True
+            arrangement_deferred = False
             try:
                 if self.task.type == TaskTypes.SKILL_UPGRADE:
                     from arknights_mower.solvers.mastery import run_mastery_task
@@ -729,6 +762,18 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         # 先移除再交给通用异常记录，避免下一轮重跑同一任务。
                         self.tasks[:] = [t for t in self.tasks if t is not self.task]
                         raise
+                elif self.task.type == TaskTypes.SWITCH_PRODUCT:
+                    batch_cutoff = datetime.now()
+                    product_tasks = [
+                        task
+                        for task in self.tasks
+                        if task.type == TaskTypes.SWITCH_PRODUCT
+                        and task.time <= batch_cutoff
+                    ]
+                    self.switch_base_products(product_tasks)
+                    # switch_base_products 会自行移除已完成的任务，并保留、延期
+                    # 当前无法切换的低等级贸易站任务。
+                    remove_current_task = False
                 elif len(self.task.plan.keys()) > 0:
                     get_time = False
                     if TaskTypes.SHIFT_OFF == self.task.type:
@@ -801,15 +846,25 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         self.refresh_connecting = True
                         return
                     self.refresh_connecting = False
-                    self.agent_arrange(self.task.plan, get_time)
-                    if get_time:
+                    arrangement_deferred = (
+                        self.agent_arrange(self.task.plan, get_time) is False
+                    )
+                    if arrangement_deferred:
+                        # 已处理的工作房间从原任务移除；副表覆盖的宿舍也会从
+                        # 原任务移除。仅在还有未覆盖的宿舍时保留原任务续行。
+                        remove_current_task = not self.task.plan
+                        self.skip()
+                    elif get_time:
                         if not self.backup_plan_solver(
                             PlanTriggerTiming.BEFORE_PLANNING
                         ):
                             self.plan_metadata()
                         else:
                             logger.info("检测到排班表切换，跳过plan")
-                    if TaskTypes.RE_ORDER == self.task.type:
+                    if (
+                        not arrangement_deferred
+                        and TaskTypes.RE_ORDER == self.task.type
+                    ):
                         self.skip()
                 # 如果任务名称包含干员名,则为动态生成的
                 elif self.task.type == TaskTypes.FIAMMETTA:
@@ -833,9 +888,29 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.仓库扫描()
                 elif self.task.type == TaskTypes.NOT_SPECIFIC:
                     pass
-                self.tasks[:] = [t for t in self.tasks if t is not self.task]
-                if self.tasks and self.tasks[0].type in [TaskTypes.SHIFT_ON]:
+                if remove_current_task:
+                    self.tasks[:] = [t for t in self.tasks if t is not self.task]
+                if (
+                    not arrangement_deferred
+                    and self.tasks
+                    and self.tasks[0].type in [TaskTypes.SHIFT_ON]
+                ):
                     self.backup_plan_solver(PlanTriggerTiming.AFTER_PLANNING)
+            except ProductSwitchDeferred as e:
+                retry_time = datetime.now() + timedelta(minutes=e.minutes)
+                pending_ids = {id(task) for task in self.tasks}
+                deferred_tasks = [
+                    task
+                    for task in product_tasks or [self.task]
+                    if id(task) in pending_ids
+                ]
+                for task in deferred_tasks:
+                    task.time = max(task.time, retry_time)
+                self.tasks.sort(key=lambda task: task.time)
+                logger.warning(
+                    f"{e}，未完成的切换任务推迟至 {retry_time.strftime('%H:%M:%S')}"
+                )
+                self.skip()
             except MowerExit:
                 raise
             except Exception as e:
@@ -1002,8 +1077,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         if config.conf.enable_mastery:
                             # #94 统一读取：一次 read_room_state(want_mood=True) 开一次
                             # 浮窗读全（协助位+训练位+心情）+ 左下角面板，消除原来
-                            # get_agent_from_room（读心情）后再 read_room_state（_read_slots
-                            # 再开一次浮窗读槽位）的重复浮窗开关（铁律 3 一次进房做全部）。
+                            # get_agent_from_room（读心情）后再开一次浮窗读槽位的重复
+                            # 浮窗开关（铁律 3 一次进房做全部）。
                             from arknights_mower.solvers.mastery_reader import (
                                 read_room_state,
                                 reconcile_short,
@@ -1013,6 +1088,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                 room_state, mood_data = read_room_state(
                                     self, enter=False, want_mood=True
                                 )
+                                self.train_room_state = room_state
                                 mood_info = [
                                     f"干员: '{item['agent']}', 心情: {round(item['mood'], 3)}"
                                     for item in mood_data
@@ -1035,7 +1111,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                 logger.warning(f"训练室顺路更新状态失败: {e}")
                         else:
                             # enable_mastery 关闭：不跑 mastery 读取器（铁律 10），保留
-                            # 通用心情读取。
+                            # 通用心情读取；清空专精状态缓存，避免消费陈旧锁定。
+                            self.train_room_state = None
                             _mood_data = self.get_agent_from_room(room, None)
                             mood_info = [
                                 f"干员: '{item['agent']}', 心情: {round(item['mood'], 3)}"
@@ -1104,12 +1181,32 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     fix_plan[key][idx] = plan[key][idx].agent
         # 最后如果有任何高效组心情没有记录 或者高效组在宿舍
         # 宿舍绑组成员由组状态纠错处理；下班期间离开固定位置是正常状态。
+        if (
+            not config.conf.enable_mastery
+            and getattr(self, "train_room_state", None) is not None
+        ):
+            self.train_room_state = None
+        train_room_state = (
+            getattr(self, "train_room_state", None)
+            if config.conf.enable_mastery
+            else None
+        )
+        train_blocked = config.conf.enable_mastery and (
+            getattr(train_room_state, "state", None) in ("training", "waiting_collect")
+            or getattr(train_room_state, "locked", None) is True
+            or getattr(train_room_state, "protected", None) is True
+        )
         miss_list = {
             k: v
             for k, v in self.op_data.operators.items()
             if v.not_valid()
             and not (v.group and v.room.startswith("dorm"))
             and not self.op_data.is_group_standby(k)
+            and not (
+                train_blocked
+                and v.room == "train"
+                and not (config.conf.assistant_follows_schedule and v.index == 0)
+            )
         }
         if len(miss_list.keys()) > 0:
             # 替换到他应该的位置
@@ -1279,9 +1376,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         )
 
     def _train_protected(self) -> bool:
-        """训练室是否受保护：协助位（槽0）是逻各斯/艾丽妮（§16.5）。
+        """训练室是否受保护：协助位（槽0）是逻各斯/艾丽妮（§4.4）。
 
-        铁律 10/§16.11：enable_mastery OFF 时保护全停、排班照常排训练室，故先按开关门控。
+        铁律 10/§7.3：enable_mastery OFF 时保护全停、排班照常排训练室，故先按开关门控。
         用 op_data 缓存判定（深读训练室浮窗会让纠错生成阶段反复进出训练室，反而放大
         本票要消除的问题）；缓存漏过保护时，执行闸门 agent_arrange_room 在
         enable_mastery ON 路径读 room_state.protected 兜底（OFF 时保护本就全停，不兜底）。
@@ -1291,7 +1388,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         return self.op_data.get_train_support() in ("逻各斯", "艾丽妮")
 
     def _suppress_train_correction(self, fix_plan: dict) -> None:
-        """训练室纠错是否应抑制：专精活跃或受保护时弹出 train 项（受保护时提醒）。"""
+        """训练室纠错是否应抑制：专精活跃或受保护时弹出 train 项（受保护时提醒）。
+
+        缓存（`train_room_state`）里的状态与保护都按 `enable_mastery` 门控后再消费：
+        缓存在开关打开的那一轮写下来，开关关掉后它就是陈年结论，按 §7.3「关闭时
+        保护完全停用」不得再据此弹纠错（兄弟判定 `_train_protected` 同样先门控）。
+        """
         if "train" not in fix_plan:
             return
         if self._train_mastery_active():
@@ -1302,6 +1404,41 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             fix_plan.pop("train")
             logger.debug("训练室受保护，跳过训练室纠错")
             self._notify_train_correction_skipped()
+            return
+        if (
+            not config.conf.enable_mastery
+            and getattr(self, "train_room_state", None) is not None
+        ):
+            self.train_room_state = None
+        train_room_state = (
+            getattr(self, "train_room_state", None)
+            if config.conf.enable_mastery
+            else None
+        )
+        train_locked = config.conf.enable_mastery and (
+            getattr(train_room_state, "state", None) in ("training", "waiting_collect")
+            or getattr(train_room_state, "locked", None) is True
+        )
+        train_protected = (
+            config.conf.enable_mastery
+            and getattr(train_room_state, "protected", None) is True
+        )
+        if train_protected:
+            fix_plan.pop("train")
+            logger.debug("训练室受保护，跳过训练室纠错")
+            self._notify_train_correction_skipped()
+            return
+        if train_locked:
+            if not config.conf.assistant_follows_schedule:
+                fix_plan.pop("train")
+                logger.debug("训练室处于锁定状态且未开启协助位跟随，跳过训练室纠错")
+                return
+            if len(fix_plan["train"]) > 1:
+                fix_plan["train"][1] = "Current"
+            if all(slot == "Current" for slot in fix_plan["train"]):
+                fix_plan.pop("train")
+                logger.debug("训练室处于锁定状态且无协助位变更，跳过训练室纠错")
+                return
 
     def _notify_train_correction_skipped(self) -> None:
         """训练室受保护导致纠错跳过 → 发节流提醒邮件（⑤ protected，key=协助位:训练位）。
@@ -1972,23 +2109,32 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             self.backup_plan_solver()
 
     def resting(self):
-        self.total_agent.sort(
-            key=lambda x: (
-                self._resting_tier(x),
-                x.current_mood() - x.lower_limit,
-            ),
-            reverse=False,
-        )
+        experimental = self.op_data.experimental_dorm_logic
+        if experimental:
+            now = datetime.now()
+            self.total_agent.sort(
+                key=lambda op: resting_key(self.op_data, op.name, now)
+            )
+        else:
+            self.total_agent.sort(
+                key=lambda op: (
+                    self._resting_tier(op),
+                    op.current_mood() - op.lower_limit,
+                )
+            )
         self.plan_metadata()
         # 理想休息人数只描述主力轮休；低优占床另由 available_free("low")
         # 管理，不能抬高这里的当前人数或挡住可接管床位上的大组。
         current_resting = self.op_data.active_high_resting_count()
-        # 阈值暂定为 0.5
+        effective_dorm_count = sum(
+            1 for dorm in self.op_data.dorm if self.op_data.is_effective_free_slot(dorm)
+        )
+        # 阈值暂定为 0.5；理想休息人数不能超过当前副表下真实可用床位。
         self.ideal_resting_count = (
-            4
+            min(4, effective_dorm_count)
             if self.op_data.average_mood()
             > self.op_data.config.resting_threshold * config.conf.rescue_threshold
-            else len(self.op_data.dorm)
+            else effective_dorm_count
         )
         logger.debug(f"当前理想休息人数是{self.ideal_resting_count}")
         # #59：训练室干员跳过休息规划改为「DB 有没有 active 计划」，
@@ -2008,21 +2154,51 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         _high_done = False
         _low_used = set()
         for op in self.total_agent:
-            if op.is_high() and not op.is_workshop():
+            if experimental and self._resting_tier(op) == RestingTier.EXCLUDED:
+                continue
+            if experimental and op.is_high():
                 can_standby = op.group and self.op_data.group_standby_candidates(
                     self.op_data.groups[op.group]
                 )
-                if _high_done and not can_standby:
+                can_preempt = self._resting_tier(op) <= RestingTier.LOW_MAIN and any(
+                    bed.name
+                    and resting_tier(self.op_data, bed.name) > self._resting_tier(op)
+                    and self.op_data._slot_takable(bed, True, requester=op.name)
+                    for bed in self.op_data.dorm
+                )
+                has_group_dorm_bed = op.group and self.op_data.group_dorm_bed_count(
+                    self.op_data.groups[op.group]
+                )
+                if _high_done and not (
+                    can_standby or can_preempt or has_group_dorm_bed
+                ):
                     continue
                 if (
                     not can_standby
+                    and not can_preempt
+                    and not has_group_dorm_bed
                     and current_resting + len(_replacement) >= self.ideal_resting_count
                     and self.op_data.available_free() == 0
                 ):
                     _high_done = True
                     continue
-            elif self.op_data.available_free("low") == 0:
-                break
+            elif not experimental:
+                if op.is_high() and not op.is_workshop():
+                    can_standby = op.group and self.op_data.group_standby_candidates(
+                        self.op_data.groups[op.group]
+                    )
+                    if _high_done and not can_standby:
+                        continue
+                    if (
+                        not can_standby
+                        and current_resting + len(_replacement)
+                        >= self.ideal_resting_count
+                        and self.op_data.available_free() == 0
+                    ):
+                        _high_done = True
+                        continue
+                elif self.op_data.available_free("low") == 0:
+                    break
             if op.name in self.op_data.workaholic_agent:
                 continue
             if (
@@ -2048,7 +2224,14 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             ):
                 continue
             if not op.is_high():
+                previous = (
+                    {bed.position: bed.name for bed in self.op_data.dorm}
+                    if experimental
+                    else None
+                )
                 _dorm = self.op_data.assign_dorm(op.name, True, used=_low_used)
+                if _dorm is not None and experimental:
+                    self.restore_displaced_resting(previous, _plan)
                 if _dorm is not None:
                     logger.debug(f"安排低优{op.name}休息 -> {_dorm.position}")
                 continue
@@ -2074,23 +2257,32 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     _REST_TIER_STANDBY = 2
     _REST_TIER_REPLACEMENT = 3
 
-    @staticmethod
-    def _resting_tier(op):
+    def _resting_tier(self, op):
+        if self.op_data.experimental_dorm_logic:
+            return resting_tier(self.op_data, op.name)
         if op.is_workshop():
             return 4
         if op.is_high() and op.resting_priority == "high":
-            return BaseSchedulerSolver._REST_TIER_HIGH
+            return self._REST_TIER_HIGH
         if op.is_high() and op.resting_priority == "standby":
-            return BaseSchedulerSolver._REST_TIER_STANDBY
+            return self._REST_TIER_STANDBY
         if op.is_high():
-            return BaseSchedulerSolver._REST_TIER_MARKED_LOW
-        return BaseSchedulerSolver._REST_TIER_REPLACEMENT
+            return self._REST_TIER_MARKED_LOW
+        return self._REST_TIER_REPLACEMENT
 
-    def backup_plan_solver(self, timing=None, append_empty_task=True):
+    def backup_plan_solver(
+        self,
+        timing=None,
+        append_empty_task=True,
+        custom_task_time=None,
+        generated_tasks=None,
+        restore_on_deactivate=False,
+    ):
         if timing is None:
             timing = PlanTriggerTiming.END
         try:
             new_task = False
+            deactivated_task_slots = {}
             if self.op_data.backup_plans:
                 con = copy.deepcopy(self.op_data.plan_condition)
                 current_con = self.op_data.plan_condition
@@ -2098,16 +2290,31 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     func = str(bp.trigger)
                     logger.debug(func)
                     con[idx] = self.op_data.evaluate_expression(func)
+                    trigger_timing = (
+                        bp.trigger_timing if con[idx] else bp.exit_trigger_timing
+                    )
                     if (
                         current_con[idx] != con[idx]
-                        and bp.trigger_timing.value <= timing.value
+                        and trigger_timing.value <= timing.value
                     ):
                         task = self.op_data.backup_plans[idx].task
                         if task and con[idx]:
                             new_task = True
-                            self.tasks.append(
-                                SchedulerTask(task_plan=copy.deepcopy(task))
+                            generated = SchedulerTask(
+                                time=custom_task_time,
+                                task_plan=copy.deepcopy(task),
                             )
+                            self.tasks.append(generated)
+                            if generated_tasks is not None:
+                                generated_tasks.append(generated)
+                        elif task and restore_on_deactivate:
+                            for room, agents in task.items():
+                                indexes = deactivated_task_slots.setdefault(room, set())
+                                indexes.update(
+                                    index
+                                    for index, name in enumerate(agents)
+                                    if name != "Current"
+                                )
                     else:
                         # 不切换
                         con[idx] = current_con[idx]
@@ -2117,7 +2324,52 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         f"检测到副班条件变更，启动超级变换形态, 当前条件:{current_con}"
                     )
                     logger.info(f"新条件列表:{con}")
+                    previous_dorms = copy.deepcopy(self.op_data.all_dorms())
                     self.op_data.swap_plan(con, refresh=True)
+                    self.queue_product_switches()
+                    dorm_migration = rebalance_plan_swap_dorms(
+                        self.op_data, previous_dorms
+                    )
+                    if dorm_migration:
+                        new_task = True
+                        generated = SchedulerTask(
+                            time=custom_task_time,
+                            task_plan=dorm_migration,
+                            task_type=TaskTypes.RE_ORDER,
+                        )
+                        self.tasks.append(generated)
+                        if generated_tasks is not None:
+                            generated_tasks.append(generated)
+                        if append_empty_task:
+                            followup = SchedulerTask(
+                                time=generated.time,
+                                task_plan={},
+                                task_type=TaskTypes.NOT_SPECIFIC,
+                            )
+                            self.tasks.append(followup)
+                            if generated_tasks is not None:
+                                generated_tasks.append(followup)
+                    if deactivated_task_slots:
+                        restore_plan = {}
+                        for room, indexes in deactivated_task_slots.items():
+                            active_room = self.op_data.plan.get(room)
+                            if active_room is None:
+                                continue
+                            agents = ["Current"] * len(active_room)
+                            for index in indexes:
+                                if index < len(active_room):
+                                    agents[index] = active_room[index].agent
+                            if any(name != "Current" for name in agents):
+                                restore_plan[room] = agents
+                        if restore_plan:
+                            new_task = True
+                            generated = SchedulerTask(
+                                time=custom_task_time,
+                                task_plan=restore_plan,
+                            )
+                            self.tasks.append(generated)
+                            if generated_tasks is not None:
+                                generated_tasks.append(generated)
                     # 回班时间和岗位依赖生效排班；副表可能改变用尽、回满或组员岗位。
                     # 已生成的宿舍任务不能继续沿用切换前的急救预测。
                     if any(
@@ -2178,6 +2430,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             high_count -= 1
 
     def get_resting_plan(self, agents, exist_replacement, plan, current_resting):
+        if not self.op_data.experimental_dorm_logic:
+            return self._get_resting_plan_legacy(
+                agents, exist_replacement, plan, current_resting
+            )
         # 宿舍成员只跟随换班，不以自身心情抢占组内替班或休息优先级。
         dorm_agents = [
             name
@@ -2188,6 +2444,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             agents = [name for name in agents if name not in dorm_agents]
         __replacement = []
         __plan = {}
+        active_groups = {
+            self.op_data.operators[name].group
+            for name in [*agents, *dorm_agents]
+            if self.op_data.operators[name].group
+        }
         required = 0
         for x in agents:
             op = self.op_data.operators[x]
@@ -2223,25 +2484,35 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 # 如果干员已经被安排了
                 success = False
                 break
-            _rep = next(
-                (
-                    obj
-                    for obj in self.op_data.replacement_candidates(x)
-                    if (
-                        not (
-                            self.op_data.operators[obj].current_room != ""
-                            and not self.op_data.operators[obj].is_resting()
-                        )
-                    )
-                    and obj not in TRADE_ORDER_AGENTS
+
+            if self.op_data.is_auto_free_dorm_operator(x):
+                # 同组姓名只开启这张临时床；不把该姓名安排进宿舍，固定
+                # 宿舍成员离岗期间由统一动态床位算法决定实际入住者。
+                __plan.setdefault(x.room, ["Current"] * len(self.op_data.plan[x.room]))[
+                    x.index
+                ] = "Free"
+                continue
+
+            def replacement_available(obj):
+                replacement = self.op_data.operators[obj]
+                if replacement.current_room != "" and not replacement.is_resting():
+                    return False
+                return (
+                    obj not in TRADE_ORDER_AGENTS
                     and not _is_mastery_busy(obj)
                     and obj not in exist_replacement
                     and obj not in __replacement
                     and not self.op_data.is_dorm_replacement(obj)
                     and (
-                        x.room.startswith("dorm")
-                        or self.op_data.operators[obj].current_room != x.room
+                        x.room.startswith("dorm") or replacement.current_room != x.room
                     )
+                )
+
+            _rep = next(
+                (
+                    obj
+                    for obj in self.op_data.replacement_candidates(x)
+                    if replacement_available(obj)
                 ),
                 None,
             )
@@ -2261,9 +2532,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             ]
             # 床位判断和分配使用同一套规则。先为整组模拟预留，避免低优占床
             # 提前挡住大组，也避免分到一半才失败留下脏状态。
-            dorms = self.op_data.assign_dorm_group(resting_agents)
+            previous = {bed.position: bed.name for bed in self.op_data.dorm}
+            dorms = self.op_data.assign_dorm_group(
+                resting_agents, active_groups=active_groups
+            )
             if dorms is None:
                 return
+            self.restore_displaced_resting(previous, __plan)
             logger.debug(f"当前替换{__replacement}")
             exist_replacement.extend(__replacement)
             logger.debug(dorms)
@@ -2275,10 +2550,236 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         plan[k][idx] = name
             logger.debug(f"当前plan{plan}")
 
+    def _get_resting_plan_legacy(
+        self, agents, exist_replacement, plan, current_resting
+    ):
+        """测试宿舍逻辑关闭时保留 alpha 的分组轮休行为。"""
+        dorm_agents = [
+            name
+            for name in agents
+            if self.op_data.operators[name].room.startswith("dorm")
+        ]
+        if dorm_agents:
+            agents = [name for name in agents if name not in dorm_agents]
+        replacements = []
+        next_plan = {}
+        required = sum(
+            1
+            for name in agents
+            if not self.op_data.operators[name].workaholic
+            and not self.op_data.operators[name].room.startswith("dorm")
+        )
+        logger.debug(f"需求:{current_resting} 当前休息")
+        logger.debug(f"需求:{required}宿舍空位")
+        logger.debug(f"需求:{exist_replacement} 当前安排")
+        logger.debug(f"当前计划{plan}")
+        success = True
+        fia_plan, _ = self.check_fia()
+        agents.sort(
+            key=lambda name: (
+                name not in fia_plan if fia_plan else True,
+                self.op_data.operators[name].current_room in ["factory", "train"],
+                self.op_data.operators[name].current_mood()
+                - self.op_data.operators[name].lower_limit,
+            )
+        )
+        agents.extend(dorm_agents)
+        logger.debug(f"计算排班:{agents}")
+        for name in agents:
+            op = self.op_data.operators[name]
+            if op.room not in base_room_list:
+                logger.debug(f"干员房间出错:{name}")
+                success = False
+                break
+            if self.op_data.get_dorm_by_name(op.name)[0] is not None:
+                success = False
+                break
+            replacement = next(
+                (
+                    candidate
+                    for candidate in self.op_data.replacement_candidates(op)
+                    if not (
+                        self.op_data.operators[candidate].current_room != ""
+                        and not self.op_data.operators[candidate].is_resting()
+                    )
+                    and candidate not in TRADE_ORDER_AGENTS
+                    and not _is_mastery_busy(candidate)
+                    and candidate not in exist_replacement
+                    and candidate not in replacements
+                    and not self.op_data.is_dorm_replacement(candidate)
+                    and (
+                        op.room.startswith("dorm")
+                        or self.op_data.operators[candidate].current_room != op.room
+                    )
+                ),
+                None,
+            )
+            if replacement is None:
+                success = False
+                break
+            replacements.append(replacement)
+            next_plan.setdefault(
+                op.room, ["Current"] * len(self.op_data.plan[op.room])
+            )[op.index] = replacement
+        if not success:
+            return
+        resting_agents = [
+            name
+            for name in agents
+            if not self.op_data.operators[name].workaholic
+            and not self.op_data.operators[name].room.startswith("dorm")
+        ]
+        dorms = self.op_data.assign_dorm_group(resting_agents)
+        if dorms is None:
+            return
+        logger.debug(f"当前替换{replacements}")
+        exist_replacement.extend(replacements)
+        logger.debug(dorms)
+        for room, names in next_plan.items():
+            if room not in plan:
+                plan[room] = names
+                continue
+            for index, name in enumerate(names):
+                if plan[room][index] == "Current" and name != "Current":
+                    plan[room][index] = name
+        logger.debug(f"当前plan{plan}")
+
+    def restore_displaced_resting(self, previous, plan):
+        """接管主班床位时显式处理回班，不能等纠错发现缺床成员。"""
+        if not self.op_data.experimental_dorm_logic:
+            return
+        displaced = {
+            previous[bed.position]
+            for bed in self.op_data.dorm
+            if previous.get(bed.position) and previous[bed.position] != bed.name
+        }
+        recalled = set()
+        for name in displaced:
+            op = self.op_data.operators.get(name)
+            if op is None or not op.is_high():
+                continue
+            members = self.op_data.groups[op.group] if op.group else [name]
+            if self.op_data._can_group_standby(op) and any(
+                bed.name in members
+                and self.op_data.operators[bed.name].resting_priority == "high"
+                for bed in self.op_data.dorm
+                if bed.name
+            ):
+                logger.info(f"{name}的候补床位被接管，随组待命")
+                continue
+            recalled.update(members)
+        for name in recalled:
+            op = self.op_data.operators[name]
+            plan.setdefault(op.room, ["Current"] * len(self.op_data.plan[op.room]))[
+                op.index
+            ] = name
+        if recalled:
+            logger.info(f"休息床位被更高优先级接管，安排整组回班：{sorted(recalled)}")
+            for bed in self.op_data.dorm:
+                if bed.name in recalled:
+                    room, index = bed.position
+                    plan.setdefault(room, ["Current"] * len(self.op_data.plan[room]))[
+                        index
+                    ] = "Free"
+                    bed.reset()
+        changed_slots = {
+            bed.position
+            for bed in self.op_data.dorm
+            if previous.get(bed.position) != bed.name
+        }
+        # 已接管床位不能继续执行旧的释放任务；已召回成员也不重复预约回班。
+        for task in self.tasks[:]:
+            if task.type not in (TaskTypes.SHIFT_ON, TaskTypes.RELEASE_DORM):
+                continue
+            for room, names in list(task.plan.items()):
+                for index, name in enumerate(names):
+                    if (task.type == TaskTypes.SHIFT_ON and name in recalled) or (
+                        task.type == TaskTypes.RELEASE_DORM
+                        and (room, index) in changed_slots
+                    ):
+                        names[index] = "Current"
+                if all(name == "Current" for name in names):
+                    del task.plan[room]
+            if not task.plan:
+                self.tasks.remove(task)
+
     def initialize_operators(self):
         self.op_data = Operators(self.global_plan)
         Operators.current_room_changed_callback = self.current_room_changed
         return self.op_data.init_and_validate()
+
+    def queue_product_switches(self):
+        """仅为已识别且与当前排班目标不一致的生产站生成任务。"""
+        products = getattr(self.op_data, "products", None)
+        if products is None:
+            return
+        plan = getattr(self.op_data, "plan", {})
+        facility_states = getattr(self.op_data, "facility_states", {})
+        configured_rooms = set()
+        for room, target_product in products.items():
+            room_plan = plan.get(room) or []
+            if not room_plan:
+                continue
+            facility = room_plan[0].facility
+            supported = (
+                facility == "制造站" and target_product in MANUFACTURE_PRODUCTS
+            ) or (facility == "贸易站" and target_product in TRADE_PRODUCTS)
+            if not supported:
+                continue
+            configured_rooms.add(room)
+
+            existing = [
+                task
+                for task in self.tasks
+                if task.type == TaskTypes.SWITCH_PRODUCT
+                and task.meta_data.split(",", 1)[0] == room
+            ]
+            state = facility_states.get(room)
+            expected_facility = "manufacture" if facility == "制造站" else "trade"
+            if not state or state.get("facility") != expected_facility:
+                self.tasks[:] = [task for task in self.tasks if task not in existing]
+                logger.debug(
+                    f"{self.translate_room(room)}尚无设施状态缓存，暂不生成切换任务"
+                )
+                continue
+            if state.get("product") == target_product:
+                if existing:
+                    self.tasks[:] = [
+                        task for task in self.tasks if task not in existing
+                    ]
+                    logger.info(
+                        f"{self.translate_room(room)}实际产物或订单已符合排班，"
+                        "移除待切换任务"
+                    )
+                continue
+
+            target_meta = product_task_meta(room, target_product)
+            if len(existing) == 1 and existing[0].meta_data == target_meta:
+                continue
+            self.tasks[:] = [task for task in self.tasks if task not in existing]
+            self.tasks.append(
+                SchedulerTask(
+                    task_type=TaskTypes.SWITCH_PRODUCT,
+                    meta_data=target_meta,
+                )
+            )
+            logger.info(
+                f"生成{self.translate_room(room)}切换产物或订单的任务：{target_product}"
+            )
+
+        self.tasks[:] = [
+            task
+            for task in self.tasks
+            if task.type != TaskTypes.SWITCH_PRODUCT
+            or task.meta_data.split(",", 1)[0] in configured_rooms
+        ]
+        selected = getattr(self, "task", None)
+        if (
+            selected is not None
+            and selected.type == TaskTypes.SWITCH_PRODUCT
+            and selected not in self.tasks
+        ):
+            self.task = None
 
     def check_fia(self):
         if "菲亚梅塔" in self.op_data.operators.keys() and self.op_data.operators[
@@ -2297,16 +2798,19 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         )
 
     @timed_step("order_navigation")
-    def _wait_drone_interface(self, interval=0.2, accelerate_template=None):
-        """#85：等待进入无人机界面（出现预期的加速按钮）。
+    def _wait_drone_interface(
+        self, interval=0.2, accelerate_template=None, page_template=None
+    ):
+        """#85：等待进入订单或制造详情界面。
 
         ``accelerate_template`` 用于贸易站专属流程；未指定时制造站/贸易站任一
-        加速按钮都视为成功。
+        加速按钮都视为成功。``page_template`` 用于没有加速按钮的空订单页面，
+        且仅在已点击页面入口后才接受，避免把设施信息遮罩后的背景误判为成功。
         """
         templates = (
             (accelerate_template,)
             if accelerate_template is not None
-            else ("factory_accelerate", "bill_accelerate")
+            else ("manufacture_accelerate", "bill_accelerate")
         )
         pending = None
         retry_ready = False
@@ -2319,6 +2823,12 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 return
             close = self.find("arrange_check_in_on")
             action = "close_detail" if close is not None else "open_order"
+            if (
+                page_template is not None
+                and pending == "open_order"
+                and self.find(page_template) is not None
+            ):
+                return
             if pending == action and not retry_ready:
                 # 等上次点击的反馈；旧面板仍在时先换帧，不连续戳同一入口。
                 retry_ready = True
@@ -2332,10 +2842,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             )
             pending, retry_ready = action, False
         # 最后一次点击之后也要读到结果，再交回原有房间恢复流程。
-        if self.find("connecting") or not any(
-            self.find(template) is not None for template in templates
-        ):
-            raise RecognizeError("未成功进入无人机界面")
+        ready = any(self.find(template) is not None for template in templates)
+        if page_template is not None and pending == "open_order":
+            ready = ready or self.find(page_template) is not None
+        if self.find("connecting") or not ready:
+            raise RecognizeError("未成功进入订单或制造详情界面")
 
     def get_run_order_time(self, room):
         logger.info("基建：读取插拔时间")
@@ -2939,6 +3450,466 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 break
         raise RecognizeError(f"无人机加速面板未出现：未识别到 {all_in_res}")
 
+    def _tap_product_point(self, point, interval=0.5):
+        x, y = point
+        self.tap(
+            (self.recog.w * x // 1920, self.recog.h * y // 1080),
+            interval=interval,
+        )
+
+    def _wait_product_resource(self, resource, *, present=True, retries=8):
+        for _ in range(retries):
+            found = self.find(resource)
+            if bool(found) == present:
+                return found
+            self.sleep(0.5)
+            self.recog.update()
+        state = "出现" if present else "消失"
+        raise RecognizeError(f"等待 {resource} {state}超时")
+
+    def _product_ocr_text(self, scope) -> str:
+        if rapidocr.engine is None:
+            rapidocr.initialize_ocr()
+        roi = cropimg(self.recog.img, scope)
+        result = rapidocr.engine(
+            roi,
+            use_det=True,
+            use_cls=False,
+            use_rec=True,
+        )[0]
+        texts = []
+
+        def collect(value):
+            if isinstance(value, str):
+                texts.append(value)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    collect(item)
+
+        collect(result)
+        return "".join(texts).replace(" ", "")
+
+    def read_manufacture_product(self) -> str:
+        product_scope = (
+            (self.recog.w * 1540 // 1920, self.recog.h * 330 // 1080),
+            (self.recog.w * 1835 // 1920, self.recog.h * 430 // 1080),
+        )
+        text = self._product_ocr_text(product_scope)
+        for product_id in ("gold", "exp3"):
+            product = MANUFACTURE_PRODUCTS[product_id]
+            if product.name in text:
+                logger.info(f"识别到当前制造产物：{product.name}")
+                return product_id
+
+        # 源石碎片标题位于复杂背景上，实机 OCR 可能为空；材料名位于纯色背景，
+        # 同时还能直接区分固源岩和装置配方。
+        material_scope = (
+            (self.recog.w * 430 // 1920, self.recog.h * 330 // 1080),
+            (self.recog.w * 650 // 1920, self.recog.h * 430 // 1080),
+        )
+        material_text = self._product_ocr_text(material_scope)
+        material_products = {
+            "固源岩": "orirock",
+            "装置": "orirock_device",
+        }
+        for material, product_id in material_products.items():
+            if material in material_text:
+                logger.info(
+                    f"识别到当前制造产物：{MANUFACTURE_PRODUCTS[product_id].name}"
+                )
+                return product_id
+        if "源石碎片" in text:
+            raise RecognizeError(
+                f"无法识别源石碎片配方：{material_text or 'OCR 无结果'}"
+            )
+        raise RecognizeError(f"无法识别当前制造产物：{text or 'OCR 无结果'}")
+
+    def _manufacture_is_idle(self) -> bool:
+        """识别制造站因缺少材料且未补货而没有正在制造的状态。"""
+        status_scope = (
+            (self.recog.w * 1540 // 1920, self.recog.h * 430 // 1080),
+            (self.recog.w * 1835 // 1920, self.recog.h * 700 // 1080),
+        )
+        text = self._product_ocr_text(status_scope)
+        return "已完成" in text or "空闲中" in text or "00:00:00" in text
+
+    def _cache_facility_state(self, room: str, facility: str, product: str) -> None:
+        op_data = getattr(self, "op_data", None)
+        if op_data is not None:
+            op_data.update_facility_state(room, facility, product)
+
+    def refresh_facility_state(self, room: str) -> None:
+        """进入房间读取心情时，顺带刷新生产设施的实际产物或订单。"""
+        room_plan = self.op_data.plan.get(room) or []
+        if not room_plan:
+            return
+        facility_name = getattr(room_plan[0], "facility", "")
+        if facility_name not in ("制造站", "贸易站"):
+            return
+
+        try:
+            if facility_name == "制造站":
+                self._wait_drone_interface(
+                    interval=3, accelerate_template="manufacture_accelerate"
+                )
+                product = self.read_manufacture_product()
+                facility = "manufacture"
+                label = MANUFACTURE_PRODUCTS[product].name
+            else:
+                self._wait_drone_interface(
+                    interval=3,
+                    accelerate_template="bill_accelerate",
+                    page_template="order_label",
+                )
+                product, _ = self._read_trade_product_card()
+                facility = "trade"
+                label = TRADE_PRODUCTS[product].strategy_name
+            self._cache_facility_state(room, facility, product)
+            logger.info(f"已刷新{self.translate_room(room)}设施状态：{label}")
+        except MowerExit:
+            raise
+        except Exception as e:
+            logger.warning(f"刷新{self.translate_room(room)}设施状态失败：{e}")
+        self.scene_graph_navigation(Scene.INFRA_DETAILS)
+
+    def _confirm_drone_count(self, count: int):
+        """在已打开的加速面板中精确选择无人机数量并确认。"""
+        if count <= 0:
+            return
+        for _ in range(count):
+            self._tap_product_point((1320, 502), interval=0.1)
+        self._tap_product_point((1440, 864), interval=0.5)
+        if self.scene() in self.waiting_scene:
+            if not self.waiting_solver():
+                raise RecognizeError("无人机加速确认后界面未恢复")
+
+    def _select_manufacture_product(self, target_product: str):
+        product = MANUFACTURE_PRODUCTS[target_product]
+        self._tap_product_point((1680, 500))
+        self._wait_product_resource("manufacture_product_select")
+        self._tap_product_point(product.category)
+        self._tap_product_point(product.recipe)
+        self._wait_product_resource("manufacture_product_change_confirm")
+        self._tap_product_point((1425, 895))
+        self._wait_product_resource("manufacture_product_change_confirm", present=False)
+
+        # 更换配方还会二次确认取消旧制造计划。
+        self._wait_product_resource("manufacture_product_cancel_confirm")
+        self._tap_product_point((1440, 742))
+        self._wait_product_resource("manufacture_product_cancel_confirm", present=False)
+
+        # 新配方默认只排一份；补到当前仓库容量允许的最大值。
+        self._tap_product_point((1450, 305))
+        self._wait_product_resource("manufacture_product_change_confirm")
+        self._tap_product_point((1425, 895))
+        self._wait_product_resource("manufacture_product_change_confirm", present=False)
+
+    def _open_manufacture_product_detail(self, room: str):
+        self.scene_graph_navigation(Scene.INFRA_MAIN)
+        self.enter_room(room)
+        self._wait_drone_interface(
+            interval=3, accelerate_template="manufacture_accelerate"
+        )
+
+    def _read_manufacture_total_seconds(self) -> int:
+        hours, minutes, seconds = self.digit_reader.识别制造加速总剩余时间(
+            self.recog.gray, self.recog.h, self.recog.w
+        )
+        return hours * 3600 + minutes * 60 + seconds
+
+    def _survey_manufacture_switch(self, room: str, target_product: str) -> dict:
+        """只读取一个制造站，为批量计划收集快照，不消耗无人机。"""
+        self._open_manufacture_product_detail(room)
+        current_product = self.read_manufacture_product()
+        self._cache_facility_state(room, "manufacture", current_product)
+        observation = {
+            "room": room,
+            "facility": "manufacture",
+            "target_product": target_product,
+            "current_product": current_product,
+            "needs_switch": current_product != target_product,
+        }
+        if not observation["needs_switch"]:
+            return observation
+
+        observation["available_drones"] = self.digit_reader.get_drone(
+            self.recog.gray, self.recog.h, self.recog.w
+        )
+        if self._manufacture_is_idle():
+            observation.update(
+                total_seconds=0,
+                current_remaining=0,
+                drone_count=0,
+                wait_seconds=0,
+            )
+            logger.info(f"{self.translate_room(room)}当前空闲，无需使用无人机")
+            return observation
+        self._tap_drone_accelerate("manufacture_accelerate", "all_in")
+        total_seconds = self._read_manufacture_total_seconds()
+        self._tap_product_point((480, 864))
+        unit_seconds = MANUFACTURE_PRODUCTS[current_product].unit_seconds
+        setting = getattr(config.conf, "product_switching", None)
+        max_loss_seconds = (
+            getattr(setting, "drone_loss_seconds", 30)
+            if getattr(setting, "grandet_mode", True)
+            else DRONE_SECONDS
+        )
+        drone_count, wait_seconds = drone_plan(
+            total_seconds, unit_seconds, max_loss_seconds
+        )
+        observation.update(
+            total_seconds=total_seconds,
+            current_remaining=current_unit_remaining(total_seconds, unit_seconds),
+            drone_count=drone_count,
+            wait_seconds=wait_seconds,
+        )
+        logger.info(
+            f"{self.translate_room(room)}计划：使用{drone_count}架无人机，"
+            f"余下至多等待{wait_seconds}秒"
+        )
+        return observation
+
+    def _execute_manufacture_acceleration(self, observation: dict) -> int:
+        """按快照复核当前份进度，只允许把计划中的无人机数向下修正。"""
+        self._open_manufacture_product_detail(observation["room"])
+        current_product = self.read_manufacture_product()
+        if current_product == observation["target_product"]:
+            return 0
+        if current_product != observation["current_product"]:
+            raise RecognizeError(
+                f"{self.translate_room(observation['room'])}产物在规划期间发生变化"
+            )
+
+        if self._manufacture_is_idle():
+            logger.info(
+                f"{self.translate_room(observation['room'])}当前空闲，直接切换产物"
+            )
+            return 0
+
+        available_drones = self.digit_reader.get_drone(
+            self.recog.gray, self.recog.h, self.recog.w
+        )
+        self._tap_drone_accelerate("manufacture_accelerate", "all_in")
+        current_total = self._read_manufacture_total_seconds()
+        progressed = max(0, observation["total_seconds"] - current_total)
+        remaining = max(0, observation["current_remaining"] - progressed)
+        setting = getattr(config.conf, "product_switching", None)
+        max_loss_seconds = (
+            getattr(setting, "drone_loss_seconds", 30)
+            if getattr(setting, "grandet_mode", True)
+            else DRONE_SECONDS
+        )
+        unit_seconds = MANUFACTURE_PRODUCTS[current_product].unit_seconds
+        drone_count, wait_seconds = drone_plan(
+            remaining, unit_seconds, max_loss_seconds
+        )
+        drone_count = min(drone_count, observation["drone_count"])
+        if available_drones < drone_count:
+            self._tap_product_point((480, 864))
+            raise ProductSwitchDeferred(
+                f"无人机不足：需要{drone_count}架，当前{available_drones}架"
+            )
+        if drone_count:
+            self._confirm_drone_count(drone_count)
+        else:
+            self._tap_product_point((480, 864))
+        logger.info(
+            f"{self.translate_room(observation['room'])}执行计划："
+            f"使用{drone_count}架无人机，余下至多等待{wait_seconds}秒"
+        )
+        return wait_seconds
+
+    def _change_manufacture_product(self, observation: dict):
+        self._open_manufacture_product_detail(observation["room"])
+        current_product = self.read_manufacture_product()
+        self._cache_facility_state(observation["room"], "manufacture", current_product)
+        if current_product == observation["target_product"]:
+            return
+        self._select_manufacture_product(observation["target_product"])
+        self.recog.update()
+        final_product = self.read_manufacture_product()
+        self._cache_facility_state(observation["room"], "manufacture", final_product)
+        if final_product != observation["target_product"]:
+            raise RecognizeError(
+                f"制造站产物切换校验失败：期望"
+                f"{MANUFACTURE_PRODUCTS[observation['target_product']].name}，"
+                f"实际{MANUFACTURE_PRODUCTS[final_product].name}"
+            )
+
+    def _open_trade_product_detail(self, room: str):
+        self.scene_graph_navigation(Scene.INFRA_MAIN)
+        self.enter_room(room)
+        self._wait_drone_interface(
+            interval=3,
+            accelerate_template="bill_accelerate",
+            page_template="order_label",
+        )
+
+    def _read_trade_product_card(self) -> tuple[str, bool]:
+        """从订单列表右下角卡片读取订单类型及是否允许切换。"""
+        scope = (
+            (self.recog.w * 1400 // 1920, self.recog.h * 840 // 1080),
+            (self.recog.w * 1810 // 1920, self.recog.h * 1040 // 1080),
+        )
+        text = self._product_ocr_text(scope)
+        locked = "3级后可切换" in text or ("3级" in text and "切换" in text)
+        if "开采协力" in text:
+            product_id = "orundum"
+        elif "龙门商法" in text or locked:
+            product_id = "lmd"
+        else:
+            raise RecognizeError(f"无法识别当前贸易站订单类型：{text or 'OCR 无结果'}")
+        logger.info(
+            f"识别到当前贸易站订单类型：{TRADE_PRODUCTS[product_id].strategy_name}"
+        )
+        if locked:
+            logger.info("识别到低等级贸易站，订单类型固定为龙门商法")
+        return product_id, not locked
+
+    def _close_trade_product_select(self):
+        # 订单类型点击后立即生效，但选择弹窗不会自行关闭。
+        self._tap_product_point((1600, 200))
+        self._wait_product_resource("trade_strategy_select", present=False)
+
+    def _survey_trade_switch(self, room: str, target_product: str) -> dict:
+        self._open_trade_product_detail(room)
+        current_product, switchable = self._read_trade_product_card()
+        self._cache_facility_state(room, "trade", current_product)
+        return {
+            "room": room,
+            "facility": "trade",
+            "target_product": target_product,
+            "current_product": current_product,
+            "needs_switch": current_product != target_product,
+            "switchable": switchable,
+        }
+
+    def _change_trade_product(self, observation: dict):
+        self._open_trade_product_detail(observation["room"])
+        current_product, switchable = self._read_trade_product_card()
+        self._cache_facility_state(observation["room"], "trade", current_product)
+        if current_product == observation["target_product"]:
+            return
+        if not switchable:
+            if observation["target_product"] == "lmd":
+                return
+            raise ProductSwitchDeferred(
+                f"{self.translate_room(observation['room'])}等级不足，"
+                "无法切换至开采协力",
+                minutes=60,
+            )
+        self._tap_product_point((1580, 955))
+        self._wait_product_resource("trade_strategy_select")
+        self._tap_product_point(TRADE_PRODUCTS[observation["target_product"]].option)
+        self._close_trade_product_select()
+        self.recog.update()
+        final_product, _ = self._read_trade_product_card()
+        self._cache_facility_state(observation["room"], "trade", final_product)
+        if final_product != observation["target_product"]:
+            raise RecognizeError(
+                f"贸易站订单切换校验失败：期望"
+                f"{TRADE_PRODUCTS[observation['target_product']].strategy_name}，"
+                f"实际{TRADE_PRODUCTS[final_product].strategy_name}"
+            )
+
+    def switch_base_products(self, tasks: list[SchedulerTask]):
+        """先巡检全部目标站，再统一执行最省无人机的产物与订单计划。"""
+        task_observations = []
+        for task in tasks:
+            room, target_product = parse_product_task_meta(task.meta_data)
+            if target_product in MANUFACTURE_PRODUCTS:
+                observation = self._survey_manufacture_switch(room, target_product)
+            else:
+                observation = self._survey_trade_switch(room, target_product)
+            task_observations.append((task, observation))
+
+        locked_trade = [
+            (task, observation)
+            for task, observation in task_observations
+            if observation["facility"] == "trade"
+            and observation["needs_switch"]
+            and not observation.get("switchable", True)
+        ]
+        if locked_trade:
+            rooms = "、".join(
+                self.translate_room(observation["room"])
+                for _, observation in locked_trade
+            )
+            retry_time = datetime.now() + timedelta(minutes=60)
+            for task, _ in locked_trade:
+                task.time = max(task.time, retry_time)
+            logger.warning(
+                f"{rooms}等级不足，无法切换至开采协力；"
+                f"对应任务推迟至 {retry_time.strftime('%H:%M:%S')}"
+            )
+            locked_task_ids = {id(task) for task, _ in locked_trade}
+            task_observations = [
+                item for item in task_observations if id(item[0]) not in locked_task_ids
+            ]
+
+        # 订单不使用无人机，巡检完成后直接切换，不受制造站无人机余量影响。
+        for _, observation in task_observations:
+            if observation["facility"] == "trade" and observation["needs_switch"]:
+                self._change_trade_product(observation)
+        resolved_before_manufacture = {
+            id(task)
+            for task, observation in task_observations
+            if observation["facility"] == "trade" or not observation["needs_switch"]
+        }
+        self.tasks[:] = [
+            task for task in self.tasks if id(task) not in resolved_before_manufacture
+        ]
+
+        pending_manufacture = [
+            observation
+            for _, observation in task_observations
+            if observation["facility"] == "manufacture" and observation["needs_switch"]
+        ]
+        planned_drones = sum(item["drone_count"] for item in pending_manufacture)
+        available = min(
+            (item["available_drones"] for item in pending_manufacture),
+            default=planned_drones,
+        )
+        if available == 201:
+            raise RecognizeError("无人机数量识别异常")
+        logger.info(
+            f"制造站批量切产物计划共需至多{planned_drones}架无人机，"
+            f"当前可用{available}架"
+        )
+        if planned_drones > available:
+            raise ProductSwitchDeferred(
+                f"批量切产物无人机不足：需要{planned_drones}架，当前{available}架"
+            )
+
+        # 余数大的站先处理，把更快自然跨过三分钟边界的站留到后面；
+        # 每站执行前会复核，争取让实际消耗低于快照计划。
+        execution_order = sorted(
+            pending_manufacture,
+            key=lambda item: (item["wait_seconds"], item["drone_count"]),
+            reverse=True,
+        )
+        waits = [
+            self._execute_manufacture_acceleration(item) for item in execution_order
+        ]
+        if waits:
+            setting = getattr(config.conf, "product_switching", None)
+            if getattr(setting, "grandet_mode", True):
+                wait_seconds = max(waits)
+                buffer_seconds = max(0, getattr(setting, "waiting_seconds", 2))
+                self.sleep(wait_seconds + buffer_seconds)
+                self.recog.update()
+
+        for observation in pending_manufacture:
+            self._change_manufacture_product(observation)
+
+        task_ids = {id(task) for task, _ in task_observations}
+        self.tasks[:] = [task for task in self.tasks if id(task) not in task_ids]
+        self.tasks.sort(key=lambda task: task.time)
+        logger.info(
+            f"基建批量切换完成，共处理{len(task_observations)}个生产站，"
+            f"延期{len(locked_trade)}个低等级贸易站"
+        )
+
     def drone(
         self,
         room: str,
@@ -2960,7 +3931,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         # 关闭掉房间总览
         self._wait_drone_interface(interval=3)
 
-        accelerate = self.find("factory_accelerate")
+        accelerate = self.find("manufacture_accelerate")
         if accelerate:
             drone_count = self.digit_reader.get_drone(self.recog.gray)
             logger.info(f"当前无人机数量为：{drone_count}")
@@ -2968,7 +3939,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 logger.info(f"无人机数量小于{config.conf.drone_count_limit}->停止")
                 return
             logger.info("制造站加速")
-            all_in_scope = self._tap_drone_accelerate("factory_accelerate", "all_in")
+            all_in_scope = self._tap_drone_accelerate(
+                "manufacture_accelerate", "all_in"
+            )
             # 如果不是全部all in
             if all_in > 0:
                 tap_times = (
@@ -3028,15 +4001,15 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
     #     self.tap((self.recog.w * 0.05, self.recog.h * 0.95), interval=3)
     #     # 关闭掉房间总览
     #     error_count = 0
-    #     while self.find('factory_accelerate') is None:
+    #     while self.find('manufacture_accelerate') is None:
     #         if error_count > 5:
     #             raise Exception('未成功进入制造详情界面')
     #         self.tap((self.recog.w * 0.05, self.recog.h * 0.95), interval=3)
     #         error_count += 1
-    #     accelerate = self.find('factory_accelerate')
+    #     accelerate = self.find('manufacture_accelerate')
     #     无人机数量 = self.digit_reader.get_drone(self.recog.gray, self.recog.h, self.recog.w)
     #     if accelerate:
-    #         self.tap_element('factory_accelerate')
+    #         self.tap_element('manufacture_accelerate')
     #         self.recog.update()
     #         剩余制造加速总时间 = self.digit_reader.识别制造加速总剩余时间(self.recog.gray, self.recog.h, self.recog.w)
     #         # logger.info(f'制造站 B{room[5]}0{room[7]} 剩余制造总时间为 {剩余制造加速总时间}')
@@ -3163,7 +4136,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 if pos is None:
                     if not clicks:
                         break
-                    if self.find(template) is None and any(
+                    if (
+                        self.find(template, score=0.9)
+                        if clicks
+                        else self.find(template)
+                    ) is None and any(
                         self.find(destination)
                         for destination in (
                             "confirm_blue",
@@ -3357,6 +4334,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         self.last_room = "train"
 
     def get_free_list(self, agents: list[str] = None) -> list[str]:
+        agents = agents or []
         free_list = [
             v.name
             for k, v in self.op_data.operators.items()
@@ -3372,64 +4350,144 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             ]
         )
         train_support = self.op_data.get_train_support()
+        if not self.op_data.experimental_dorm_logic:
+            remove_set = set()
+            if self.task is not None:
+                for value_list in self.task.plan.values():
+                    remove_set.update(value_list)
+            remove_set.discard("Current")
+            remove_set.discard("Free")
+            logger.debug(f"去除被安排的人员{remove_set}")
+            free_list = list(
+                set(free_list) - set(self.op_data.config.free_blacklist) - remove_set
+            )
+            if train_support in free_list:
+                free_list.remove(train_support)
+            if any(
+                name in self.op_data.operators
+                and not self.op_data.operators[name].is_workshop()
+                and self.op_data.operators[name].current_mood() <= 22
+                for name in free_list
+            ):
+                free_list = [
+                    name
+                    for name in free_list
+                    if name not in self.op_data.operators
+                    or not self.op_data.operators[name].is_workshop()
+                ]
+            return free_list
         # 获取所有要移除的字符串集合（排除 'Crueent'）
         remove_set = set()
-        for key, value_list in self.task.plan.items():
-            remove_set.update(value_list)  # 加入所有列表中的元素
+        for task in [self.task, *getattr(self, "tasks", [])]:
+            if task is not None:
+                for value_list in task.plan.values():
+                    remove_set.update(value_list)
         remove_set.discard("Current")
         remove_set.discard("Free")
         logger.debug(f"去除被安排的人员{remove_set}")
-        free_list = list(
-            set(free_list) - set(self.op_data.config.free_blacklist) - remove_set
-        )
-        if train_support in free_list:
-            free_list.remove(train_support)
-        if any(
-            name in self.op_data.operators
-            and not self.op_data.operators[name].is_workshop()
-            and self.op_data.operators[name].current_mood() <= 22
+        now = datetime.now()
+        busy = busy_resting_names()
+        free_list = [
+            name
             for name in free_list
-        ):
-            # The game sorts by mood, so list ordering alone cannot put crafters
-            # behind replacements. Exclude them from this free-slot selection.
-            free_list = [
-                name
-                for name in free_list
-                if name not in self.op_data.operators
-                or not self.op_data.operators[name].is_workshop()
-            ]
-        return free_list
+            if name not in remove_set
+            and name != train_support
+            and resting_tier(self.op_data, name) != RestingTier.EXCLUDED
+            and name not in busy
+        ]
+        needing_rest = [
+            name
+            for name in free_list
+            if (op := self.op_data.operators.get(name)) is None
+            or resting_mood(op, now) == float("inf")
+            or resting_mood(op, now) < op.upper_limit
+        ]
+        if needing_rest:
+            free_list = needing_rest
+        return sorted(free_list, key=lambda name: resting_key(self.op_data, name, now))
 
     def preserve_resting_crafters(self, agents, room):
-        """Resolve Free placeholders before UI selection can evict a crafter.
-
-        Reserve each qualifying replacement once. A generic Free selection must
-        not substitute an almost-full replacement for a recovering crafter.
-        """
+        """按统一层级解析 Free，并让实际选人遵守正在休息者的接管规则。"""
         if not room.startswith("dorm") or "Free" not in agents:
             return
-        replacements = sorted(
-            (
-                self.op_data.operators[name]
-                for name in self.get_free_list(agents)
-                if name in self.op_data.operators
-                and not self.op_data.operators[name].is_workshop()
-                and self.op_data.operators[name].current_mood() <= 22
-            ),
-            key=lambda op: op.current_mood(),
+        if not self.op_data.experimental_dorm_logic:
+            replacements = sorted(
+                (
+                    self.op_data.operators[name]
+                    for name in self.get_free_list(agents)
+                    if name in self.op_data.operators
+                    and not self.op_data.operators[name].is_workshop()
+                    and self.op_data.operators[name].current_mood() <= 22
+                ),
+                key=lambda op: op.current_mood(),
+            )
+            for index, name in enumerate(agents):
+                if name != "Free":
+                    continue
+                current = self.op_data.get_current_operator(room, index)
+                if (
+                    current is None
+                    or not current.is_workshop()
+                    or current.current_mood() >= current.upper_limit
+                    or current.name in agents
+                ):
+                    continue
+                agents[index] = (
+                    replacements.pop(0).name if replacements else current.name
+                )
+            return
+        now = datetime.now()
+        moving = (
+            {
+                name
+                for names in self.task.plan.values()
+                for name in names
+                if name not in ("Current", "Free", "")
+            }
+            if self.task is not None
+            else set()
         )
+        replacements = [
+            self.op_data.operators[name]
+            for name in self.get_free_list(agents)
+            if name in self.op_data.operators
+            and (
+                resting_mood(self.op_data.operators[name], now) == float("inf")
+                or resting_mood(self.op_data.operators[name], now)
+                < self.op_data.operators[name].upper_limit
+            )
+        ]
         for index, name in enumerate(agents):
             if name != "Free":
                 continue
             current = self.op_data.get_current_operator(room, index)
-            if (
-                current is None
-                or not current.is_workshop()
-                or current.current_mood() >= current.upper_limit
-                or current.name in agents
-            ):
-                continue
-            agents[index] = replacements.pop(0).name if replacements else current.name
+            if current is not None and current.name in (set(agents) | moving):
+                current = None
+            if current is not None:
+                mood = resting_mood(current, now)
+                full = mood != float("inf") and mood >= current.upper_limit
+                # 主班通过自己的上下班任务移动，Free 不隐式召回整组。
+                if current.is_high():
+                    agents[index] = current.name
+                    continue
+                if not full:
+                    bed = next(
+                        (d for d in self.op_data.dorm if d.position == (room, index)),
+                        None,
+                    )
+                    if (
+                        not replacements
+                        or bed is None
+                        or not self.op_data._slot_takable(
+                            bed, protect_resting=True, requester=replacements[0].name
+                        )
+                    ):
+                        agents[index] = current.name
+                        continue
+            if replacements:
+                agents[index] = replacements.pop(0).name
+            elif current is not None:
+                agents[index] = current.name
 
     @timed_step("selection")
     def choose_agent(
@@ -3444,6 +4502,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         :param order: ArrangeOrder, 选择干员时右上角的排序功能
         """
         max_swipe = 50
+        experimental_dorm_logic = bool(
+            getattr(self.op_data, "experimental_dorm_logic", False)
+        )
         position = [
             (0.35, 0.35),
             (0.35, 0.75),
@@ -3466,7 +4527,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             if room.startswith("dorm") and agents[idx] in self.op_data.operators.keys():
                 __agent = self.op_data.operators[agents[idx]]
                 if (
-                    not preserve_dorm_occupants
+                    (
+                        not experimental_dorm_logic
+                        or getattr(self.op_data.config, "free_room", False)
+                    )
+                    and not preserve_dorm_occupants
                     and __agent.mood == __agent.upper_limit
                     and not __agent.room.startswith("dorm")
                     and not self.op_data.is_dorm_replacement_for_slot(
@@ -3691,11 +4756,27 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             # 只选择在列表里面的
             # 替换组小于20才休息，防止进入就满心情进行网络连接
             free_list = self.get_free_list(agents)
+            selection_time = datetime.now() if experimental_dorm_logic else None
             observation = None
             previous_page = None
             while free_num:
+                if experimental_dorm_logic and (
+                    not free_list or right_swipe > max_swipe
+                ):
+                    raise Exception("没有找到足够的可用宿舍候选干员")
+                # scan_agent 按屏幕顺序点击，单纯排序名单不能保证层级和心情顺序。
+                # 一次只允许选择当前最高优先级、最低已知心情的候选。
+                if experimental_dorm_logic:
+                    first_key = resting_key(self.op_data, free_list[0], selection_time)
+                    candidates = [
+                        name
+                        for name in free_list
+                        if resting_key(self.op_data, name, selection_time) == first_key
+                    ]
+                else:
+                    candidates = free_list
                 selected_name, ret = self.scan_agent(
-                    free_list,
+                    candidates,
                     max_agent_count=free_num,
                     full_scan=last_special_filter == "ALL",
                     observation=observation,
@@ -3703,11 +4784,16 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                 observation = None
                 selected.extend(selected_name)
                 free_num -= len(selected_name)
+                changed = bool(selected_name)
                 while len(selected_name) > 0:
                     agents[agents.index("Free")] = selected_name[0]
+                    if experimental_dorm_logic:
+                        free_list.remove(selected_name[0])
                     selected_name.remove(selected_name[0])
                 if free_num == 0:
                     break
+                elif changed and experimental_dorm_logic:
+                    right_swipe = self.swipe_left(right_swipe, last_special_filter)
                 else:
                     if right_swipe >= max_swipe:
                         raise AgentSelectionNotReady(
@@ -3865,9 +4951,11 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             )
         raise RecognizeError("房间名单滚动六次仍未到达边界，返回房间重试")
 
-    def get_agent_from_room(self, room, read_time_index=None):
+    def get_agent_from_room(self, room, read_time_index=None, related_operators=None):
         if read_time_index is None:
             read_time_index = []
+        if related_operators is None:
+            related_operators = {}
         if room == "meeting" and not self.leifeng_mode:
             self.sleep(0.5)
             self.recog.update()
@@ -3877,14 +4965,24 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             if clue_res != 11:
                 self.clue_count = clue_res
                 logger.info(f"当前拥有线索数量为{self.clue_count}")
+        self.refresh_facility_state(room)
         self.turn_on_room_detail(room)
         # 如果是宿舍则全读取
         if room.startswith("dorm"):
-            read_time_index = [
-                i
-                for i, obj in enumerate(self.op_data.plan[room])
-                if obj.agent == "Free" or obj.agent == "菲亚梅塔"
-            ]
+            if self.task is not None and self.task.type == TaskTypes.FIAMMETTA:
+                # 充能时菲亚梅塔会被临时换到任务指定的槽位，
+                # 与静态排班中的位置无关；保留 agent_arrange 传入的
+                # 实际槽位，否则无法采样并记录本次充能对象。
+                read_time_index = list(dict.fromkeys(read_time_index))
+            else:
+                dorm_read_time_index = [
+                    i
+                    for i, obj in enumerate(self.op_data.plan[room])
+                    if obj.agent in ("Free", "菲亚梅塔")
+                ]
+                read_time_index = list(
+                    dict.fromkeys([*read_time_index, *dorm_read_time_index])
+                )
         while self.detect_product_complete():
             logger.info("检测到产物收取提示")
             self.sleep(1)
@@ -3925,19 +5023,37 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     self.op_data.add(Operator(_name, ""))
 
                 agent = self.op_data.operators[_name]
-                if (
+                should_read_mood = (
                     self.op_data.operators[_name].need_to_refresh(r=room)
                     or (self.tasks and self.tasks[0].type == TaskTypes.SHIFT_ON)
                     or i in read_time_index
+                )
+                if (
+                    room.startswith("dorm")
+                    and self.task is not None
+                    and self.task.type == TaskTypes.FIAMMETTA
                 ):
+                    should_read_mood = _name == "菲亚梅塔" and i in read_time_index
+                if should_read_mood:
                     _mood = self.read_accurate_mood(cropimg(self.recog.gray, mood_p[i]))
                     update_time = True
                 else:
                     _mood = self.op_data.operators[_name].current_mood()
                 # 估算值只用于本次读数，保留与原采样时间配对的心情，避免重复扣减。
-                high_no_time = self.op_data.update_detail(
-                    _name, _mood if update_time else agent.mood, room, i, update_time
+                update_args = (
+                    _name,
+                    _mood if update_time else agent.mood,
+                    room,
+                    i,
+                    update_time,
                 )
+                related_operator = related_operators.get(i)
+                if _name == "菲亚梅塔" and related_operator:
+                    high_no_time = self.op_data.update_detail(
+                        *update_args, related_operator=related_operator
+                    )
+                else:
+                    high_no_time = self.op_data.update_detail(*update_args)
                 data["depletion_rate"] = agent.depletion_rate
                 if high_no_time is not None and high_no_time not in read_time_index:
                     logger.debug(
@@ -3989,6 +5105,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             ].current_room == room and _operator not in [
                 res["agent"] for res in result
             ]:
+                if room.startswith("dorm"):
+                    _idx, dorm = self.op_data.get_dorm_by_name(_operator)
+                    if dorm is not None:
+                        dorm.reset()
                 self.op_data.operators[_operator].current_room = ""
                 self.op_data.operators[_operator].current_index = -1
                 if (
@@ -4113,6 +5233,7 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
         目标及清空结果均识别成功后才记录；留在同一宿舍期间不重复清房。
         """
         from arknights_mower.utils.dorm_recovery import (
+            recovery_fixed_occupants,
             recovery_order_plan,
             recovery_target,
         )
@@ -4158,7 +5279,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             current = [item["agent"] for item in self.get_agent_from_room(room)]
             if current != expected:
                 raise Exception("宿舍单回排序确认失败，保留原任务重试")
-        target.dorm_recovery_room = room if target.mood < 24 else ""
+        if target.mood < 24:
+            target.dorm_recovery_room = room
+            target.dorm_recovery_fixed = recovery_fixed_occupants(
+                self.op_data, room, agents
+            )
+        else:
+            target.clear_dorm_recovery()
         logger.info(f"宿舍单回排序确认：{room} 目标 {target.name}，恢复原位")
         return True
 
@@ -4191,6 +5318,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                         except Exception as e:
                             logger.warning(f"训练室状态读取失败: {e}")
                             room_state = None
+                        self.train_room_state = (
+                            room_state if config.conf.enable_mastery else None
+                        )
                         if room_state is not None and config.conf.enable_mastery:
                             # #61 短动作排班路径内联：顺路核实/帮收/重置/更新状态，并据截图
                             # 修正 DB（空闲×DB active 冲突 → 重置 idle，以截图为准）。不
@@ -4223,7 +5353,10 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                                         room_state = read_room_state(self, enter=False)
                                     except Exception:
                                         room_state = None
-                        # §16.5 保护检查：locked（训练中/待收取）、protected（逻各斯/艾丽妮
+                                self.train_room_state = (
+                                    room_state if config.conf.enable_mastery else None
+                                )
+                        # §4.4 保护检查：locked（训练中/待收取）、protected（逻各斯/艾丽妮
                         # 保护训练室）或读失败（room_state=None）都算「不能排班」→ 冻结/
                         # 跳过（#211：读失败保守不碰训练位，替代已删除的 train_slot_locked）。
                         if (
@@ -4231,6 +5364,9 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             or room_state.locked
                             or room_state.protected
                         ):
+                            self.train_room_state = (
+                                room_state if config.conf.enable_mastery else None
+                            )
                             if config.conf.assistant_follows_schedule:
                                 if len(plan[room]) > 1:
                                     plan[room][1] = "Current"
@@ -4339,20 +5475,39 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                             self.choose_agent(plan[room], room, choose_error <= 0)
                         self.tap_confirm(room, new_plan)
                     read_time_index = []
-                    if get_time or recovery_ordered:
-                        read_time_index = self.op_data.get_refresh_index(
+                    related_operators = {}
+                    fia_arrangement = (
+                        self.task.type == TaskTypes.FIAMMETTA
+                        and "菲亚梅塔" in plan[room]
+                    )
+                    if fia_arrangement:
+                        fia_index = plan[room].index("菲亚梅塔")
+                        read_time_index.append(fia_index)
+                        if self.task.meta_data:
+                            related_operators[fia_index] = self.task.meta_data
+                        logger.info("肥鸭换入完成，读取交换后心情")
+                    elif get_time or recovery_ordered:
+                        refresh_indexes = self.op_data.get_refresh_index(
                             room, plan[room]
                         )
                         if recovery_ordered:
-                            read_time_index = [
+                            refresh_indexes = [
                                 i
                                 for i, slot in enumerate(self.op_data.plan[room])
                                 if slot.agent == "Free"
                             ]
+                        read_time_index = list(
+                            dict.fromkeys([*read_time_index, *refresh_indexes])
+                        )
                     if len(new_plan) > 1:
                         self.op_data.operators["菲亚梅塔"].time_stamp = None
                         self.op_data.operators[plan[room][0]].time_stamp = None
-                    current = self.get_agent_from_room(room, read_time_index)
+                    if related_operators:
+                        current = self.get_agent_from_room(
+                            room, read_time_index, related_operators
+                        )
+                    else:
+                        current = self.get_agent_from_room(room, read_time_index)
                     for idx, name in enumerate(plan[room]):
                         if current[idx]["agent"] != name and name != "Free":
                             if not (room == "train" and idx == 1):
@@ -4439,6 +5594,8 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             copy.deepcopy(plan) if self.task.type == TaskTypes.RUN_ORDER else None
         )
         new_plan = {}
+        before_work_checked = False
+        before_dorm_checked = False
         # 优先替换工作站再替换宿舍
         rooms.sort(
             key=lambda x: (
@@ -4447,6 +5604,86 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             )
         )
         for room in rooms:
+            if not room.startswith("dormitory_") and not before_work_checked:
+                before_work_checked = True
+                custom_task_time = self.task.time - timedelta(microseconds=1)
+                generated_tasks = []
+                if self.backup_plan_solver(
+                    PlanTriggerTiming.BEFORE_WORK,
+                    append_empty_task=False,
+                    custom_task_time=custom_task_time,
+                    generated_tasks=generated_tasks,
+                    restore_on_deactivate=True,
+                ):
+                    generated_ids = {id(task) for task in generated_tasks}
+                    anchor = min(
+                        (
+                            task.time
+                            for task in self.tasks
+                            if id(task) not in generated_ids
+                        ),
+                        default=self.task.time,
+                    )
+                    for offset, generated in enumerate(
+                        reversed(generated_tasks), start=1
+                    ):
+                        generated.time = anchor - timedelta(microseconds=offset)
+                    # 先执行切表生成的任务；它明确写入的槽位不再由旧任务覆盖，
+                    # 旧任务中其他房间或其他槽位仍在下一轮续行。
+                    for generated in generated_tasks:
+                        for generated_room, generated_agents in generated.plan.items():
+                            if generated_room not in plan:
+                                continue
+                            for index, name in enumerate(generated_agents):
+                                if (
+                                    index < len(plan[generated_room])
+                                    and name != "Current"
+                                ):
+                                    plan[generated_room][index] = "Current"
+                    for pending_room in list(plan):
+                        if all(name == "Current" for name in plan[pending_room]):
+                            del plan[pending_room]
+                    logger.info("进入工作站前触发副表任务，先执行切表任务")
+                    return False
+            if room.startswith("dormitory_") and not before_dorm_checked:
+                before_dorm_checked = True
+                custom_task_time = self.task.time - timedelta(microseconds=1)
+                generated_tasks = []
+                if self.backup_plan_solver(
+                    PlanTriggerTiming.BEFORE_DORM,
+                    append_empty_task=False,
+                    custom_task_time=custom_task_time,
+                    generated_tasks=generated_tasks,
+                    restore_on_deactivate=True,
+                ):
+                    generated_ids = {id(task) for task in generated_tasks}
+                    anchor = min(
+                        (
+                            task.time
+                            for task in self.tasks
+                            if id(task) not in generated_ids
+                        ),
+                        default=self.task.time,
+                    )
+                    for offset, generated in enumerate(
+                        reversed(generated_tasks), start=1
+                    ):
+                        generated.time = anchor - timedelta(microseconds=offset)
+                    # 副表宿舍任务代替原任务中的同一宿舍；原任务只续行剩余
+                    # 未被副表覆盖的宿舍，避免副表完成后又执行旧的房间安排。
+                    superseded_dorms = set()
+                    for generated in generated_tasks:
+                        for dorm in generated.plan:
+                            if dorm not in plan or not dorm.startswith("dormitory_"):
+                                continue
+                            superseded_dorms.add(dorm)
+                    for dorm in superseded_dorms:
+                        del plan[dorm]
+                    logger.info(
+                        "入住宿舍前触发副表任务，"
+                        f"覆盖原任务宿舍: {sorted(superseded_dorms)}"
+                    )
+                    return False
             new_plan = self.agent_arrange_room(new_plan, room, plan, get_time=get_time)
         if len(new_plan) == 1 and room != "train":
             if config.conf.run_order_buffer_time <= 0 or self.task.adjusted:
@@ -4948,6 +6185,13 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             self.drop_send = False
             restore_theme = False
             conf = config.conf
+            if (
+                not one_time
+                and len(self.tasks) > 0
+                and (self.tasks[0].time - datetime.now()).total_seconds() < 300
+            ):
+                logger.info("距离下次基建任务不足5分钟，跳过MAA日常任务")
+                return
             if (
                 not one_time
                 and self.last_execution["maa"] is not None
@@ -5803,7 +7047,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
                     logger.info("local operation finished without executing any stage")
 
             scheduling(self.tasks)
-            self.rest_until_next_task()
         except MowerExit:
             raise
         except Exception as e:
@@ -5811,12 +7054,6 @@ class BaseSchedulerSolver(SceneGraphSolver, BaseMixin):
             logger.exception(e)
             self.device.exit()
             send_message(str(e), "mower local operation error", level="ERROR")
-            remaining_time = (self.tasks[0].time - datetime.now()).total_seconds()
-            if remaining_time > 0:
-                logger.info(
-                    f"休息 {format_time(remaining_time)}，到{self.tasks[0].time.strftime('%H:%M:%S')}开始工作"
-                )
-                self._idle_sleep(remaining_time)
             self.check_current_focus()
 
     def mail_plan_solver(self):

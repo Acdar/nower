@@ -418,6 +418,14 @@ class RIICPart(ConfModel):
         back_to_index: bool = False
         "跑单前返回基建首页"
 
+    class ProductSwitchingConf(ConfModel):
+        grandet_mode: bool = True
+        "仅使用不会超过损耗容限的无人机，余下时间自然等待"
+        drone_loss_seconds: int = Field(default=30, ge=0, le=180)
+        "允许额外一架无人机浪费的加速秒数"
+        waiting_seconds: int = Field(default=2, ge=0, le=60)
+        "制造站自然完成当前产物后的额外等待秒数"
+
     class WorkShopSetting(ConfModel):
         items: list[WorkShopItem] = []
         "材料列表"
@@ -507,8 +515,15 @@ class RIICPart(ConfModel):
             data["run_order_grandet_mode"] = grandet
         return data
 
+    product_switching: ProductSwitchingConf = Field(
+        default_factory=ProductSwitchingConf
+    )
+    "葛朗台切产物与订单"
+
     free_room: bool = False
     "宿舍不养闲人模式"
+    experimental_dorm_logic: bool = False
+    "测试宿舍逻辑；关闭时使用稳定版宿舍分配规则"
     fia_fool: bool = True
     "菲亚防呆"
     fia_threshold: float = 0.9
@@ -555,7 +570,7 @@ class RIICPart(ConfModel):
     workshop_protect_t2_device_rock: bool = False
     "禁止加工消耗装置、固源岩（仅 T2），材料预算也排除对应合成配方"
     workshop_low_priority_rest: bool = True
-    "加工干员使用最低宿舍恢复优先级，覆盖床位分配与实际选人"
+    "稳定版加工干员最低宿舍恢复优先级"
     t5_operators: list[str] = ["年"]
     "自动专精 T5 加工干员"
     book_operators: list[str] = ["司霆惊蛰"]
@@ -565,14 +580,16 @@ class RIICPart(ConfModel):
     merge_interval: float = 10
     "不养闲人合并间隔"
     dorm_order: str = ""
-    "宿舍优先级"
-    refresh_backup_plan_after_mood: bool = False
-    "缓存清零重启后读取心情并按载入心情数据模式重启"
+    "稳定版全局宿舍优先级"
+    refresh_backup_plan_after_mood: bool = True
+    "缓存清零重启后读取心情并按载入心情数据模式重启，默认开启"
     assistant_follows_schedule: bool = False
     "协助位跟随排班（专精时协助位不固定，由排班系统管理）"
     enable_mastery: bool = True
     "全自动专精全局开关：OFF 时禁用全部训练室动作/通知/守卫，仅保留仓库材料扫描"
-    # 中枢加成（0/5）与换人缓冲时间已迁到路线配置全局设置行（#91 修订），不再存 conf
+
+    # 中枢加成（0/5）与换人缓冲时间已迁到路线配置全局设置行（见 mastery-route.json），
+    # 不再存 conf
 
 
 class SimulatorPart(ConfModel):

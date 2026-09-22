@@ -24,11 +24,15 @@ class PlanConf(BaseModel):
     "用尽时间刷新干员"
     ope_resting_priority: str = ""
     "休息排序优先级"
+    dorm_order: str = ""
+    "测试宿舍逻辑下当前排班的宿舍房间优先级"
 
 
 class BackupPlanConf(PlanConf):
     free_blacklist: str = ""
     "（非主力）宿舍黑名单"
+    dorm_order_override: Optional[bool] = None
+    "是否由该副表显式覆盖此前生效的宿舍房间优先级"
 
 
 class Plans(BaseModel):
@@ -119,6 +123,8 @@ class BackupPlan(BaseModel):
     task: Task = {}
     trigger: Trigger = {}
     trigger_timing: str = "AFTER_PLANNING"
+    # 空值表示始终跟随切入时机，兼容旧排班且允许之后修改切入时机。
+    exit_trigger_timing: Optional[str] = None
     name: str = "plan"
 
 
@@ -136,3 +142,59 @@ def parse_plan_document(data) -> PlanModel:
     if data.get("default", "plan1") != "plan1":
         raise ValueError("不支持的主排班名称")
     return PlanModel(**data)
+
+
+def migrate_legacy_dorm_order(
+    plan: PlanModel, data: dict, legacy_dorm_order: str
+) -> bool:
+    """迁移全局旧床位顺序，并折叠为每张排班独立的房间顺序。
+
+    主表缺少独立字段时继承旧全局值；副表只迁移显式的非默认顺序。
+    历史版本自动写入副表的 1→2→3→4 视为未覆盖，避免后续副表把
+    前一张副表的自定义顺序冲回默认值。
+    """
+    rooms = [f"dormitory_{index}" for index in range(1, 5)]
+
+    def room_order(value: str) -> str:
+        result = []
+        for item in (value or "").split(","):
+            parts = item.rsplit("_", 1)
+            room = (
+                parts[0]
+                if len(parts) == 2 and parts[0] in rooms and parts[1].isdigit()
+                else item
+            )
+            if room in rooms and room not in result:
+                result.append(room)
+        result.extend(room for room in rooms if room not in result)
+        return ",".join(result)
+
+    changed = False
+    main_conf = data.get("conf")
+    if not isinstance(main_conf, dict) or "dorm_order" not in main_conf:
+        plan.conf.dorm_order = legacy_dorm_order
+        changed = True
+    normalized = room_order(plan.conf.dorm_order)
+    if plan.conf.dorm_order != normalized:
+        plan.conf.dorm_order = normalized
+        changed = True
+    raw_backups = data.get("backup_plans")
+    if not isinstance(raw_backups, list):
+        raw_backups = []
+    for index, backup in enumerate(plan.backup_plans):
+        raw_conf = raw_backups[index].get("conf") if index < len(raw_backups) else None
+        raw_conf = raw_conf if isinstance(raw_conf, dict) else {}
+        raw_order = str(raw_conf.get("dorm_order", "") or "")
+        normalized = room_order(raw_order) if raw_order else ""
+        explicit = raw_conf.get("dorm_order_override")
+        if explicit is None:
+            explicit = bool(normalized and normalized != ",".join(rooms))
+        explicit = bool(explicit)
+        desired_order = normalized if explicit else ""
+        if backup.conf.dorm_order != desired_order:
+            backup.conf.dorm_order = desired_order
+            changed = True
+        if backup.conf.dorm_order_override != explicit:
+            backup.conf.dorm_order_override = explicit
+            changed = True
+    return changed
