@@ -74,13 +74,29 @@ onUnmounted(() => {
   screenshotPreview.stop()
 })
 
+const message = useMessage()
+
 function start(value) {
   running.value = true
   log_lines.value = []
   if (value == undefined) {
     value = '0'
   }
-  axios.get(`${import.meta.env.VITE_HTTP_URL}/start/${value}`)
+  axios
+    .get(`${import.meta.env.VITE_HTTP_URL}/start/${value}`)
+    .then((response) => {
+      // 服务端返回 false 表示未启动（已有任务或维护任务在运行）
+      if (String(response.data) !== 'true') {
+        running.value = false
+        message.error('开始执行失败：服务端未启动 Mower，可能有任务正在运行')
+      }
+    })
+    .catch((error) => {
+      // 不吞异常：否则界面只是过几秒自己变回「开始执行」，日志也是空的
+      running.value = false
+      const detail = error?.response?.data?.error || error.message
+      message.error(`开始执行失败：${detail}`)
+    })
   get_tasks()
 }
 

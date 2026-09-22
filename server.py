@@ -967,7 +967,14 @@ def start(start_type):
         restart_after_mood_read = (
             start_type == "2" and config.conf.refresh_backup_plan_after_mood
         )
-        from arknights_mower.__main__ import main
+        try:
+            from arknights_mower.__main__ import main
+        except Exception:
+            # 导入链很长（__main__ → solvers → utils → ...），任何一个包缺失都会抛在
+            # 这里。不先落日志的话，界面上只会表现为「点了开始执行没反应、日志空白」，
+            # 例如打包版少了一个可选依赖 tinify 时的 ModuleNotFoundError。
+            logger.exception("导入 mower 主流程失败，无法开始执行")
+            raise
 
         mower_thread = Thread(
             target=main, args=(saved_state, restart_after_mood_read), daemon=True

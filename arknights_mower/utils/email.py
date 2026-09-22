@@ -11,9 +11,20 @@ from typing import Literal, Optional
 
 import cv2
 import requests
-import tinify
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from markdownify import markdownify as md
+
+try:
+    import tinify
+except ImportError:
+    # tinify / markdownify 都是发通知时才用到的可选依赖，缺失时不能让 import email
+    # 失败：email 位于 __main__ → base_schedule → credit → graph → solver 的导入链上，
+    # 缺一个可选包会让「开始执行」直接 500 且不留任何日志。
+    tinify = None
+
+try:
+    from markdownify import markdownify as md
+except ImportError:
+    md = None
 
 from arknights_mower.utils import config
 from arknights_mower.utils import typealias as tp
@@ -21,7 +32,8 @@ from arknights_mower.utils.image import img2bytes
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 
-tinify.key = "7mPMFzdQw7CNNwv51QCc4QdgrgYHvb7h"
+if tinify is not None:
+    tinify.key = "7mPMFzdQw7CNNwv51QCc4QdgrgYHvb7h"
 template_dir = get_path("@internal/arknights_mower/templates")
 env = Environment(loader=FileSystemLoader(template_dir), autoescape=select_autoescape())
 
@@ -120,7 +132,7 @@ def send_message(
         def send_pushdeer_sync():
             send_key = conf.sendKey
             url = f"https://sft.acdar.dev/message/push?pushkey={send_key}"
-            push_body = md(body)
+            push_body = md(body) if md is not None else body
             if attach_image is not None:
                 image_url = upload_message(attach_image)
                 if image_url:
@@ -155,6 +167,10 @@ def send_message(
 
 
 def upload_message(image):
+    if tinify is None:
+        # 没有 tinify 就不压缩也不上传，消息正文少一张图，比整个 mower 起不来好得多。
+        logger.warning("未安装 tinify，跳过推送图片上传")
+        return None
     try:
         # 将图像转换为字节格式
         _, image_buffer = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))

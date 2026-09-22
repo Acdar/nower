@@ -45,10 +45,14 @@ requests[socks]==2.31.0
 httpx[socks]==0.28.1
 beautifulsoup4==4.12.3
 lxml==5.2.2
+markdownify==1.2.2
 htmllistparse==0.6.1
 
 # 邮件模板
 Jinja2==3.1.4
+
+# 推送消息的截图压缩上传（可选依赖：缺失时仅跳过推送配图，不影响启动）
+tinify==1.7.1
 
 # 启动模拟器后按快捷键
 PyAutoGUI==0.9.54

@@ -10,11 +10,14 @@
 - 剩余 60 / 30 / 10 秒时弹 Windows 系统通知 + 提示音 + 窗口闪烁（阈值可用
   --thresholds 自定义），最后 10 秒倒计时数字平滑循环变色；
 - 显示下次任务名与时间；窗口可拖动（位置自动记忆），右键菜单可测试通知、
-  设置服务器、开关置顶/声音或退出。
+  设置服务器、开关置顶/声音或退出；
+- 支持 HTTP / HTTPS：目标写成 https://host:port 即走 TLS（先试 http、失败再试
+  https），自签名证书可勾选「忽略证书校验」（等价 curl -k）。
 
 用法：
     python countdown_widget.py                 # 自动发现正在运行的实例
     python countdown_widget.py --port 58000    # 指定端口
+    python countdown_widget.py --host https://192.168.1.5:8443 --insecure
     pythonw countdown_widget.py                # 无控制台窗口启动
 """
 
@@ -29,6 +32,7 @@ import json
 import math
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -278,30 +282,44 @@ def save_settings(**updates):
 
 
 def parse_endpoint(text: str):
-    """解析「58000」/「127.0.0.1:58000」/「http://host:58000」为 (host, port)。
+    """解析地址文本为 (host, port, secure)。
 
-    返回 (None, None) 表示输入无效，(host, None) 表示改回自动发现。
+    接受「58000」/「127.0.0.1:58000」/「http://host:58000」/「https://host」，
+    带协议但省略端口时用默认端口（https=443 / http=80）。
+
+    返回 (None, None, None) 表示输入无效；
+    返回 (host, None, secure) 表示改回自动发现端口；
+    secure 为 None 表示没指定协议（连接时先试 http，失败再试 https）。
     """
     value = text.strip()
     if not value:
-        return "127.0.0.1", None
+        return "127.0.0.1", None, None
+    secure = None
     if "://" in value:
-        value = value.split("://", 1)[1]
-    value = value.strip("/")
-    if not value:
-        return "127.0.0.1", None
+        scheme, _, value = value.partition("://")
+        scheme = scheme.strip().lower()
+        if scheme in ("http", "https"):
+            secure = scheme == "https"
+        # 只保留主机部分：路径（/status）由请求固定，不需要用户填
+        value = value.strip("/").split("/", 1)[0].strip()
+        if not value:
+            return "127.0.0.1", None, secure
     if ":" in value:
         host, _, port_text = value.rpartition(":")
         host = host.strip() or "127.0.0.1"
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]  # IPv6 字面量：[::1]:8443 → ::1
+    elif secure is None:
+        host, port_text = "127.0.0.1", value  # 只写了端口
     else:
-        host, port_text = "127.0.0.1", value
+        host, port_text = value, str(443 if secure else 80)  # 带协议但省了端口
     try:
         port = int(port_text)
     except ValueError:
-        return None, None
+        return None, None, None
     if not 0 < port < 65536:
-        return None, None
-    return host, port
+        return None, None, None
+    return host, port, secure
 
 
 def toast_script(
@@ -363,25 +381,52 @@ def toast_script(
 class StatusPoller(threading.Thread):
     """后台线程：轮询 /status 维护快照；断线时自动重新发现端口。"""
 
-    def __init__(self, host="127.0.0.1", port=None, interval=1.0, verbose=False):
+    def __init__(
+        self,
+        host="127.0.0.1",
+        port=None,
+        interval=1.0,
+        verbose=False,
+        secure: bool | None = None,
+        insecure: bool = False,
+    ):
         super().__init__(daemon=True, name="mower-status-poller")
         self.host = host
         self.fixed_port = port
         self.interval = max(0.2, float(interval))
         self.verbose = verbose
+        # secure=None 表示自动：先按 http 试，失败再用 https
+        self.secure = secure
+        self.insecure = insecure  # True = 不校验证书（自签名证书）
         self.snapshot: dict | None = None
         self.endpoint: int | None = None
+        self.endpoint_secure = False
+        self._ssl_context: ssl.SSLContext | None = None
         self._wake = threading.Event()
 
     def reset(self):
         """请求立即重新发现端口（右键菜单「重新连接」）。"""
         self._wake.set()
 
-    def configure(self, host: str, port: int | None):
-        """运行时切换目标服务器（右键菜单「设置服务器…」）。"""
+    def configure(
+        self,
+        host: str,
+        port: int | None,
+        secure: bool | None = None,
+        insecure: bool | None = None,
+    ):
+        """运行时切换目标服务器（右键菜单「设置服务器…」）。
+
+        secure=None 表示「自动」；insecure=None 表示保持原值不变。
+        """
         self.host = host
         self.fixed_port = port
+        self.secure = secure
+        if insecure is not None:
+            self.insecure = bool(insecure)
+            self._ssl_context = None
         self.endpoint = None
+        self.endpoint_secure = False
         self.snapshot = None
         self._wake.set()
 
@@ -389,13 +434,29 @@ class StatusPoller(threading.Thread):
         if self.verbose:
             print(f"[poll] {message}", flush=True)
 
-    def _request(self, port: int) -> dict:
-        """用标准库发一个本机 HTTP GET。
+    def _tls_context(self) -> ssl.SSLContext:
+        """HTTPS 用的 SSL 上下文，只在第一次需要时创建（加载根证书较慢）。"""
+        if self._ssl_context is None:
+            context = ssl.create_default_context()
+            if self.insecure:
+                # 自签名 / 自建 CA 证书：跳过校验，等价 curl -k
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            self._ssl_context = context
+        return self._ssl_context
+
+    def _request(self, port: int, secure: bool = False) -> dict:
+        """用标准库发一个 HTTP(S) GET。
 
         刻意不用 requests：它会把 cryptography/OpenSSL 等一大堆用不到的
-        依赖（打包后多出十几 MB）带进绿色版 exe。
+        依赖（打包后多出十几 MB）带进绿色版 exe；HTTPS 直接用标准库 ssl。
         """
-        connection = http.client.HTTPConnection(self.host, port, timeout=1.3)
+        if secure:
+            connection = http.client.HTTPSConnection(
+                self.host, port, timeout=1.3, context=self._tls_context()
+            )
+        else:
+            connection = http.client.HTTPConnection(self.host, port, timeout=1.3)
         try:
             connection.request("GET", "/status")
             response = connection.getresponse()
@@ -409,8 +470,9 @@ class StatusPoller(threading.Thread):
             raise ValueError("状态接口返回了非 JSON 对象")
         return data
 
-    def _adopt(self, port: int, data: dict):
+    def _adopt(self, port: int, data: dict, secure: bool = False):
         self.endpoint = port
+        self.endpoint_secure = secure
         self.snapshot = {
             "status": data.get("status"),
             "remaining": data.get("remaining_seconds"),
@@ -420,17 +482,32 @@ class StatusPoller(threading.Thread):
             "received": time.monotonic(),
         }
 
+    def _schemes(self) -> tuple[bool, ...]:
+        """本次扫描要尝试的连接方式；secure=None 时先 http 再 https。"""
+        if self.secure is None:
+            return (False, True)
+        return (bool(self.secure),)
+
+    def target_label(self) -> str:
+        """当前连接目标的显示文本，如 https://127.0.0.1:58000。"""
+        if self.endpoint is None:
+            return "?"
+        scheme = "https" if self.endpoint_secure else "http"
+        return f"{scheme}://{self.host}:{self.endpoint}"
+
     def _scan(self) -> bool:
         candidates = [self.fixed_port] if self.fixed_port else discover_ports()
         for port in candidates:
-            try:
-                data = self._request(port)
-            except Exception:
-                continue
-            self._adopt(port, data)
-            self._log(f"已连接 mower 端口 {port}")
-            log_line(f"[poll] 已连接 mower 端口 {port}")
-            return True
+            for secure in self._schemes():
+                try:
+                    data = self._request(port, secure)
+                except Exception:
+                    continue
+                self._adopt(port, data, secure)
+                label = self.target_label()
+                self._log(f"已连接 mower {label}")
+                log_line(f"[poll] 已连接 mower {label}")
+                return True
         return False
 
     def run(self):
@@ -442,7 +519,11 @@ class StatusPoller(threading.Thread):
                 failures = 0
             try:
                 if self.endpoint is not None:
-                    self._adopt(self.endpoint, self._request(self.endpoint))
+                    self._adopt(
+                        self.endpoint,
+                        self._request(self.endpoint, self.endpoint_secure),
+                        self.endpoint_secure,
+                    )
                     failures = 0
                 elif self._scan():
                     failures = 0
@@ -616,6 +697,8 @@ class CountdownWidget:
 
         self.pin_var = tk.BooleanVar(value=True)
         self.sound_var = tk.BooleanVar(value=True)
+        self.secure_var = tk.BooleanVar(value=bool(self.poller.secure))
+        self.insecure_var = tk.BooleanVar(value=bool(self.poller.insecure))
         self.menu = tk.Menu(self.root, tearoff=False)
         self.menu.add_checkbutton(
             label="窗口置顶", variable=self.pin_var, command=self._toggle_pin
@@ -634,6 +717,14 @@ class CountdownWidget:
         self.menu.add_command(label="查看完整任务名", command=self._copy_task_name)
         self.menu.add_command(label="重新连接", command=self.poller.reset)
         self.menu.add_command(label="设置服务器…", command=self._configure_server)
+        self.menu.add_checkbutton(
+            label="使用 HTTPS", variable=self.secure_var, command=self._toggle_secure
+        )
+        self.menu.add_checkbutton(
+            label="忽略证书校验（自签名证书）",
+            variable=self.insecure_var,
+            command=self._toggle_insecure,
+        )
         self.menu.add_separator()
         self.menu.add_command(label="退出", command=self.quit)
 
@@ -854,11 +945,11 @@ class CountdownWidget:
         self._full_task_name = task_name
         self._set(self.task, shorten(task_name, TASK_NAME_WIDTH) if task_name else "　")
 
-        port = self.poller.endpoint or "?"
+        target = shorten(self.poller.target_label(), 40)
         if self._toast_error:
-            self._set(self.link, f"● 已连接 :{port}（通知发送失败）", fg=WARN)
+            self._set(self.link, f"● 已连接 {target}（通知发送失败）", fg=WARN)
         else:
-            self._set(self.link, f"● 已连接 :{port}", fg=OK)
+            self._set(self.link, f"● 已连接 {target}", fg=OK)
 
     def _apply_countdown_color(self, left: float | None):
         """最后 10 秒让倒计时数字平滑循环变色，其余时间保持白色。"""
@@ -1110,25 +1201,46 @@ class CountdownWidget:
         current = self.poller.host
         target = self.poller.fixed_port or self.poller.endpoint
         if target:
-            current += f":{target}"
+            scheme = "https://" if self.poller.endpoint_secure else ""
+            current = f"{scheme}{current}:{target}"
         text = simpledialog.askstring(
             "设置 Mower 服务器",
-            "输入端口（如 58000）或 host:port；留空表示自动发现",
+            "输入端口（如 58000）或地址：\n"
+            "58000 / 192.168.1.5:58000 / https://mower.example.com\n"
+            "留空表示自动发现；https:// 开头会启用加密连接",
             initialvalue=current,
             parent=self.root,
         )
         if text is None:
             return
-        host, port = parse_endpoint(text)
+        host, port, secure = parse_endpoint(text)
         if host is None:
             messagebox.showerror(
                 "设置失败",
-                "地址格式不对，示例：58000 或 192.168.1.5:58000",
+                "地址格式不对，示例：58000 / 192.168.1.5:58000 / https://host:8443",
                 parent=self.root,
             )
             return
-        self.poller.configure(host, port)
-        save_settings(host=host, port=port)
+        self.poller.configure(host, port, secure=secure)
+        self.secure_var.set(bool(secure))
+        save_settings(host=host, port=port, secure=secure)
+
+    def _toggle_secure(self):
+        """右键菜单：在 HTTP / HTTPS 之间切换，改完立即重连。"""
+        secure = bool(self.secure_var.get())
+        self.poller.configure(self.poller.host, self.poller.fixed_port, secure=secure)
+        save_settings(secure=secure)
+
+    def _toggle_insecure(self):
+        """右键菜单：自签名证书时跳过证书校验（等价 curl -k）。"""
+        insecure = bool(self.insecure_var.get())
+        self.poller.configure(
+            self.poller.host,
+            self.poller.fixed_port,
+            secure=self.poller.secure,
+            insecure=insecure,
+        )
+        save_settings(insecure=insecure)
 
     def _popup_menu(self, event):
         try:
@@ -1169,7 +1281,15 @@ def main(argv=None):
     parser.add_argument(
         "--port", type=int, default=None, help="mower Web 端口；默认自动发现"
     )
-    parser.add_argument("--host", default=None, help="mower Web 主机（默认 127.0.0.1）")
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="mower Web 主机（默认 127.0.0.1），也可写完整地址如 https://host:8443",
+    )
+    parser.add_argument("--https", action="store_true", help="强制使用 HTTPS 连接")
+    parser.add_argument(
+        "--insecure", action="store_true", help="HTTPS 时不校验证书（自签名证书）"
+    )
     parser.add_argument(
         "--thresholds",
         default=",".join(str(t) for t in DEFAULT_THRESHOLDS),
@@ -1186,10 +1306,33 @@ def main(argv=None):
     enable_dpi_awareness()
     install_exception_logging()
     settings = load_settings()
-    host = str(args.host or settings.get("host") or "127.0.0.1")
+    host = args.host or settings.get("host") or "127.0.0.1"
     port = args.port if args.port is not None else settings.get("port")
+    secure = settings.get("secure")
+    if args.host:
+        # --host 允许直接写完整地址（含协议），也兼容只写主机名
+        if "://" in args.host:
+            parsed_host, parsed_port, parsed_secure = parse_endpoint(args.host)
+            if parsed_host is None:
+                parser.error(f"无法解析主机地址：{args.host}")
+            host = parsed_host
+            secure = parsed_secure
+            if parsed_port is not None:
+                port = parsed_port
+        else:
+            host = args.host.strip()
+    if args.port is not None:
+        port = args.port
+    if args.https:
+        secure = True
+    insecure = bool(args.insecure or settings.get("insecure"))
     poller = StatusPoller(
-        host=host, port=port, interval=args.interval, verbose=args.verbose
+        host=host,
+        port=port,
+        interval=args.interval,
+        verbose=args.verbose,
+        secure=secure,
+        insecure=insecure,
     )
     poller.start()
     widget = CountdownWidget(
