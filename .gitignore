@@ -236,3 +236,5 @@ openspec/
 
 #vscode
 .vscode/*
+
+.workbuddy-ai/*
