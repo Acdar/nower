@@ -91,6 +91,13 @@ def test_free_room_reads_dynamic_slot_countdown(op_data):
     assert op_data.get_refresh_index(ROOM, ["Current"] * 4 + ["空爆"]) == [4]
 
 
+def test_non_free_room_skips_free_and_current_slots_without_keyerror(op_data):
+    op_data.config.free_room = False
+    assert op_data.get_refresh_index(
+        ROOM, ["杜林", "Free", "Free", "Current", "银灰"]
+    ) == [4]
+
+
 def test_repeated_planning_does_not_duplicate_bed_or_candidate(op_data):
     tasks = []
     try_add_release_dorm({}, None, op_data, tasks)
@@ -103,6 +110,17 @@ def test_empty_dynamic_bed_also_accepts_waiting_operator(op_data):
     op_data.operators["空爆"].current_room = ""
     tasks = []
     try_add_release_dorm({}, None, op_data, tasks)
+    assert tasks[0].plan[ROOM][-1] == "红"
+
+
+def test_legacy_empty_dynamic_bed_also_accepts_waiting_operator(op_data):
+    op_data.config.experimental_dorm_logic = False
+    op_data.dorm[0].reset()
+    op_data.operators["空爆"].current_room = ""
+    tasks = []
+
+    try_add_release_dorm({}, None, op_data, tasks)
+
     assert tasks[0].plan[ROOM][-1] == "红"
 
 
