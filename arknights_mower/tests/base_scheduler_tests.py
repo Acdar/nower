@@ -1,6 +1,7 @@
 import sys
 import unittest
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -12,6 +13,7 @@ sys.modules.setdefault("arknights_mower.utils.skland", MagicMock())
 
 import arknights_mower.solvers.base_schedule as base_schedule  # noqa: E402
 from arknights_mower.solvers import mastery_reader  # noqa: E402
+from arknights_mower.solvers.base_mixin import BaseMixin  # noqa: E402
 from arknights_mower.solvers.base_schedule import (  # noqa: E402
     BaseSchedulerSolver,
     _add_group_to_fix_plan,
@@ -19,7 +21,11 @@ from arknights_mower.solvers.base_schedule import (  # noqa: E402
 from arknights_mower.utils.logic_expression import LogicExpression  # noqa: E402
 from arknights_mower.utils.operators import Operator  # noqa: E402
 from arknights_mower.utils.plan import Plan, PlanConfig, Room  # noqa: E402
-from arknights_mower.utils.recognize import RecognizeError, Scene  # noqa: E402
+from arknights_mower.utils.recognize import (  # noqa: E402
+    RecognizeError,
+    Recognizer,
+    Scene,
+)
 from arknights_mower.utils.scheduler_task import (  # noqa: E402
     SchedulerTask,
     TaskTypes,
@@ -611,6 +617,46 @@ class TestBaseScheduler(unittest.TestCase):
 
         self.assertEqual(len(solver.tasks), 1)
         self.assertEqual(solver.tasks[0].type, TaskTypes.EXHAUST_OFF)
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_run_order_solver_reads_with_open_experimental_dorm_beds(self):
+        solver = BaseSchedulerSolver()
+        solver.tasks = []
+        solver.drone_room = None
+        solver.op_data = MagicMock()
+        solver.op_data.experimental_dorm_logic = True
+        solver.op_data.plan = {
+            "dormitory_1": [Room("Free", "", []) for _ in range(5)],
+            "meeting": [Room("但书", "", [])],
+        }
+        solver.op_data.run_order_rooms = {"meeting": "但书"}
+        solver.plan_run_order = MagicMock()
+        solver.check_fia = MagicMock(return_value=(None, None))
+
+        solver.run_order_solver()
+
+        solver.plan_run_order.assert_called_once_with("meeting")
+        solver.op_data.get_current_room.assert_not_called()
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_run_order_solver_keeps_legacy_dorm_scan_gate(self):
+        solver = BaseSchedulerSolver()
+        solver.tasks = []
+        solver.drone_room = None
+        solver.op_data = MagicMock()
+        solver.op_data.experimental_dorm_logic = False
+        solver.op_data.plan = {
+            "dormitory_1": [Room("Free", "", []) for _ in range(5)],
+            "meeting": [Room("但书", "", [])],
+        }
+        solver.op_data.run_order_rooms = {"meeting": "但书"}
+        solver.op_data.get_current_room.return_value = None
+        solver.plan_run_order = MagicMock()
+        solver.check_fia = MagicMock(return_value=(None, None))
+
+        solver.run_order_solver()
+
+        solver.plan_run_order.assert_not_called()
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
     def test_handle_error_appends_immediate_empty_task_after_clearing(self):
@@ -1273,6 +1319,16 @@ class TestBaseScheduler(unittest.TestCase):
         solver, read_meeting = self._create_backup_refresh_solver()
 
         with (
+            patch.object(base_schedule.config.conf, "enable_mastery", True),
+            patch.object(
+                mastery_reader,
+                "read_room_state",
+                return_value=(
+                    mastery_reader.RoomState("empty", mastery_reader.RoomPanel()),
+                    [],
+                ),
+            ),
+            patch.object(mastery_reader, "reconcile_short"),
             patch.object(BaseSchedulerSolver, "enter_room"),
             patch.object(
                 BaseSchedulerSolver,
@@ -1383,8 +1439,7 @@ class TestBaseScheduler(unittest.TestCase):
         mock_read.assert_called_once_with(solver, enter=False, want_mood=True)
         mock_reconcile.assert_called_once_with(solver, room_state, defer_collect=False)
 
-    @staticmethod
-    def _train_mismatch_solver(plan_agents, extra=None):
+    def _train_mismatch_solver(self, plan_agents, extra=None):
         """构造训练室缓存与静态计划错位的 solver（绕过 init_and_validate 的宿舍校验）。
 
         仅含训练室计划；训练室干员 current_room 留空 → get_current_room("train") 与
@@ -1393,6 +1448,17 @@ class TestBaseScheduler(unittest.TestCase):
         from arknights_mower.utils.operators import Operators
         from arknights_mower.utils.plan import Plan, PlanConfig, Room
 
+        self.enterContext(
+            patch.object(
+                mastery_reader,
+                "read_room_state",
+                side_effect=lambda *args, **kwargs: (
+                    (mastery_reader.RoomState(state="empty"), [])
+                    if kwargs.get("want_mood")
+                    else mastery_reader.RoomState(state="empty")
+                ),
+            )
+        )
         plan_config = {"train": [Room(a, "", []) for a in plan_agents]}
         plan = {
             "default_plan": Plan(plan_config, PlanConfig("稀音", "稀音", "伺夜")),
@@ -1495,6 +1561,11 @@ class TestBaseScheduler(unittest.TestCase):
             state="empty", locked=False, protected=True
         )
         with (
+            patch.object(
+                mastery_reader,
+                "read_room_state",
+                return_value=mastery_reader.RoomState(state="empty"),
+            ),
             patch.object(base_schedule.config.conf, "enable_mastery", False),
             patch.object(BaseSchedulerSolver, "enter_room"),
             patch.object(BaseSchedulerSolver, "back"),
@@ -1565,6 +1636,11 @@ class TestBaseScheduler(unittest.TestCase):
             state="training", locked=True, protected=False
         )
         with (
+            patch.object(
+                mastery_reader,
+                "read_room_state",
+                return_value=mastery_reader.RoomState(state="empty"),
+            ),
             patch.object(base_schedule.config.conf, "enable_mastery", False),
             patch.object(BaseSchedulerSolver, "enter_room"),
             patch.object(BaseSchedulerSolver, "back"),
@@ -1643,6 +1719,8 @@ class TestBaseScheduler(unittest.TestCase):
         )
         observed = SimpleNamespace(
             state="training",
+            panel=mastery_reader.RoomPanel(countdown_state="active"),
+            read_failed=False,
             locked=True,
             support_slot="艾丽妮",
             train_slot="真言",
@@ -2611,6 +2689,81 @@ class TestGroupToFixPlan(unittest.TestCase):
         self.assertNotIn("central", fix_plan)
 
 
+class TestDormShiftOffMerge(unittest.TestCase):
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_plan_solver_keeps_work_and_dorm_in_one_shift_off_task(self):
+        solver = BaseSchedulerSolver()
+        solver.op_data = SimpleNamespace(operators={}, print=lambda: "{}")
+        solver.tasks = []
+        solver.find_next_task = MagicMock(return_value=None)
+        solver.plan_metadata = MagicMock()
+        solver.agent_get_mood = MagicMock(return_value="done")
+        solver.backup_plan_solver = MagicMock()
+        work_plan = {
+            "meeting": ["陈", "初雪"],
+            "dormitory_1": ["Current", "Current", "Free", "Current", "Current"],
+        }
+
+        def resting():
+            solver.tasks.append(
+                SchedulerTask(task_plan=work_plan, task_type=TaskTypes.SHIFT_OFF)
+            )
+            return work_plan
+
+        solver.resting = resting
+        dorm_plan = {"dormitory_1": ["Current", "Current", "银灰", "讯使", "Current"]}
+        with (
+            patch.object(base_schedule, "try_reorder", return_value=dorm_plan),
+            patch.object(base_schedule, "try_workshop_tasks"),
+            patch.object(base_schedule, "try_add_release_dorm"),
+        ):
+            solver.plan_solver()
+
+        shift_off = [task for task in solver.tasks if task.type == TaskTypes.SHIFT_OFF]
+        self.assertEqual(len(shift_off), 1)
+        self.assertEqual(shift_off[0].plan["meeting"], ["陈", "初雪"])
+        self.assertEqual(
+            shift_off[0].plan["dormitory_1"],
+            ["Current", "Current", "银灰", "讯使", "Current"],
+        )
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_empty_dorm_is_filled_only_once_after_run_order_deferral(self):
+        solver = BaseSchedulerSolver()
+        solver.op_data = SimpleNamespace(
+            experimental_dorm_logic=True,
+            operators={},
+            print=lambda: "{}",
+        )
+        ordinary = SchedulerTask()
+        ordinary.deferred_by_run_order = True
+        solver.tasks = [ordinary]
+        fill_task = SchedulerTask(
+            task_plan={
+                "dormitory_1": ["Current", "Idle", "Current", "Current", "Current"]
+            }
+        )
+        with patch.object(
+            base_schedule,
+            "try_add_release_dorm",
+            side_effect=lambda plan, time, op_data, tasks: tasks.append(fill_task),
+        ) as fill:
+            self.assertTrue(solver._fill_dorm_after_run_order_deferral())
+            self.assertFalse(solver._fill_dorm_after_run_order_deferral())
+
+        fill.assert_called_once_with({}, None, solver.op_data, [ordinary, fill_task])
+        self.assertFalse(ordinary.deferred_by_run_order)
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_empty_dorm_is_not_filled_without_run_order_deferral(self):
+        solver = BaseSchedulerSolver()
+        solver.op_data = SimpleNamespace(experimental_dorm_logic=True)
+        solver.tasks = [SchedulerTask()]
+        with patch.object(base_schedule, "try_add_release_dorm") as fill:
+            self.assertFalse(solver._fill_dorm_after_run_order_deferral())
+        fill.assert_not_called()
+
+
 class TestDroneAccelerate(unittest.TestCase):
     """#907：无人机加速面板首次点击未生效时不应误消费跑单任务。
 
@@ -2938,3 +3091,188 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
             ["arranged_and_verified", "countdown", "accept_order", "restore"],
         )
         solver.get_order_remaining_time.assert_called_once_with()
+
+
+class TestClueProductCompleteWait(unittest.TestCase):
+    """测试会客室处理线索流程中等待产物收取提示消失的逻辑。"""
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_detect_product_complete_searches_credit_and_info(self):
+        solver = BaseSchedulerSolver()
+        queried = []
+
+        def mock_find(res, **kwargs):
+            queried.append(res)
+            return None
+
+        solver.find = mock_find
+        solver.detect_product_complete()
+        self.assertIn("infra_credit_complete", queried)
+        self.assertIn("infra_info_complete", queried)
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_wait_product_complete_stops_on_timeout(self):
+        solver = BaseSchedulerSolver()
+        solver.sleep = MagicMock()
+        solver.detect_product_complete = MagicMock(
+            return_value=((1400, 100), (1500, 200))
+        )
+
+        # 验证有产物提示但持续存在时，达到 max_retries 后返回 False 并退出，不会死循环
+        result = solver.wait_product_complete(max_retries=3)
+        self.assertFalse(result)
+        self.assertEqual(solver.sleep.call_count, 3)
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_wait_product_complete_succeeds_when_cleared(self):
+        solver = BaseSchedulerSolver()
+        solver.sleep = MagicMock()
+        # 第一次有提示，第二次消失
+        solver.detect_product_complete = MagicMock(
+            side_effect=[((1400, 100), (1500, 200)), None]
+        )
+
+        result = solver.wait_product_complete(max_retries=5)
+        self.assertTrue(result)
+        self.assertEqual(solver.sleep.call_count, 1)
+
+    def test_detect_product_complete_with_actual_fixtures(self):
+        """用真实截图分别验证新增的信用与情报模板。"""
+        fixtures_dir = Path(__file__).parent / "fixtures" / "clue"
+        credit_fixture = fixtures_dir / "clue_credit_prompt.png"
+        info_fixture = fixtures_dir / "clue_info_prompt.png"
+
+        self.assertTrue(credit_fixture.exists())
+        self.assertTrue(info_fixture.exists())
+
+        mixin = BaseMixin()
+        dummy_device = MagicMock()
+        scope = ((1230, 0), (1920, 1080))
+
+        # 测试 credit 提示截图
+        with open(credit_fixture, "rb") as f:
+            recog_credit = Recognizer(dummy_device, f.read())
+        mixin.find = recog_credit.find
+        self.assertIsNotNone(
+            recog_credit.find("infra_credit_complete", scope=scope, score=0.1)
+        )
+        self.assertIsNotNone(mixin.detect_product_complete())
+
+        # 测试 info 提示截图
+        with open(info_fixture, "rb") as f:
+            recog_info = Recognizer(dummy_device, f.read())
+        mixin.find = recog_info.find
+        self.assertIsNotNone(
+            recog_info.find("infra_info_complete", scope=scope, score=0.1)
+        )
+        self.assertIsNotNone(mixin.detect_product_complete())
+
+    def test_live_credit_prompt_appears_and_clears(self):
+        """实机截图：接收线索后提示出现，消失后才能继续。"""
+        fixtures_dir = Path(__file__).parent / "fixtures" / "clue"
+        scope = ((1230, 0), (1920, 1080))
+        dummy_device = MagicMock()
+
+        def recog(name):
+            screenshot = (fixtures_dir / name).read_bytes()
+            return Recognizer(dummy_device, screenshot)
+
+        room = recog("clue_live_room_details.png")
+        before = recog("clue_live_receive_before.png")
+        prompt = recog("clue_live_credit_prompt.png")
+        after = recog("clue_live_receive_after.png")
+        mixin = BaseMixin()
+
+        for frame in (room, before, after):
+            mixin.find = frame.find
+            self.assertIsNone(mixin.detect_product_complete())
+
+        mixin.find = prompt.find
+        self.assertIsNotNone(
+            prompt.find("infra_credit_complete", scope=scope, score=0.1)
+        )
+        mixin.sleep = MagicMock(
+            side_effect=lambda _: setattr(mixin, "find", after.find)
+        )
+        self.assertTrue(mixin.wait_product_complete())
+        mixin.sleep.assert_called_once_with(1)
+
+    def test_live_party_time_read_from_adb_screenshot(self):
+        """实机截图：展开交流详情后读取真实倒计时。"""
+        from rapidocr_onnxruntime import RapidOCR
+
+        from arknights_mower.utils import rapidocr
+        from arknights_mower.utils.image import bytes2img
+
+        fixtures_dir = Path(__file__).parent / "fixtures" / "clue"
+        before_data = (fixtures_dir / "clue_live_party_before.png").read_bytes()
+        time_data = (fixtures_dir / "clue_live_party_time.png").read_bytes()
+        device = MagicMock()
+        before = Recognizer(device, before_data)
+        self.assertIsNotNone(before.find("clue/check_party"))
+
+        device.screencap.return_value = (
+            time_data,
+            bytes2img(time_data),
+            bytes2img(time_data, True),
+        )
+        solver = BaseSchedulerSolver(device=device, recog=Recognizer(device, time_data))
+        with patch.object(rapidocr, "engine", RapidOCR(text_score=0.3)):
+            start = datetime.now()
+            end = solver.read_party_time()
+
+        self.assertIsNotNone(end)
+        self.assertAlmostEqual(
+            (end - start).total_seconds(),
+            18 * 3600 + 46 * 60 + 14,
+            delta=2,
+        )
+        device.screencap.assert_called_once()
+
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_clue_new_waits_for_product_complete(self):
+        solver = BaseSchedulerSolver()
+        solver.tasks = []
+        solver.leifeng_mode = False
+        solver.clue_count = 0
+        solver.clue_count_limit = 0
+        solver._run_clue_shop = MagicMock()
+        solver.scene_graph_navigation = MagicMock()
+        solver.enter_room = MagicMock()
+        solver.recog = MagicMock()
+        solver.tap = MagicMock()
+        solver.ctap = MagicMock()
+        solver.tap_element = MagicMock()
+        solver.back = MagicMock()
+        solver.sleep = MagicMock()
+        solver.backup_plan_solver = MagicMock()
+        solver.read_party_time = MagicMock(return_value=None)
+        solver.set_detected_party_time = MagicMock()
+
+        scenes = [
+            Scene.INFRA_DETAILS,
+            Scene.INFRA_CONFIDENTIAL,
+            Scene.INFRA_CONFIDENTIAL,
+            Scene.INFRA_CONFIDENTIAL,
+            Scene.INFRA_CONFIDENTIAL,
+            Scene.CLUE_GIVE_AWAY,
+            Scene.INFRA_CONFIDENTIAL,
+            Scene.INFRA_DETAILS,
+        ]
+        solver.scene = MagicMock(
+            side_effect=lambda: scenes.pop(0) if scenes else Scene.INDEX
+        )
+
+        wait_calls = []
+
+        def mock_wait_product():
+            wait_calls.append("wait_product_complete")
+            return True
+
+        solver.wait_product_complete = MagicMock(side_effect=mock_wait_product)
+        solver.find = MagicMock(return_value=None)
+
+        solver.clue_new()
+
+        # 验证在 message_board 与 party_time 阶段均调用了 wait_product_complete
+        self.assertEqual(len(wait_calls), 2)

@@ -116,6 +116,8 @@ export const useConfigStore = defineStore('config', () => {
   const maa_rg_sleep_max = ref('00:00')
   const maa_credit_fight = ref(true)
   const maa_depot_enable = ref(false)
+  const depot_history_limit = ref(3000)
+  const depot_history_keep = ref(0)
   const maa_rg_theme = ref('Mizuki')
   const maa_rcl_theme = ref('Tales')
   const rcl = ref({})
@@ -161,8 +163,8 @@ export const useConfigStore = defineStore('config', () => {
   const visit_friend_mode = ref('maa')
   const credit_fight = ref({})
   const custom_screenshot = ref({})
-  const hot_update_enable = ref(false)
-  const hot_update_auto_update = ref(false)
+  const resource_update_enable = ref(false)
+  const resource_update_auto_update = ref(false)
   const notification_level = ref('INFO')
   const waiting_scene = ref({})
   const expiring_medicine_on_weekend = ref(false)
@@ -525,6 +527,8 @@ export const useConfigStore = defineStore('config', () => {
     maa_rg_sleep_min.value = response.data.maa_rg_sleep_min
     maa_credit_fight.value = response.data.maa_credit_fight
     maa_depot_enable.value = response.data.maa_depot_enable
+    depot_history_limit.value = response.data.depot_history_limit ?? 3000
+    depot_history_keep.value = response.data.depot_history_keep ?? 0
     maa_rg_theme.value = response.data.maa_rg_theme
     maa_rcl_theme.value = response.data.maa_rcl_theme
     rcl.value = response.data.rcl
@@ -552,7 +556,10 @@ export const useConfigStore = defineStore('config', () => {
       ...(response.data.run_order_grandet_mode || {})
     }
     product_switching.value = {
+      max_drones_per_switch: 0,
       grandet_mode: true,
+      use_drones_when_leaving_orirock: true,
+      direct_when_drones_insufficient: false,
       drone_loss_seconds: 30,
       waiting_seconds: 2,
       ...(response.data.product_switching || {})
@@ -591,8 +598,8 @@ export const useConfigStore = defineStore('config', () => {
     fodder_operators.value = response.data.fodder_operators || ['九色鹿']
     t5_operators.value = response.data.t5_operators || ['年']
     book_operators.value = response.data.book_operators || ['司霆惊蛰']
-    hot_update_enable.value = response.data.hot_update?.enable ?? false
-    hot_update_auto_update.value = response.data.hot_update?.auto_update ?? false
+    resource_update_enable.value = response.data.resource_update?.enable ?? false
+    resource_update_auto_update.value = response.data.resource_update?.auto_update ?? false
     notification_level.value = response.data.notification_level
     waiting_scene.value = response.data.waiting_scene
     expiring_medicine_on_weekend.value = response.data.expiring_medicine_on_weekend
@@ -696,6 +703,8 @@ export const useConfigStore = defineStore('config', () => {
       maa_rg_sleep_min: maa_rg_sleep_min.value,
       maa_credit_fight: maa_credit_fight.value,
       maa_depot_enable: maa_depot_enable.value,
+      depot_history_limit: depot_history_limit.value,
+      depot_history_keep: depot_history_keep.value,
       maa_rg_theme: maa_rg_theme.value,
       maa_rcl_theme: maa_rcl_theme.value,
       rcl: rcl.value,
@@ -753,9 +762,9 @@ export const useConfigStore = defineStore('config', () => {
       fodder_operators: fodder_operators.value,
       t5_operators: t5_operators.value,
       book_operators: book_operators.value,
-      hot_update: {
-        enable: hot_update_enable.value,
-        auto_update: hot_update_auto_update.value
+      resource_update: {
+        enable: resource_update_enable.value,
+        auto_update: resource_update_auto_update.value
       },
       notification_level: notification_level.value,
       waiting_scene: waiting_scene.value,
@@ -925,6 +934,8 @@ export const useConfigStore = defineStore('config', () => {
     maa_rg_sleep_max,
     maa_credit_fight,
     maa_depot_enable,
+    depot_history_limit,
+    depot_history_keep,
     maa_rg_theme,
     maa_rcl_theme,
     rcl,
@@ -970,8 +981,8 @@ export const useConfigStore = defineStore('config', () => {
     visit_friend_mode,
     credit_fight,
     custom_screenshot,
-    hot_update_enable,
-    hot_update_auto_update,
+    resource_update_enable,
+    resource_update_auto_update,
     notification_level,
     waiting_scene,
     expiring_medicine_on_weekend,

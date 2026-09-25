@@ -856,10 +856,10 @@ class BaseMixin:
         return None
 
     @timed_step("enter_room")
-    def enter_room(self, room):
+    def enter_room(self, room, *, max_attempts=3):
         """从基建首页进入房间"""
 
-        for enter_times in range(3):
+        for enter_times in range(max_attempts):
             pending = False
             actions = 0
             for retry_times in range(9):
@@ -893,11 +893,11 @@ class BaseMixin:
                 and self.detect_room() == room
             ):
                 return
-            if enter_times < 2:
+            if enter_times < max_attempts - 1:
                 # 仍停在全局视角时，原逻辑会一直点击同一位置；退出基建
                 # 再重新进入，重新定位房间。此处不重启或关闭游戏。
                 logger.warning(
-                    f"未确认进入房间 {room}，返回首页后重新定位（{enter_times + 1}/2）"
+                    f"未确认进入房间 {room}，返回首页后重新定位（{enter_times + 1}/{max_attempts - 1}）"
                 )
                 self.back_to_index()
                 self.back_to_infrastructure()
@@ -925,13 +925,38 @@ class BaseMixin:
             return 24
 
     def detect_product_complete(self):
-        for product in ["gold", "exp", "lmd", "ori", "oru", "trust"]:
+        for product in [
+            "gold",
+            "exp",
+            "lmd",
+            "ori",
+            "oru",
+            "trust",
+            "credit",
+            "info",
+        ]:
             if pos := self.find(
                 f"infra_{product}_complete",
                 scope=((1230, 0), (1920, 1080)),
                 score=0.1,
             ):
                 return pos
+
+    def wait_product_complete(self, max_retries: int = 5) -> bool:
+        """等待产物收取提示浮动动画结束并消失，避免遮挡后续 UI。
+
+        :param max_retries: 最多等待轮数（每轮 1 秒），防止低阈值误判导致死循环。
+        :return: 若提示消失返回 True，若达到最大重试次数仍未消失返回 False。
+        """
+        for _ in range(max_retries):
+            if not self.detect_product_complete():
+                return True
+            logger.info("检测到产物收取提示，等待消失")
+            self.sleep(1)
+        if self.detect_product_complete():
+            logger.warning("产物收取提示等待超时，继续执行后续流程")
+            return False
+        return True
 
     def read_operator_in_room(self, img):
         img = thres2(img, 200)

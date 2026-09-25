@@ -49,6 +49,7 @@ from arknights_mower.views.ui_state import ui_state_bp
 mimetypes.add_type("text/html", ".html")
 mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("image/webp", ".webp")
 
 app = Flask(__name__, static_folder="ui/dist", static_url_path="")
 app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
@@ -524,16 +525,6 @@ def read_log():
 Thread(target=read_log, daemon=True).start()
 
 
-def _check_hot_update_on_launch():
-    """打开 mower 时后台检查一次热更（config 开关 + 节流内置，不阻塞启动）。"""
-    from arknights_mower.utils.hot_update import update as hot_update_update
-
-    hot_update_update()
-
-
-Thread(target=_check_hot_update_on_launch, daemon=True).start()
-
-
 def _watch_shared_resource_changes():
     """停止任务时刷新资源；运行期间由任务线程在安全边界主动刷新。"""
     from arknights_mower.utils.resource_pkg import reload_resource_caches_if_changed
@@ -894,9 +885,23 @@ def read_depot():
     return {"depot": data, "cultivate_ok": cultivate_ok, "cultivate_msg": cultivate_msg}
 
 
+@app.route("/depot/history")
+def depot_history():
+    """仓库快照序列，供仓库页做环比与趋势。
+
+    取多少条由设置里的"仓库历史条数"决定（默认 3000）：请求参数只能在此之内再往下收，
+    参数缺失或写坏都按设置走，所以页面自己不用知道这个数。完整库存快照每条约 2.4KB，
+    3000 条约 7MB，觉得重就在设置里调小。数据源是 depotresult.csv 与 depotmerged.csv，
+    为空/损坏时返回空数组而不是报错——趋势是锦上添花，不该让仓库页整体进错误态。
+    """
+    from arknights_mower.utils import depot
+
+    return {"snapshots": depot.读取仓库历史(depot.历史条数(request.args.get("limit")))}
+
+
 @app.route("/stage/latest-activity")
 def stage_latest_activity():
-    """刷理智周计划：最近开启活动（stage_data_full 热更后最新）的选中关。
+    """刷理智周计划：最近开启活动（当前资源包 stage_data_full）的选中关。
 
     返回 [{value, label, code, materials}]，按代号尾号大到小。材料仅 MATERIAL 常规掉落
     （剔 ACTIVITY_ITEM/COMPLETE）；库存取自 @app/tmp/cultivate.json（{id: count}），
@@ -1277,13 +1282,10 @@ def upload_sss_copilot():
     }
 
 
-@app.route("/hot-update/manual", methods=["POST"])
+@app.route("/resource-update/manual", methods=["POST"])
 @require_token
-def hot_update_manual():
-    """手动应用一份更新包（拖入/选择），按 zip 内容自动识别热更包/资源包。
-
-    用于国内直连 GitHub 不稳时的人工兜底：热更走 apply_manual_zip，资源包走 overlay 原子安装。
-    """
+def resource_update_manual():
+    """手动应用资源包，供无法稳定连接 GitHub 时使用。"""
     from arknights_mower.utils.manual_update import apply_manual_update
 
     update_file = request.files.get("update")

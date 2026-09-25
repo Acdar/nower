@@ -2,7 +2,7 @@
 import { useConfigStore } from '@/stores/config'
 import { usePlanStore } from '@/stores/plan'
 import { storeToRefs } from 'pinia'
-import { computed, inject } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref } from 'vue'
 
 import { folder_dialog } from '@/utils/dialog'
 import { performanceProfile } from '@/utils/performanceProfile'
@@ -164,6 +164,80 @@ for (let i = 0.5; i <= 3.0; i += 0.25) {
 
 const new_scale = ref(webview.value.scale)
 
+const desktopPreferencesReady = ref(false)
+const desktopTrayEnabled = ref(true)
+const desktopCloseMode = ref('ask')
+const desktopLaunchMode = ref('last')
+const desktopPreferenceBusy = ref(false)
+const desktopPreferenceError = ref('')
+const closeOptions = computed(() => [
+  { label: '每次询问', value: 'ask' },
+  ...(desktopTrayEnabled.value ? [{ label: '收起到托盘', value: 'tray' }] : []),
+  { label: '彻底退出', value: 'exit' }
+])
+const launchOptions = [
+  { label: '记住上次', value: 'last' },
+  { label: '窗口', value: 'normal' },
+  { label: '最大化', value: 'maximized' }
+]
+
+async function loadDesktopPreferences() {
+  const api = window.pywebview?.api
+  if (!api?.get_close_preference || !api?.get_window_launch_mode) return
+  try {
+    const [close, launch] = await Promise.all([
+      api.get_close_preference(),
+      api.get_window_launch_mode()
+    ])
+    desktopTrayEnabled.value = close.tray_enabled !== false
+    desktopCloseMode.value = close.remember ? close.choice : 'ask'
+    desktopLaunchMode.value = launch
+    desktopPreferencesReady.value = true
+    desktopPreferenceError.value = ''
+  } catch (error) {
+    desktopPreferenceError.value = error.message || '窗口设置读取失败'
+  }
+}
+
+async function changeCloseMode(value) {
+  const api = window.pywebview?.api
+  if (!api?.set_close_preference || desktopPreferenceBusy.value) return
+  desktopPreferenceBusy.value = true
+  try {
+    const choice = value === 'ask' ? (desktopTrayEnabled.value ? 'tray' : 'exit') : value
+    const ok = await api.set_close_preference(choice, value !== 'ask')
+    if (ok !== true) throw new Error('无法保存关闭设置')
+    desktopCloseMode.value = value
+    desktopPreferenceError.value = ''
+  } catch (error) {
+    desktopPreferenceError.value = error.message || '关闭设置保存失败'
+  } finally {
+    desktopPreferenceBusy.value = false
+  }
+}
+
+async function changeLaunchMode(value) {
+  const api = window.pywebview?.api
+  if (!api?.set_window_launch_mode || desktopPreferenceBusy.value) return
+  desktopPreferenceBusy.value = true
+  try {
+    const ok = await api.set_window_launch_mode(value)
+    if (ok !== true) throw new Error('无法保存启动设置')
+    desktopLaunchMode.value = value
+    desktopPreferenceError.value = ''
+  } catch (error) {
+    desktopPreferenceError.value = error.message || '启动设置保存失败'
+  } finally {
+    desktopPreferenceBusy.value = false
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('pywebviewready', loadDesktopPreferences)
+  void loadDesktopPreferences()
+})
+onUnmounted(() => window.removeEventListener('pywebviewready', loadDesktopPreferences))
+
 import { file_dialog } from '@/utils/dialog'
 
 async function select_maa_adb_path() {
@@ -224,7 +298,6 @@ const onSelectionChange = (newValue) => {
     simulator.value.index = '0'
   }
 }
-import { ref } from 'vue'
 import ChatBotSetting from '../components/ChatBotSetting.vue'
 import SoftwareUpdate from '../components/SoftwareUpdate.vue'
 import NetworkSettings from '../components/NetworkSettings.vue'
@@ -596,21 +669,50 @@ if (return_home_when_idle.value) {
               <!-- {{ waiting_scene }} -->
             </n-form-item>
             <n-form-item label="界面缩放">
-              <n-slider
-                v-model:value="new_scale"
-                :step="0.25"
-                :min="0.5"
-                :max="3.0"
-                :marks="scale_marks"
-                :format-tooltip="(x) => `${x * 100}%`"
-              />
-              <n-button
-                class="scale-apply"
-                :disabled="new_scale == webview.scale"
-                @click="webview.scale = new_scale"
-              >
-                应用
-              </n-button>
+              <div class="desktop-scale-settings">
+                <div class="desktop-scale-controls">
+                  <n-slider
+                    v-model:value="new_scale"
+                    :step="0.25"
+                    :min="0.5"
+                    :max="3.0"
+                    :marks="scale_marks"
+                    :format-tooltip="(x) => `${x * 100}%`"
+                  />
+                  <n-button
+                    class="scale-apply"
+                    :disabled="new_scale == webview.scale"
+                    @click="webview.scale = new_scale"
+                  >
+                    应用
+                  </n-button>
+                </div>
+                <div v-if="desktopPreferencesReady" class="desktop-pref-inline">
+                  <div class="desktop-pref-item">
+                    <span>关闭窗口</span>
+                    <n-select
+                      :value="desktopCloseMode"
+                      :options="closeOptions"
+                      :disabled="desktopPreferenceBusy"
+                      size="small"
+                      @update:value="changeCloseMode"
+                    />
+                  </div>
+                  <div class="desktop-pref-item">
+                    <span>打开方式</span>
+                    <n-select
+                      :value="desktopLaunchMode"
+                      :options="launchOptions"
+                      :disabled="desktopPreferenceBusy"
+                      size="small"
+                      @update:value="changeLaunchMode"
+                    />
+                  </div>
+                </div>
+                <n-text v-if="desktopPreferenceError" type="error" depth="3">
+                  {{ desktopPreferenceError }}
+                </n-text>
+              </div>
             </n-form-item>
             <n-form-item v-if="runtime_platform !== 'android'" :show-label="false">
               <n-checkbox
@@ -724,11 +826,50 @@ if (return_home_when_idle.value) {
                 跑单前返回主界面以保持登录状态
               </n-checkbox>
             </n-form-item>
+            <n-form-item>
+              <template #label>
+                <span>切产物单次无人机上限</span>
+                <help-text
+                  >仅测试宿舍逻辑生效。0
+                  表示不限制；达到上限后等待当前一份自然完成，再确认切换。</help-text
+                >
+              </template>
+              <mower-input-number
+                v-model:value="product_switching.max_drones_per_switch"
+                :disabled="!experimental_dorm_logic"
+                :min="0"
+                :max="200"
+              >
+                <template #suffix>架</template>
+              </mower-input-number>
+            </n-form-item>
             <n-form-item :show-label="false">
               <n-checkbox v-model:checked="product_switching.grandet_mode">
                 葛朗台切产物
                 <help-text>
                   开启时按损耗容限节省无人机，并等待当前一份自然完成；关闭时直接使用足量无人机完成当前一份后切换。
+                </help-text>
+              </n-checkbox>
+            </n-form-item>
+            <n-form-item v-if="product_switching.grandet_mode" :show-label="false">
+              <n-checkbox
+                v-model:checked="product_switching.use_drones_when_leaving_orirock"
+                :disabled="!experimental_dorm_logic"
+              >
+                切出源石碎片时使用无人机
+                <help-text>
+                  仅测试宿舍逻辑生效。关闭后会等当前一份源石碎片自然完成，再切换至其他产物；若这次切换属于换班，将等切换完成后再换人。
+                </help-text>
+              </n-checkbox>
+            </n-form-item>
+            <n-form-item :show-label="false">
+              <n-checkbox
+                v-model:checked="product_switching.direct_when_drones_insufficient"
+                :disabled="!experimental_dorm_logic"
+              >
+                允许无人机不足时直接切换产物
+                <help-text>
+                  仅测试宿舍逻辑生效。开启时会取消制造站当前一份的进度；关闭时若换班需要切产物，将保留原班，并按制造进度和无人机恢复情况预计可切时间，届时复核后换班。
                 </help-text>
               </n-checkbox>
             </n-form-item>
@@ -751,9 +892,10 @@ if (return_home_when_idle.value) {
             </n-form-item>
             <n-form-item>
               <template #label>
-                <span>葛朗台切换等待缓冲</span>
+                <span>葛朗台切产物缓冲时间</span>
                 <help-text>
-                  葛朗台切产物开启时，在计算出的自然完成时间之外额外等待，避免动画或网络延迟导致过早切换。
+                  测试宿舍逻辑开启时，当前一份完成后在制造计划取消确认页等待这段时间再确认；关闭时沿用原有等待流程。默认
+                  2 秒。
                 </help-text>
               </template>
               <mower-input-number
@@ -870,26 +1012,28 @@ if (return_home_when_idle.value) {
               </mower-input-number>
             </n-form-item>
             <n-form-item :show-label="false">
-              <n-checkbox v-model:checked="free_room">
-                宿舍不养闲人
+              <n-checkbox v-model:checked="experimental_dorm_logic">
+                测试宿舍逻辑
                 <help-text>
                   <template v-if="experimental_dorm_logic">
-                    有可用的未满心情干员时，按统一休息优先级和心情替换动态床位中的满心情普通干员，也会补入空床位。
-                    主班按轮休任务回班，固定宿舍岗位不清除；执行时机受任务队列及合并间隔影响。
+                    已开启：按层级和心情分床，支持候补补床、临时 Free
+                    床位及新入住者单回竞争，日常保留床位。
                   </template>
-                  <template v-else>
-                    使用稳定版逻辑，把未满心情的空闲干员安排到可释放的动态宿舍床位。
-                    加工名单中的干员是否使用最低休息优先级，由自动加工页面的设置控制。
-                  </template>
+                  <template v-else> 已关闭：使用原宿舍规则，休息优先名单按填写顺序分床。 </template>
+                  <p>两种模式均按「心情－个人下限」排序下班。</p>
                 </help-text>
               </n-checkbox>
             </n-form-item>
             <n-form-item :show-label="false">
-              <n-checkbox v-model:checked="experimental_dorm_logic">
-                测试宿舍逻辑
+              <n-checkbox v-model:checked="free_room">
+                宿舍不养闲人
                 <help-text>
-                  默认关闭。开启后使用统一休息优先级、床位抢占保护、绑组宿舍临时
-                  Free、主副表独立房间排序及新版不养闲人逻辑。
+                  <template v-if="experimental_dorm_logic">
+                    按宿舍优先级补床，支持待命候补和新入住者单回竞争；保留恢复中的主班、候补及固定宿舍岗位。
+                  </template>
+                  <template v-else>
+                    将未满心情的空闲干员补入可释放床位；加工干员优先级由自动加工设置控制。
+                  </template>
                 </help-text>
               </n-checkbox>
             </n-form-item>
@@ -1025,6 +1169,43 @@ if (return_home_when_idle.value) {
 </template>
 
 <style scoped lang="scss">
+.desktop-scale-settings {
+  width: 100%;
+  min-width: 0;
+}
+
+.desktop-scale-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  .n-slider {
+    flex: 1 1 200px;
+    min-width: 110px;
+  }
+}
+
+.desktop-pref-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 9px;
+  padding: 9px 10px;
+  border: 1px solid rgba(112, 153, 127, 0.25);
+  border-radius: 6px;
+}
+
+.desktop-pref-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+
+  .n-select {
+    width: 128px;
+  }
+}
+
 .settings-network {
   grid-column: 1 / -1;
   min-width: 0;
