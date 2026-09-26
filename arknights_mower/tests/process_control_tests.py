@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -13,6 +14,7 @@ from flask import Flask
 
 from arknights_mower.utils import process_control as control
 from arknights_mower.utils import update_runtime as runtime
+from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
 from arknights_mower.views.process_control import process_control_bp
 
 
@@ -25,9 +27,17 @@ class ProcessControlTests(unittest.TestCase):
     def test_reset_start_skips_saved_state_and_respects_mood_reload_switch(self):
         import server
 
-        for enabled in (False, True):
+        for enabled, experimental in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
             with (
-                self.subTest(enabled=enabled),
+                self.subTest(enabled=enabled, experimental=experimental),
+                patch.object(
+                    server.config.conf, "experimental_dorm_logic", experimental
+                ),
                 tempfile.TemporaryDirectory() as folder,
                 patch.object(server, "active_job", return_value=False),
                 patch.object(server, "_job_running", return_value=False),
@@ -52,12 +62,27 @@ class ProcessControlTests(unittest.TestCase):
                 response = server.app.test_client().get("/start/2", headers=headers)
                 self.assertEqual(response.get_data(as_text=True), "true")
                 load.assert_not_called()
-                self.assertEqual(thread.call_args.kwargs["args"], ({}, enabled))
+                self.assertEqual(
+                    thread.call_args.kwargs["args"], ({}, enabled and not experimental)
+                )
 
-    def test_normal_start_still_loads_saved_state(self):
+    def test_resume_start_keeps_run_order_and_mastery_tasks(self):
         import server
 
-        saved_state = {"tasks": ["saved-task"]}
+        saved_state = {
+            "tasks": [
+                SchedulerTask(
+                    time=datetime(2026, 9, 27, 12),
+                    task_type=TaskTypes.RUN_ORDER,
+                    meta_data="room_2_1",
+                ),
+                SchedulerTask(
+                    time=datetime(2026, 9, 27, 13),
+                    task_type=TaskTypes.SKILL_UPGRADE,
+                    meta_data="plan_key=1",
+                ),
+            ]
+        }
         with (
             tempfile.TemporaryDirectory() as folder,
             patch.object(server, "active_job", return_value=False),
@@ -75,6 +100,10 @@ class ProcessControlTests(unittest.TestCase):
             self.assertEqual(response.get_data(as_text=True), "true")
             load.assert_called_once_with()
             self.assertEqual(thread.call_args.kwargs["args"], (saved_state, False))
+            self.assertEqual(
+                [task.type for task in saved_state["tasks"]],
+                [TaskTypes.RUN_ORDER, TaskTypes.SKILL_UPGRADE],
+            )
 
     def test_schedule_start_rebuilds_tasks_from_saved_mood(self):
         import server

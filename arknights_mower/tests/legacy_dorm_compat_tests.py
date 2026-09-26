@@ -92,7 +92,16 @@ def test_finished_standby_can_be_replaced_in_both_modes(solver):
     _, bed = data.get_dorm_by_name(standby.name)
     bed.time = datetime.now() - timedelta(minutes=1)
     room, index = bed.position
-    tasks = []
+    # 空床已有补位预约，本用例单独验证回满候补仍可清退。
+    # 没有预约的真空床在测试模式下应先生成优先补位，不能夹带普通清退。
+    reserved = {}
+    for other in data.dorm:
+        if not other.name:
+            target_room, target_index = other.position
+            reserved.setdefault(target_room, ["Current"] * len(data.plan[target_room]))[
+                target_index
+            ] = "Free"
+    tasks = [SchedulerTask(task_plan=reserved)] if reserved else []
     try_add_release_dorm({}, None, data, tasks)
     assert any(
         t.plan.get(room, [])[index] not in ("Current", standby.name)
@@ -101,15 +110,13 @@ def test_finished_standby_can_be_replaced_in_both_modes(solver):
     )
 
 
-def test_only_legacy_high_main_can_displace_resting_standby(solver):
+def test_main_preempts_standby_and_experimental_also_allows_low_main(solver):
     data = solver.op_data
     _, bed = data.get_dorm_by_name(DEEP[1])
     newcomer = data.operators[OTHERS[0]]
-    assert data._slot_takable(bed, True, newcomer.name) is (
-        not data.experimental_dorm_logic
-    )
+    assert data._slot_takable(bed, True, newcomer.name)
     newcomer.resting_priority = "low"
-    assert not data._slot_takable(bed, True, newcomer.name)
+    assert data._slot_takable(bed, True, newcomer.name) is data.experimental_dorm_logic
 
 
 @pytest.mark.parametrize(

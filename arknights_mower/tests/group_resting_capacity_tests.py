@@ -15,8 +15,11 @@ from arknights_mower.utils.config.plan import PlanModel  # noqa: E402
 from arknights_mower.utils.log import logger  # noqa: E402
 from arknights_mower.utils.operators import Operator, build_global_plan  # noqa: E402
 from arknights_mower.utils.plan import Plan, PlanConfig, Room  # noqa: E402
+from arknights_mower.utils.resting_priority import (  # noqa: E402
+    RestingTier,
+    resting_tier,
+)
 from arknights_mower.utils.scheduler_task import (  # noqa: E402
-    SchedulerTask,
     TaskTypes,
     plan_metadata,
     try_add_release_dorm,
@@ -447,10 +450,15 @@ def test_full_standby_does_not_refill_vacant_bed(solver):
     bed.reset()
     tasks = []
     try_add_release_dorm({}, None, data, tasks)
-    assert tasks == []
+    # 满心情候补仍不重新入住；空床改由游戏页选择其他空闲者补满。
+    assert len(tasks) == 1
+    room, index = bed.position
+    assert tasks[0].plan[room][index] == "Free"
+    solver.task = tasks[0]
+    assert DEEP[1] not in solver.get_free_list([], include_full=True)
 
 
-def test_grouped_candidate_fills_on_deferral_without_changing_return_time(solver):
+def test_grouped_candidate_fills_vacancy_without_changing_return_time(solver):
     occupy_beds(solver, "high")
     shift_off(solver)
     data = solver.op_data
@@ -475,13 +483,9 @@ def test_grouped_candidate_fills_on_deferral_without_changing_return_time(solver
     return_tasks = [task for task in tasks if task.type == TaskTypes.SHIFT_ON]
     assert return_tasks
     solver.tasks = tasks
-    assert not solver._fill_dorm_after_run_order_deferral()
     assert all(task.type == TaskTypes.SHIFT_ON for task in tasks)
-    deferred = SchedulerTask()
-    deferred.deferred_by_run_order = True
-    tasks.append(deferred)
-    assert solver._fill_dorm_after_run_order_deferral()
-    assert not solver._fill_dorm_after_run_order_deferral()
+    assert solver._fill_empty_dorms()
+    assert not solver._fill_empty_dorms()
     fill_tasks = [
         task
         for task in tasks
@@ -644,14 +648,33 @@ def test_candidate_config_round_trip_and_backup_merge(solver, monkeypatch):
     }
     old = PlanModel(**raw)
     assert old.conf.resting_standby == ""
+    assert old.conf.resting_priority_replacement == ""
+    assert old.conf.free_room_exclusions == ""
+    old.conf.free_room_exclusions = OTHER_COVERS[0]
+    old.backup_plans[0].conf.free_room_exclusions = ",".join(OTHER_COVERS[:2])
+    old.conf.resting_priority_replacement = OTHER_COVERS[0]
+    old.backup_plans[0].conf.resting_priority_replacement = ",".join(OTHER_COVERS[:2])
     old.conf.resting_standby = DEEP[1]
     loaded = PlanModel.model_validate_json(old.model_dump_json())
     monkeypatch.setattr(config, "plan", loaded)
     solver.global_plan = build_global_plan()
     assert solver.initialize_operators() is None
+    assert (
+        resting_tier(solver.op_data, OTHER_COVERS[0])
+        == RestingTier.PRIORITY_REPLACEMENT
+    )
+    assert resting_tier(solver.op_data, OTHER_COVERS[1]) == RestingTier.REPLACEMENT
     assert solver.op_data.operators[DEEP[1]].resting_priority == "standby"
     assert solver.op_data.operators[DEEP[2]].resting_priority == "high"
     assert solver.op_data.swap_plan([True], refresh=True) is None
+    assert (
+        resting_tier(solver.op_data, OTHER_COVERS[1])
+        == RestingTier.PRIORITY_REPLACEMENT
+    )
+    assert solver.op_data.config.resting_priority_replacement == OTHER_COVERS[:2]
+    assert solver.op_data.config.free_room_exclusions == OTHER_COVERS[:2]
     assert solver.op_data.operators[DEEP[2]].resting_priority == "standby"
     assert solver.op_data.swap_plan([False], refresh=True) is None
+    assert solver.op_data.config.free_room_exclusions == [OTHER_COVERS[0]]
+    assert resting_tier(solver.op_data, OTHER_COVERS[1]) == RestingTier.REPLACEMENT
     assert solver.op_data.operators[DEEP[2]].resting_priority == "high"

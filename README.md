@@ -30,7 +30,7 @@ MAA 设置中可开启 **任务结束后恢复主题**，从下拉列表选择�
 
 ## 下载与安装
 
-已部署的程序可在 **Mower 设置 → 软件更新** 中检查正式版、公测版或开发版更新，并在更新后重启同一安装目录下所有运行实例、恢复原运行状态。运行中的任务默认重置运行缓存后重新调度，专精计划保留并按训练室实际状态恢复。Release 独立包支持手动上传安装包离线安装；源码与独立包部署均可选择后台静默重启。首次启用、平台支持与失败恢复说明见 [软件更新与实例恢复](doc/software-update.md)。
+已部署的程序可在 **Mower 设置 → 软件更新** 中检查正式版、公测版或开发版更新，并在更新后重启同一安装目录下所有运行实例、恢复原运行状态。运行中的实例按“重启续接”模式恢复已保存的心情、位置和任务队列，包括跑单与专精任务；专精计划也保存在数据库中。Release 独立包支持手动上传安装包离线安装；源码与独立包部署均可选择后台静默重启。首次启用、平台支持与失败恢复说明见 [软件更新与实例恢复](doc/software-update.md)。
 
 Windows 和 Linux 独立包可优先使用 [MowerRelease](https://github.com/ArkMowers/MowerRelease) 发布的跨版本 OTA 差异包；本地版本不匹配或差异包校验失败时自动使用完整包。macOS 继续使用完整 DMG。
 
@@ -192,6 +192,13 @@ arknights-mower_<version>_macos_arm64.dmg
 
 发布入口、版本格式、构建检查和系统依赖见
 [跨平台发布流水线](doc/release-platforms.md)。
+
+开发版安装包由 [MowerRelease](https://github.com/ArkMowers/MowerRelease)
+每天北京时间 06:00 从主仓库 `alpha` 分支构建，首阶段仅提供 Windows x64。
+版本沿用 `alpha.x` 并附加提交短码，例如 `v4.1.6-alpha.9.g40ac54e4`；
+普通 `alpha.x` 仍属于公测版。`alpha` 提交未变化时跳过。完整包与开发版之间
+的 OTA 差异包均发布在 MowerRelease，主仓库不创建 nightly Release。
+安装版在「软件更新」选择开发版；源码版仍由 Git 跟随所选分支。
 
 Windows 与 macOS 产物均未签名：Windows 首次运行可能出现 SmartScreen 提示，请
 选择「更多信息 -> 仍要运行」；macOS 为 unsigned experimental build，可能需要在

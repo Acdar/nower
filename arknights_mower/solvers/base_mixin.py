@@ -19,6 +19,7 @@ from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
     default_performance_profile,
     effective_performance_profile,
+    is_android_runtime,
 )
 from arknights_mower.utils.resource_pkg import (
     register_resource_reload,
@@ -158,11 +159,14 @@ class BaseMixin:
         # Compatibility for integrations that still change only the former
         # boolean. In AUTO, only a deviation from the platform baseline is an
         # explicit legacy override; the baseline itself remains adaptive.
-        if config.conf.performance_mode == "auto":
+        if not is_android_runtime() and config.conf.performance_mode == "auto":
             legacy_enabled = config.conf.low_frame_rate_mode
             if legacy_enabled != default_performance_profile().low_frame_rate:
                 return PERFORMANCE_PRESETS["medium" if legacy_enabled else "high"]
-        elif config.conf.performance_mode in PERFORMANCE_PRESETS:
+        elif (
+            not is_android_runtime()
+            and config.conf.performance_mode in PERFORMANCE_PRESETS
+        ):
             legacy_enabled = config.conf.low_frame_rate_mode
             if legacy_enabled != profile.low_frame_rate:
                 return PERFORMANCE_PRESETS["medium" if legacy_enabled else "high"]
@@ -782,7 +786,9 @@ class BaseMixin:
             logger.debug(f"{colored_room}B{digit_1}0{digit_2}")
             return f"room_{digit_1}_{digit_2}"
         elif colored_room == "训练室":
-            logger.debug("训练室B305")
+            logger.debug(
+                "训练室B205" if config.conf.swap_contact_train else "训练室B305"
+            )
             return "train"
         elif colored_room == "加工站":
             logger.debug("加工站B105")
@@ -808,7 +814,9 @@ class BaseMixin:
         elif room == "meeting":
             logger.debug("会客室1F02")
         else:
-            logger.debug("办公室B205")
+            logger.debug(
+                "办公室B305" if config.conf.swap_contact_train else "办公室B205"
+            )
         return room
 
     def adjust_room(self, _room):
@@ -874,7 +882,11 @@ class BaseMixin:
                     if actions >= 5:
                         break
                     actions += 1
-                    _room = segment.base(self.recog.img, pos)[room]
+                    _room = segment.base(
+                        self.recog.img,
+                        pos,
+                        swap_contact_train=config.conf.swap_contact_train,
+                    )[room]
                     logger.debug(
                         f"进入房间 {room}，第{enter_times + 1}轮第{retry_times + 1}次尝试"
                     )

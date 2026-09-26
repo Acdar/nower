@@ -5,13 +5,14 @@ Frozen deployments run a copy of the complete old runtime outside the install.
 The old code, virtualenv and frontend remain available for rollback.
 """
 
+import bz2
 import hashlib
 import json
 import os
 import posixpath
+import re
 import shutil
 import signal
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -20,7 +21,7 @@ import threading
 import time
 import traceback
 import zipfile
-from contextlib import closing
+from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 
 if __package__:
@@ -54,6 +55,7 @@ else:
 
 MAX_PACKAGE_BYTES = 2 * 1024**3
 MAX_EXTRACTED_BYTES = 8 * 1024**3
+MAX_PATCH_FILE = 64 * 1024**2
 NPM_LOCKFILE = "ui/package-lock.json"
 
 
@@ -215,6 +217,95 @@ def extract_archive(archive, destination, check_cancelled=lambda: None):
                 source.extract(member, destination, filter="data")
 
 
+def _bsdiff_number(raw):
+    value = raw[7] & 0x7F
+    for byte in raw[6::-1]:
+        value = value * 256 + byte
+    return -value if raw[7] & 0x80 else value
+
+
+def _bounded_bzip2(raw, limit):
+    try:
+        decoder = bz2.BZ2Decompressor()
+        data = decoder.decompress(raw, max_length=limit + 1)
+    except (EOFError, OSError) as error:
+        raise ValueError("差异包二进制补丁已损坏") from error
+    if len(data) > limit or not decoder.eof or decoder.unused_data:
+        raise ValueError("差异包二进制补丁超出大小限制")
+    return data
+
+
+def apply_bsdiff(base, patch, size, check_cancelled=lambda: None):
+    """Apply a bounded BSDIFF40 patch using only the detached worker's stdlib."""
+    if (
+        len(base) > MAX_PATCH_FILE
+        or len(patch) > MAX_PATCH_FILE
+        or not 0 < size <= MAX_PATCH_FILE
+        or len(patch) < 32
+        or patch[:8] != b"BSDIFF40"
+    ):
+        raise ValueError("差异包二进制补丁无效")
+    control_size = _bsdiff_number(patch[8:16])
+    diff_size = _bsdiff_number(patch[16:24])
+    output_size = _bsdiff_number(patch[24:32])
+    if (
+        control_size < 0
+        or diff_size < 0
+        or 32 + control_size + diff_size > len(patch)
+        or output_size != size
+    ):
+        raise ValueError("差异包二进制补丁长度无效")
+    control = _bounded_bzip2(patch[32 : 32 + control_size], MAX_PATCH_FILE)
+    diff = _bounded_bzip2(
+        patch[32 + control_size : 32 + control_size + diff_size], size
+    )
+    extra = _bounded_bzip2(patch[32 + control_size + diff_size :], size)
+    output = bytearray(size)
+    old_position = new_position = control_position = diff_position = extra_position = 0
+    while new_position < size:
+        check_cancelled()
+        if control_position + 24 > len(control):
+            raise ValueError("差异包二进制补丁控制块不完整")
+        copy_size, extra_size, seek = (
+            _bsdiff_number(
+                control[control_position + offset : control_position + offset + 8]
+            )
+            for offset in (0, 8, 16)
+        )
+        control_position += 24
+        if (
+            copy_size < 0
+            or extra_size < 0
+            or copy_size + extra_size == 0
+            and seek == 0
+            or new_position + copy_size + extra_size > size
+            or diff_position + copy_size > len(diff)
+            or extra_position + extra_size > len(extra)
+        ):
+            raise ValueError("差异包二进制补丁控制块无效")
+        for offset in range(copy_size):
+            old_index = old_position + offset
+            old_byte = base[old_index] if 0 <= old_index < len(base) else 0
+            output[new_position + offset] = (
+                diff[diff_position + offset] + old_byte
+            ) & 0xFF
+        new_position += copy_size
+        diff_position += copy_size
+        output[new_position : new_position + extra_size] = extra[
+            extra_position : extra_position + extra_size
+        ]
+        new_position += extra_size
+        extra_position += extra_size
+        old_position += copy_size + seek
+    if (
+        control_position != len(control)
+        or diff_position != len(diff)
+        or extra_position != len(extra)
+    ):
+        raise ValueError("差异包二进制补丁包含多余数据")
+    return bytes(output)
+
+
 def apply_ota_archive(
     archive,
     installed,
@@ -240,15 +331,15 @@ def apply_ota_archive(
         if package.getinfo("ota.json").file_size > 16 * 1024**2:
             raise ValueError("差异包清单过大")
         manifest = json.loads(package.read("ota.json"))
+        format_version = manifest.get("format") if isinstance(manifest, dict) else None
         expected = {
             "kind": "mower-ota",
-            "format": 1,
             "from": from_version.split("+", 1)[0].removeprefix("v"),
             "to": to_version.removeprefix("v"),
             "platform": platform,
             "arch": arch,
         }
-        if not isinstance(manifest, dict) or any(
+        if format_version not in (1, 2) or any(
             manifest.get(k) != v for k, v in expected.items()
         ):
             raise ValueError("差异包版本或平台不匹配")
@@ -262,6 +353,14 @@ def apply_ota_archive(
             or any(name not in files for name in changed)
         ):
             raise ValueError("差异包文件清单无效")
+        patches = manifest.get("patches", {}) if format_version == 2 else {}
+        if (
+            not isinstance(patches, dict)
+            or format_version == 1
+            and "patches" in manifest
+            or any(name not in changed for name in patches)
+        ):
+            raise ValueError("差异包二进制补丁清单无效")
 
         def safe_path(name):
             if not isinstance(name, str) or len(name) > 1024:
@@ -310,13 +409,34 @@ def apply_ota_archive(
                     ).startswith("mower/")
                 ):
                     raise ValueError("差异包符号链接无效")
+        for name, item in patches.items():
+            if (
+                files[name]["type"] != "file"
+                or not isinstance(item, dict)
+                or set(item) != {"type", "base_sha256", "sha256", "size"}
+                or item["type"] != "bsdiff"
+                or type(item["size"]) is not int
+                or not 0 < item["size"] <= MAX_PATCH_FILE
+                or any(
+                    not isinstance(item[key], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", item[key])
+                    for key in ("base_sha256", "sha256")
+                )
+            ):
+                raise ValueError("差异包二进制补丁清单无效")
         expected_payload = {
-            "payload/" + n for n in changed if files[n]["type"] == "file"
+            "payload/" + n
+            for n in changed
+            if files[n]["type"] == "file" and n not in patches
         }
-        if set(names) != expected_payload | {"ota.json"}:
+        expected_patches = {"patch/" + n for n in patches}
+        if set(names) != expected_payload | expected_patches | {"ota.json"}:
             raise ValueError("差异包内容与清单不一致")
         if (
-            sum(package.getinfo(n).file_size for n in expected_payload)
+            sum(
+                package.getinfo(n).file_size
+                for n in expected_payload | expected_patches
+            )
             > MAX_EXTRACTED_BYTES
         ):
             raise ValueError("差异包解压后过大")
@@ -333,7 +453,34 @@ def apply_ota_archive(
             relative = safe_path(name)
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            source = None if name in changed else installed / relative
+            if name in patches:
+                source = installed / Path(*relative.parts[1:])
+                if (
+                    source.is_symlink()
+                    or not source.is_file()
+                    or not source.resolve().is_relative_to(installed.resolve())
+                    or source.stat().st_size > MAX_PATCH_FILE
+                ):
+                    raise ValueError("本地版本与二进制补丁起点不一致")
+                base = source.read_bytes()
+                if hashlib.sha256(base).hexdigest() != patches[name]["base_sha256"]:
+                    raise ValueError("本地版本与二进制补丁起点不一致")
+                with package.open("patch/" + name) as stream:
+                    delta = stream.read(MAX_PATCH_FILE + 1)
+                if hashlib.sha256(delta).hexdigest() != patches[name]["sha256"]:
+                    raise ValueError("差异包二进制补丁 SHA-256 校验失败")
+                rebuilt = apply_bsdiff(
+                    base, delta, patches[name]["size"], check_cancelled
+                )
+                total += len(rebuilt)
+                if total > MAX_EXTRACTED_BYTES:
+                    raise ValueError("差异包目标超过 8 GiB")
+                if hashlib.sha256(rebuilt).hexdigest() != item["sha256"]:
+                    raise ValueError("差异包目标文件 SHA-256 校验失败")
+                target.write_bytes(rebuilt)
+                target.chmod(item["mode"])
+                continue
+            source = None if name in changed else installed / Path(*relative.parts[1:])
             if source is not None and (
                 source.is_symlink()
                 or not source.is_file()
@@ -953,33 +1100,46 @@ class Worker:
             extract_archive(package, payload_dir, self.check_cancelled)
 
     def prepare_ota(self, payload_dir):
-        import requests
-
         asset = self.job["ota_asset"]
         package = self.work / asset["name"]
-        self.report("downloading", "下载跨版本 OTA 差异包")
-        proxy = self.job.get("proxy")
-        with (
-            request_download(
-                requests,
-                "get",
-                asset["url"],
-                proxy=self.job.get("github_proxy", ""),
-                headers={"User-Agent": "Mower-Software-Update"},
-                proxies={"http": proxy, "https": proxy} if proxy else None,
-                stream=True,
-                timeout=(10, 10),
-            )[0] as response,
-            package.open("wb") as out,
-        ):
+        manual = self.job.get("manual") is True
+        self.report(
+            "downloading",
+            "准备上传的 OTA 差异包" if manual else "下载跨版本 OTA 差异包",
+        )
+        with ExitStack() as stack:
+            if manual:
+                if not package.is_file():
+                    raise ValueError("上传的 OTA 差异包不存在，请重新上传")
+                stream = stack.enter_context(package.open("rb"))
+                chunks = iter(lambda: stream.read(64 * 1024), b"")
+                out = None
+            else:
+                import requests
+
+                proxy = self.job.get("proxy")
+                response, _ = request_download(
+                    requests,
+                    "get",
+                    asset["url"],
+                    proxy=self.job.get("github_proxy", ""),
+                    headers={"User-Agent": "Mower-Software-Update"},
+                    proxies={"http": proxy, "https": proxy} if proxy else None,
+                    stream=True,
+                    timeout=(10, 10),
+                )
+                stack.enter_context(response)
+                out = stack.enter_context(package.open("wb"))
+                chunks = response.iter_content(64 * 1024)
             size = 0
             digest = hashlib.sha256()
-            for chunk in response.iter_content(64 * 1024):
+            for chunk in chunks:
                 self.check_cancelled()
                 size += len(chunk)
                 if size > MAX_PACKAGE_BYTES:
                     raise ValueError("OTA 包超过 2 GiB 限制")
-                out.write(chunk)
+                if out is not None:
+                    out.write(chunk)
                 digest.update(chunk)
                 self.status.update(current=size, total=asset["size"])
         if size != asset["size"] or digest.hexdigest() != asset["sha256"]:
@@ -1011,7 +1171,11 @@ class Worker:
     def prepare_package(self):
         payload_dir = self.work / "payload"
         shutil.rmtree(payload_dir, ignore_errors=True)
-        if self.job.get("ota_asset") and self.job.get("manual") is not True:
+        if self.job.get("ota_asset") and self.job.get("manual") is True:
+            # Uploaded OTA packages must remain entirely offline. A mismatch
+            # leaves the live installation intact instead of fetching a full ZIP.
+            self.prepare_ota(payload_dir)
+        elif self.job.get("ota_asset"):
             try:
                 self.prepare_ota(payload_dir)
             except UpdateCancelled:
@@ -1247,8 +1411,6 @@ class Worker:
         )
 
     def restart(self, records, verify=True):
-        if self.job.get("operation") in ("source-version", "source-pr"):
-            self.clear_source_runtime_snapshots(records)
         self.report("restarting", "恢复实例，等待网页服务就绪")
         processes = []
         if verify:
@@ -1263,6 +1425,10 @@ class Worker:
             ):
                 continue
             env = launch_environment(record, self.job["id"], self.job["background"])
+            if record["kind"] == "instance" and record.get("running"):
+                env["MOWER_RESUME_MODE"] = "0"
+            else:
+                env.pop("MOWER_RESUME_MODE", None)
             if self.job.get("tool_path"):
                 env["PATH"] = self.job["tool_path"]
             with (self.work / "restart.log").open("ab") as log:
@@ -1328,34 +1494,6 @@ class Worker:
         raise RuntimeError(
             "新版本启动失败或不支持更新恢复协议，准备恢复原版本；详情见 restart.log"
         )
-
-    def clear_source_runtime_snapshots(self, records):
-        """Old launchers may resume mode 0; remove only their runtime snapshots."""
-        self.report("resetting", "重置实例运行缓存，保留配置、专精计划和数据库记录")
-        databases = set()
-        for record in records:
-            if record.get("kind") != "instance":
-                continue
-            data = record.get("data_dir")
-            base = Path(data).expanduser() if data else self.root
-            if not base.is_absolute():
-                base = Path(record.get("cwd") or self.root) / base
-            database = (base / record.get("space", "") / "tmp/data.db").resolve()
-            if database in databases or not database.is_file():
-                continue
-            databases.add(database)
-            with (
-                closing(
-                    sqlite3.connect(
-                        database.as_uri() + "?mode=rw", uri=True, timeout=10
-                    )
-                ) as connection,
-                connection,
-            ):
-                if connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='saved_state'"
-                ).fetchone():
-                    connection.execute("DELETE FROM saved_state")
 
     def rollback(self):
         self.report("rollback", "安装未完成，恢复原版本")

@@ -1,19 +1,24 @@
 <script setup>
 import { useConfigStore } from '@/stores/config'
 import { usePlanStore } from '@/stores/plan'
+import PlanAdvancedSettings from '@/components/PlanAdvancedSettings.vue'
 import { storeToRefs } from 'pinia'
 import { swap } from '@/utils/common'
 import { apply_operator_replace, collect_plan_operators } from '@/utils/plan_edit'
+import { createSaveCoordinator, drainConfigurationSaves } from '@/utils/configPersistence'
 
 const config_store = useConfigStore()
 const { free_blacklist, theme, experimental_dorm_logic } = storeToRefs(config_store)
 
 const plan_store = usePlanStore()
+const import_saves = createSaveCoordinator(config_store, plan_store)
 const {
   ling_xi,
   mood_limits,
   operator_mood_limits,
   resting_priority,
+  resting_priority_replacement,
+  free_room_exclusions,
   resting_standby,
   exhaust_require,
   rest_in_full,
@@ -50,6 +55,7 @@ const current_plan = computed(() => {
 import { useDialog, useMessage, NAlert } from 'naive-ui'
 
 const plan_editor = ref(null)
+const show_advanced_settings_dialog = ref(false)
 
 const generating_image = ref(false)
 const show_mood_limits_dialog = ref(false)
@@ -69,8 +75,15 @@ function requireEditing() {
   return true
 }
 
-function beforeImport() {
-  return requireEditing()
+async function beforeImport() {
+  if (!requireEditing()) return false
+  try {
+    await import_saves.pauseAndDrain()
+    return true
+  } catch (error) {
+    message.error(error.message || '排班导入前保存失败')
+    return false
+  }
 }
 
 // Select menus teleport to body; consider the toolbar controls and the popup "inside".
@@ -123,6 +136,8 @@ import { render_op_label } from '@/utils/op_select'
 import { pinyin_match } from '@/utils/common'
 
 async function save() {
+  await drainConfigurationSaves(config_store, plan_store)
+  await plan_store.save_plan()
   generating_image.value = true
   loading_bar.start()
   if (facility.value != '') {
@@ -185,6 +200,8 @@ function create_sub_plan() {
       operator_mood_limits: {},
       rest_in_full: [],
       resting_priority: [],
+      resting_priority_replacement: [],
+      free_room_exclusions: [],
       resting_standby: [],
       workaholic: [],
       refresh_trading: [],
@@ -226,6 +243,8 @@ const current_conf = ref({
   operator_mood_limits: operator_mood_limits.value,
   rest_in_full: rest_in_full.value,
   resting_priority: resting_priority.value,
+  resting_priority_replacement: resting_priority_replacement.value,
+  free_room_exclusions: free_room_exclusions.value,
   resting_standby: resting_standby.value,
   workaholic: workaholic.value,
   exhaust_require: exhaust_require.value,
@@ -241,6 +260,8 @@ watchEffect(() => {
       operator_mood_limits: operator_mood_limits.value,
       rest_in_full: rest_in_full.value,
       resting_priority: resting_priority.value,
+      resting_priority_replacement: resting_priority_replacement.value,
+      free_room_exclusions: free_room_exclusions.value,
       resting_standby: resting_standby.value,
       workaholic: workaholic.value,
       exhaust_require: exhaust_require.value,
@@ -263,6 +284,8 @@ watchEffect(() => {
     rest_in_full.value = current_conf.value.rest_in_full
     exhaust_require.value = current_conf.value.exhaust_require
     resting_priority.value = current_conf.value.resting_priority
+    resting_priority_replacement.value = current_conf.value.resting_priority_replacement
+    free_room_exclusions.value = current_conf.value.free_room_exclusions
     resting_standby.value = current_conf.value.resting_standby
     workaholic.value = current_conf.value.workaholic
     refresh_trading.value = current_conf.value.refresh_trading
@@ -334,6 +357,8 @@ function replace_main_conf() {
     exhaust_require: exhaust_require.value,
     workaholic: workaholic.value,
     resting_priority: resting_priority.value,
+    resting_priority_replacement: resting_priority_replacement.value,
+    free_room_exclusions: free_room_exclusions.value,
     resting_standby: resting_standby.value,
     refresh_trading: refresh_trading.value,
     refresh_drained: refresh_drained.value,
@@ -406,15 +431,27 @@ import Pencil from '@vicons/tabler/Pencil'
 import LockClosedOutline from '@vicons/ionicons5/LockClosedOutline'
 import LockOpenOutline from '@vicons/ionicons5/LockOpenOutline'
 
-function import_plan({ event }) {
-  const msg = event.target.response
-  if (msg == '排班已加载') {
-    sub_plan.value = 'main'
-    load_plan()
-    message.success('成功导入排班表！')
-  } else {
-    message.error(msg)
+async function import_plan({ event }) {
+  try {
+    const msg = event.target.response
+    if (msg == '排班已加载') {
+      sub_plan.value = 'main'
+      await config_store.load_config()
+      await load_plan()
+      message.success('成功导入排班表！')
+    } else {
+      message.error(msg)
+    }
+  } catch (error) {
+    message.error(error.message || '导入后读取排班失败')
+  } finally {
+    import_saves.resume()
   }
+}
+
+function import_error() {
+  import_saves.resume()
+  message.error('排班表上传失败')
 }
 
 const import_url = `${import.meta.env.VITE_HTTP_URL}/import`
@@ -429,10 +466,11 @@ const export_options = [
 ]
 
 async function export_json() {
+  await drainConfigurationSaves(config_store, plan_store)
+  await plan_store.save_plan()
   const { data } = await axios.get(`${import.meta.env.VITE_HTTP_URL}/export-json`, {
     responseType: 'blob'
   })
-  console.log(data)
   const url = window.URL.createObjectURL(data)
   const link = document.createElement('a')
   link.href = url
@@ -593,6 +631,7 @@ function movePlanForward() {
         :show-file-list="false"
         name="img"
         @finish="import_plan"
+        @error="import_error"
       >
         <n-button title="导入排班" :disabled="edit_locked">
           <template #icon>
@@ -617,6 +656,12 @@ function movePlanForward() {
     </div>
   </div>
   <plan-editor ref="plan_editor" class="w-980 mx-auto mw-980 px-12" />
+  <div class="plan-advanced-actions w-980 mx-auto px-12 mw-980">
+    <n-button @click="show_advanced_settings_dialog = true">高级设置</n-button>
+    <n-button v-if="experimental_dorm_logic" @click="show_mood_limits_dialog = true">
+      设置心情上下限
+    </n-button>
+  </div>
   <n-form
     class="w-980 mx-auto mb-12 px-12 mw-980"
     :label-placement="mobile ? 'top' : 'left'"
@@ -624,10 +669,7 @@ function movePlanForward() {
     label-width="160"
     label-align="left"
   >
-    <n-form-item v-if="experimental_dorm_logic" :show-label="false">
-      <n-button @click="show_mood_limits_dialog = true">设置心情上下限</n-button>
-    </n-form-item>
-    <n-form-item v-else>
+    <n-form-item v-if="!experimental_dorm_logic">
       <template #label>
         <span>令夕模式</span>
         <help-text>
@@ -648,7 +690,7 @@ function movePlanForward() {
     </n-form-item>
     <n-form-item>
       <template #label
-        ><span>需要回满心情的干员</span><help-text>休息到当前心情上限后回班。</help-text></template
+        ><span>需要回满心情的干员</span><help-text>回满目标为当前心情上限。</help-text></template
       >
       <slick-operator-select
         :disabled="edit_locked"
@@ -657,12 +699,82 @@ function movePlanForward() {
     </n-form-item>
     <n-form-item>
       <template #label>
-        <span>需要用尽心情的干员</span
-        ><help-text>用尽后下班，优先取得替班；被占用时先换替班，否则叫回占用组。</help-text>
+        <span>需要用尽心情的干员</span>
+        <help-text>
+          <template v-if="experimental_dorm_logic">用尽按当前心情下限计算，</template>
+          <template v-else>用尽后下班，</template>
+          优先取得替班；被占用时先换替班，否则叫回占用组。
+        </help-text>
       </template>
       <slick-operator-select
         :disabled="edit_locked"
         v-model="current_conf.exhaust_require"
+      ></slick-operator-select>
+    </n-form-item>
+    <n-form-item>
+      <template #label>
+        <span>宿舍高优先级干员</span>
+        <help-text>
+          <template v-if="experimental_dorm_logic">
+            <p>
+              名单 → 普通主班 → 低优主班 → 高优替班 → 候补 → 普通替班 →
+              空闲；同级距心情上限更远者优先。
+            </p>
+            <p>
+              只影响分床和单回，不改变下班顺序。更高排名的新入住者可重分单回，已有普通床位保持不动。
+            </p>
+          </template>
+          <template v-else>按名单顺序优先分床，不改变下班顺序。</template>
+        </help-text>
+      </template>
+      <slick-operator-select
+        :disabled="edit_locked"
+        v-model="current_conf.ope_resting_priority"
+      ></slick-operator-select>
+    </n-form-item>
+    <n-form-item>
+      <template #label>
+        <span>宿舍低优先级干员</span>
+        <help-text>
+          <template v-if="experimental_dorm_logic">
+            低于普通主班，高于高优替班；同级距心情上限更远者优先。需有床才能下班，不改变下班顺序。
+          </template>
+          <template v-else>降低宿舍分床优先级，不改变下班顺序。</template>
+        </help-text>
+      </template>
+      <slick-operator-select
+        :disabled="edit_locked"
+        v-model="current_conf.resting_priority"
+      ></slick-operator-select>
+    </n-form-item>
+    <n-form-item v-if="experimental_dorm_logic">
+      <template #label>
+        <span>宿舍高优先级替班</span>
+        <help-text
+          >仅替班生效，低于低优主班、高于候补；同级距心情上限更远者优先，可接管候补床位。</help-text
+        >
+      </template>
+      <slick-operator-select
+        :disabled="edit_locked"
+        v-model="current_conf.resting_priority_replacement"
+      ></slick-operator-select>
+    </n-form-item>
+    <n-form-item>
+      <template #label>
+        <span>宿舍休息候补干员</span>
+        <help-text>
+          <template v-if="experimental_dorm_logic">
+            有床休息，无床或被更高优接管后待命；需有正常优先级主班在休息。绑组随组回班，未绑组随下一批回班。低于急救线升为低优并保床。
+          </template>
+          <template v-else>
+            仅限绑组，须同组有高优休息。随组待命、回班，空位可补床，非急救时可给高优让床。
+          </template>
+          <p>待命不恢复心情；用尽、回满、固定宿舍和零心情工作干员不适用。</p>
+        </help-text>
+      </template>
+      <slick-operator-select
+        :disabled="edit_locked"
+        v-model="current_conf.resting_standby"
       ></slick-operator-select>
     </n-form-item>
     <n-form-item>
@@ -676,35 +788,17 @@ function movePlanForward() {
     </n-form-item>
     <n-form-item>
       <template #label>
-        <span>宿舍低优先级干员</span>
+        <span>宿舍黑名单</span>
         <help-text>
-          <template v-if="experimental_dorm_logic">
-            低于普通主班，高于候补；同级心情低者优先。需有床才能下班，不改变下班顺序。
-          </template>
-          <template v-else>降低宿舍分床优先级，不改变下班顺序。</template>
+          <template v-if="experimental_dorm_logic"
+            >不参与动态分床和补床，固定宿舍岗位不受影响。</template
+          >
+          <template v-else>不参与空闲干员补床。</template>
         </help-text>
       </template>
       <slick-operator-select
         :disabled="edit_locked"
-        v-model="current_conf.resting_priority"
-      ></slick-operator-select>
-    </n-form-item>
-    <n-form-item>
-      <template #label>
-        <span>宿舍休息候补干员</span>
-        <help-text>
-          <template v-if="experimental_dorm_logic">
-            有床休息，无床待命；需有正常优先级主班在休息。绑组随组回班，未绑组随下一批回班。低于急救线须有床。
-          </template>
-          <template v-else>
-            仅限绑组，须同组有高优休息。随组待命、回班，空位可补床，非急救时可给高优让床。
-          </template>
-          <p>待命不恢复心情；用尽、回满、固定宿舍和零心情工作干员不适用。</p>
-        </help-text>
-      </template>
-      <slick-operator-select
-        :disabled="edit_locked"
-        v-model="current_conf.resting_standby"
+        v-model="current_conf.free_blacklist"
       ></slick-operator-select>
     </n-form-item>
     <n-form-item>
@@ -737,39 +831,6 @@ function movePlanForward() {
         v-model="current_conf.refresh_drained"
       ></slick-operator-select>
     </n-form-item>
-    <n-form-item>
-      <template #label>
-        <span>宿舍黑名单</span>
-        <help-text>
-          <template v-if="experimental_dorm_logic"
-            >不参与动态分床和补床，固定宿舍岗位不受影响。</template
-          >
-          <template v-else>不参与空闲干员补床。</template>
-        </help-text>
-      </template>
-      <slick-operator-select
-        :disabled="edit_locked"
-        v-model="current_conf.free_blacklist"
-      ></slick-operator-select>
-    </n-form-item>
-    <n-form-item>
-      <template #label>
-        <span>干员休息优先级</span>
-        <help-text>
-          <template v-if="experimental_dorm_logic">
-            <p>名单 → 普通主班 → 低优主班 → 候补 → 替班 → 空闲；同级心情低者优先。</p>
-            <p>
-              只影响分床和单回，不改变下班顺序。更高排名的新入住者可重分单回，已有普通床位保持不动。
-            </p>
-          </template>
-          <template v-else>按名单顺序优先分床，不改变下班顺序。</template>
-        </help-text>
-      </template>
-      <slick-operator-select
-        :disabled="edit_locked"
-        v-model="current_conf.ope_resting_priority"
-      ></slick-operator-select>
-    </n-form-item>
     <n-form-item v-if="experimental_dorm_logic">
       <template #label>
         <span>宿舍优先级排序</span>
@@ -785,6 +846,24 @@ function movePlanForward() {
       ></slick-dorm-select>
     </n-form-item>
   </n-form>
+  <n-modal
+    v-model:show="show_advanced_settings_dialog"
+    :auto-focus="false"
+    preset="card"
+    title="高级设置"
+    :style="{ width: '800px', maxWidth: 'calc(100vw - 24px)' }"
+    :content-style="{ maxHeight: '75vh', overflowY: 'auto' }"
+  >
+    <PlanAdvancedSettings
+      v-model:free-room-exclusions="current_conf.free_room_exclusions"
+      :disabled="edit_locked"
+    />
+    <template #footer>
+      <n-space justify="end">
+        <n-button @click="show_advanced_settings_dialog = false">完成</n-button>
+      </n-space>
+    </template>
+  </n-modal>
   <n-modal
     v-if="experimental_dorm_logic"
     v-model:show="show_mood_limits_dialog"
@@ -900,6 +979,13 @@ function movePlanForward() {
 </template>
 
 <style scoped lang="scss">
+.plan-advanced-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
 .w-980 {
   width: 100%;
   max-width: 980px;

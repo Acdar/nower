@@ -422,6 +422,49 @@ def test_plan_entry_keeps_runtime_plan_on_write_failure(
     assert config.plan_path.read_bytes() == previous_bytes
 
 
+def test_plan_advanced_settings_round_trip_without_drone_room(
+    plan_client, populated_plan
+):
+    config.conf.drone_room = "room_1_1"
+    config.conf.resting_threshold = 0.65
+    config.save_conf()
+    value = populated_plan.model_dump(exclude_none=True)
+    value["advanced_settings"] = {
+        "resting_threshold": 0.75,
+        "drone_count_limit": 140,
+        "product_switching": {"waiting_seconds": 5},
+        "experimental_dorm_logic": True,
+        "group_rest_in_full_on_mood_gap": False,
+        "group_mood_gap_max_extra_wait_hours": 1.5,
+    }
+    result = post_plan_file(plan_client, value)
+    assert result.get_data(as_text=True) == "排班已加载"
+    assert config.conf.resting_threshold == 0.75
+    assert config.conf.drone_count_limit == 140
+    assert config.conf.product_switching.waiting_seconds == 5
+    assert config.conf.group_rest_in_full_on_mood_gap is False
+    assert config.conf.group_mood_gap_max_extra_wait_hours == 1.5
+    assert config.conf.drone_room == "room_1_1"
+
+    exported = plan_client.get("/export-json", headers={"token": "test-token"}).json
+    assert exported["advanced_settings"]["resting_threshold"] == 0.75
+    assert exported["advanced_settings"]["product_switching"]["waiting_seconds"] == 5
+    assert exported["advanced_settings"]["group_rest_in_full_on_mood_gap"] is False
+    assert exported["advanced_settings"]["group_mood_gap_max_extra_wait_hours"] == 1.5
+    assert "drone_room" not in exported["advanced_settings"]
+
+
+def test_plan_entry_rejects_invalid_advanced_settings(plan_client, populated_plan):
+    value = populated_plan.model_dump(exclude_none=True)
+    value["advanced_settings"] = {"product_switching": {"waiting_seconds": 70}}
+    before_plan = config.plan_path.read_bytes()
+    before_conf = config.conf_path.read_bytes()
+    result = post_plan_file(plan_client, value)
+    assert "高级设置无效" in result.get_data(as_text=True)
+    assert config.plan_path.read_bytes() == before_plan
+    assert config.conf_path.read_bytes() == before_conf
+
+
 @pytest.mark.parametrize("endpoint", ["/config-backup/import", "/import"])
 def test_damaged_compression_reports_import_error_without_writes(
     client, plan_client, monkeypatch, endpoint

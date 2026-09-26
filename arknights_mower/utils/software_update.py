@@ -30,6 +30,8 @@ REPO = "ArkMowers/arknights-mower"
 OTA_REPO = "ArkMowers/MowerRelease"
 API = f"https://api.github.com/repos/{REPO}"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
+OTA_RELEASES_URL = f"https://github.com/{OTA_REPO}/releases"
+OTA_INDEX_URL = f"https://raw.githubusercontent.com/{OTA_REPO}/main/version"
 CHANNELS = [
     {
         "value": "stable",
@@ -43,11 +45,20 @@ CHANNELS = [
     },
     {
         "value": "dev",
-        "label": "开发版（仅源码部署）",
-        "description": "跟随所选源码分支（默认 alpha）的最新提交，比公测版更新更频繁；需要 Git、Python 和 Node.js。",
+        "label": "开发版",
+        "description": "安装版跟随 alpha 分支的 Windows x64 Nightly；源码部署仍通过 Git 跟随所选分支。开发版可能不稳定。",
     },
 ]
-VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+))?(?:\+.*)?$")
+VERSION_RE = re.compile(
+    r"^v?(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+)(?:\.g([0-9a-f]{8}))?)?(?:\+.*)?$"
+)
+NIGHTLY_RE = re.compile(r"-alpha\.\d+\.g[0-9a-f]{8}(?:\+.*)?$")
+
+
+def is_nightly(value):
+    return bool(NIGHTLY_RE.search(value))
+
+
 _checks = {}
 _auto_check_lock = RLock()
 _auto_check_thread = None
@@ -92,7 +103,14 @@ def normalize_source_ref(value):
 def get_settings():
     saved = runtime.read_json(runtime.state_dir() / "settings.json", {})
     return {
-        "channel": saved.get("channel", "beta" if "-" in __version__ else "stable"),
+        "channel": saved.get(
+            "channel",
+            "dev"
+            if is_nightly(__version__)
+            else "beta"
+            if "-" in __version__
+            else "stable",
+        ),
         "background": saved.get("background", True),
         "auto_check": saved.get("auto_check", False),
         "auto_update": saved.get("auto_update", False),
@@ -114,8 +132,6 @@ def save_settings(data):
     if "channel" in data:
         if data["channel"] not in {item["value"] for item in CHANNELS}:
             raise ValueError("未知更新渠道")
-        if data["channel"] == "dev" and runtime.frozen():
-            raise ValueError("开发版仅支持源码部署")
         settings["channel"] = data["channel"]
     if settings["auto_update"]:
         settings["auto_check"] = True
@@ -235,13 +251,16 @@ def version_key(value):
     match = VERSION_RE.fullmatch(value)
     if not match:
         raise ValueError(f"无法识别版本号：{value}")
-    major, minor, patch, stage, number = match.groups()
+    major, minor, patch, stage, number, revision = match.groups()
+    if revision and stage != "alpha":
+        raise ValueError(f"无法识别版本号：{value}")
     return (
         int(major),
         int(minor),
         int(patch),
         {"alpha": 0, "beta": 1, "rc": 2, None: 3}[stage],
         int(number or 0),
+        bool(revision),
     )
 
 
@@ -604,6 +623,7 @@ def choose_release(releases, channel):
             release.get("draft")
             or bool(release.get("prerelease")) != (channel == "beta")
             or not VERSION_RE.fullmatch(release.get("tag_name", ""))
+            or is_nightly(release.get("tag_name", ""))
         ):
             continue
         try:
@@ -632,19 +652,63 @@ def list_releases(proxy):
     return releases
 
 
+def release_index(channel):
+    """Read the full and OTA assets for a channel in one MowerRelease request."""
+    if channel not in ("stable", "beta", "dev"):
+        raise ValueError("未知 Release 更新渠道")
+    url = f"{OTA_INDEX_URL}/{channel}.json"
+    try:
+        response, _ = github_download.request_download(
+            requests,
+            "get",
+            url,
+            timeout=(10, 30),
+            headers={"User-Agent": "Mower-Software-Update"},
+        )
+        with response:
+            data = response.json()
+    except (requests.RequestException, ValueError) as error:
+        raise ValueError("MowerRelease 版本索引暂时不可用，请稍后重试") from error
+    if (
+        not isinstance(data, dict)
+        or data.get("schema") != 1
+        or not isinstance(data.get("version"), str)
+        or not VERSION_RE.fullmatch(data["version"])
+        or (
+            "dev"
+            if is_nightly(data["version"])
+            else "beta"
+            if "-" in data["version"]
+            else "stable"
+        )
+        != channel
+        or not isinstance(data.get("full_assets"), list)
+        or not isinstance(data.get("ota_assets"), list)
+        or not isinstance(data.get("history"), list)
+    ):
+        raise ValueError("MowerRelease 版本索引格式错误")
+    return data
+
+
 def release_rollback_candidates(channel, proxy):
     """Return up to three published, compatible releases preceding this build."""
-    if channel not in ("stable", "beta"):
-        raise ValueError("版本回退仅支持正式版和公测版渠道")
-    releases = list_releases(proxy)
+    if channel not in ("stable", "beta", "dev"):
+        raise ValueError("未知 Release 更新渠道")
+    try:
+        index = release_index(channel)
+    except ValueError:
+        if channel == "stable":
+            return []
+        raise
+    releases = [index, *index["history"]]
     current = __version__.split("+", 1)[0].removeprefix("v")
     current_release = next(
         (
             item
             for item in releases
-            if isinstance(item.get("tag_name"), str)
-            and item["tag_name"].removeprefix("v") == current
-            and not item.get("draft")
+            if isinstance(item, dict)
+            and isinstance(item.get("version"), str)
+            and item["version"].removeprefix("v") == current
         ),
         None,
     )
@@ -660,8 +724,8 @@ def release_rollback_candidates(channel, proxy):
     for item in releases:
         if (
             item.get("draft")
-            or bool(item.get("prerelease")) != (channel == "beta")
-            or not VERSION_RE.fullmatch(item.get("tag_name", ""))
+            or not isinstance(item.get("version"), str)
+            or not VERSION_RE.fullmatch(item["version"])
         ):
             continue
         try:
@@ -675,7 +739,7 @@ def release_rollback_candidates(channel, proxy):
     compatible = []
     for published, item in candidates[:3]:
         try:
-            compatible.append((published, item, choose_asset(item)))
+            compatible.append((published, item, choose_asset(item, repo=OTA_REPO)))
         except (KeyError, TypeError, ValueError):
             continue
     return compatible
@@ -690,7 +754,7 @@ def release_rollback_options(channel):
         "ok": True,
         "options": [
             {
-                "version": release["tag_name"],
+                "version": release["version"],
                 "published_at": release["published_at"],
             }
             for _, release, _ in release_rollback_candidates(channel, proxy)
@@ -709,7 +773,7 @@ def check_release_rollback(channel, version):
         (
             (release, asset)
             for _, release, asset in release_rollback_candidates(channel, proxy)
-            if release["tag_name"] == version
+            if release["version"] == version
         ),
         None,
     )
@@ -723,8 +787,8 @@ def check_release_rollback(channel, version):
         "created_at": time.time(),
         "version": version,
         "downgrade": True,
-        "notes": release.get("body") or "暂无更新说明",
-        "url": release["html_url"],
+        "notes": release.get("notes") or "暂无更新说明",
+        "url": release["source_release"],
         "asset": asset,
         "available": True,
     }
@@ -741,12 +805,13 @@ def check_release_rollback(channel, version):
     }
 
 
-def choose_asset(release):
+def choose_asset(release, *, repo=REPO):
     system, arch = platform_asset()
-    version = release["tag_name"].lstrip("v")
+    version = (release.get("version") or release.get("tag_name")).lstrip("v")
     extension = {"windows": "zip", "linux": "tar.gz", "macos": "dmg"}[system]
     name = f"arknights-mower_{version}_{system}_{arch}.{extension}"
-    asset = next((a for a in release.get("assets", []) if a["name"] == name), None)
+    assets = release.get("full_assets", release.get("assets", []))
+    asset = next((a for a in assets if a.get("name") == name), None)
     if not asset:
         message = f"此 Release 没有适配当前平台的 {name}"
         if system == "macos":
@@ -755,8 +820,8 @@ def choose_asset(release):
     digest = asset.get("digest") or ""
     if not re.fullmatch(r"sha256:[a-fA-F0-9]{64}", digest):
         raise ValueError("Release 缺少 SHA-256 校验值；请下载安装包后手动上传")
-    url = asset["browser_download_url"]
-    if not url.startswith(f"https://github.com/{REPO}/releases/download/"):
+    url = asset.get("url") or asset.get("browser_download_url") or ""
+    if not url.startswith(f"https://github.com/{repo}/releases/download/"):
         raise ValueError("Release 下载地址不属于官方仓库")
     return {
         "name": name,
@@ -766,7 +831,7 @@ def choose_asset(release):
     }
 
 
-def choose_ota_asset(target_version, current_version, proxy=""):
+def choose_ota_asset(target_version, current_version, proxy="", release=None):
     """Use a published direct OTA when available; full Release remains authoritative."""
     system, arch = platform_asset()
     if system not in ("windows", "linux"):
@@ -775,26 +840,36 @@ def choose_ota_asset(target_version, current_version, proxy=""):
     target = target_version.removeprefix("v")
     if not VERSION_RE.fullmatch(source) or not VERSION_RE.fullmatch(target):
         return None
-    name = f"arknights-mower-ota_{source}_to_{target}_{system}_{arch}.zip"
-    try:
-        release = github(
-            "/releases/tags/" + quote(target_version, safe=""),
-            proxy,
-            repo=OTA_REPO,
-        )
-    except (requests.RequestException, ValueError):
-        return None
+    base_name = f"arknights-mower-ota_{source}_to_{target}_{system}_{arch}"
+    if release is None:
+        try:
+            release = github(
+                "/releases/tags/" + quote(target_version, safe=""),
+                proxy,
+                repo=OTA_REPO,
+            )
+        except (requests.RequestException, ValueError):
+            return None
     if (
         not isinstance(release, dict)
         or release.get("draft")
-        or release.get("tag_name") != target_version
+        or (release.get("version") or release.get("tag_name")) != target_version
     ):
         return None
-    asset = next((a for a in release.get("assets", []) if a.get("name") == name), None)
+    assets = release.get("ota_assets", release.get("assets", []))
+    asset = next(
+        (
+            a
+            for candidate in (base_name + "_v2.zip", base_name + ".zip")
+            for a in assets
+            if a.get("name") == candidate
+        ),
+        None,
+    )
     if not asset:
         return None
     digest = asset.get("digest") or ""
-    url = asset.get("browser_download_url") or ""
+    url = asset.get("url") or asset.get("browser_download_url") or ""
     if not re.fullmatch(r"sha256:[a-fA-F0-9]{64}", digest) or not url.startswith(
         f"https://github.com/{OTA_REPO}/releases/download/"
     ):
@@ -802,7 +877,7 @@ def choose_ota_asset(target_version, current_version, proxy=""):
     if not isinstance(asset.get("size"), int) or asset["size"] <= 0:
         return None
     return {
-        "name": name,
+        "name": asset["name"],
         "url": url,
         "size": asset["size"],
         "sha256": digest[7:].lower(),
@@ -946,8 +1021,10 @@ def info():
             for r in registered
             if r["kind"] == "instance"
         ],
-        "releases_url": RELEASES_URL,
+        "releases_url": RELEASES_URL if deployment == "source" else OTA_RELEASES_URL,
         "manual_supported": deployment == "release",
+        "manual_ota_supported": deployment == "release"
+        and platform_asset() == ("windows", "x64"),
         "rollback_supported": deployment == "release",
     }
 
@@ -955,6 +1032,8 @@ def info():
 def check(channel, proxy=None):
     if channel not in {c["value"] for c in CHANNELS}:
         raise ValueError("未知更新渠道")
+    if channel == "dev" and runtime.frozen() and platform_asset() != ("windows", "x64"):
+        raise ValueError("安装版开发版目前仅提供 Windows x64")
     network_settings.apply_http_proxy()
     proxy = (
         validate_proxy(proxy)
@@ -968,9 +1047,7 @@ def check(channel, proxy=None):
         "proxy": proxy,
         "created_at": time.time(),
     }
-    if channel == "dev":
-        if deployment != "source":
-            raise ValueError("开发版仅支持源码部署")
+    if channel == "dev" and deployment == "source":
         branch = normalize_source_ref(get_settings()["source_branch"])
         selected = resolve_source_remote()
         commit = github(
@@ -985,6 +1062,29 @@ def check(channel, proxy=None):
             notes=commit["commit"]["message"],
             url=f"https://github.com/{selected['source_repo']}/commits/"
             + quote(branch, safe=""),
+        )
+    elif deployment == "release":
+        release_repo = OTA_REPO
+        try:
+            release = release_index(channel)
+        except ValueError:
+            if channel != "stable":
+                raise
+            # The current stable Latest release has no installable packages,
+            # so its MowerRelease index may not exist yet.
+            release = github("/releases/latest", proxy)
+            release_repo = REPO
+        release_version = release.get("version") or release["tag_name"]
+        plan.update(
+            version=release_version,
+            downgrade=version_key(release_version) < version_key(__version__)
+            and not (
+                channel == "dev"
+                and is_nightly(__version__)
+                and version_key(release_version) == version_key(__version__)
+            ),
+            notes=release.get("notes") or release.get("body") or "暂无更新说明",
+            url=release.get("source_release") or release["html_url"],
         )
     else:
         if channel == "stable":
@@ -1027,11 +1127,18 @@ def check(channel, proxy=None):
     else:
         # A maintainer may withdraw a broken release or move Latest backwards.
         # Follow the selected channel, but never reinstall the same version.
-        available = version_key(plan["version"]) != version_key(__version__)
+        available = plan["version"].removeprefix("v") != __version__.split("+", 1)[
+            0
+        ].removeprefix("v")
         if available:
-            plan["asset"] = choose_asset(release)
+            plan["asset"] = choose_asset(release, repo=release_repo)
             if not plan.get("downgrade"):
-                ota = choose_ota_asset(plan["version"], __version__, proxy)
+                ota = choose_ota_asset(
+                    plan["version"],
+                    __version__,
+                    proxy,
+                    release=release if release_repo == OTA_REPO else None,
+                )
                 if ota and ota["size"] < plan["asset"]["size"]:
                     plan["ota_asset"] = ota
                     plan["current_version"] = __version__
@@ -1277,23 +1384,38 @@ def cancel(job_id):
 
 
 def manual_plan(package, proxy=""):
-    from .software_update_package import inspect_package
+    from .software_update_package import inspect_ota_package, inspect_package
 
     if not runtime.frozen():
         raise ValueError("Release 安装包用于独立包部署；源码部署请使用 Git 更新")
-    metadata = inspect_package(package, *platform_asset())
+    system, arch = platform_asset()
+    ota = inspect_ota_package(package, __version__, system, arch)
+    metadata = ota or inspect_package(package, system, arch)
     version = metadata["version"]
-    return {
+    plan = {
         "deployment": "release",
         "manual": True,
+        "manual_kind": "ota" if ota else "full",
         "available": True,
         "downgrade": version_key(version) < version_key(__version__),
-        "channel": "beta" if "-" in version else "stable",
+        "channel": "dev"
+        if is_nightly(version)
+        else "beta"
+        if "-" in version
+        else "stable",
         "proxy": validate_proxy(proxy),
         "version": "v" + version,
         "asset": {"name": "package." + metadata["format"]},
         "created_at": time.time(),
     }
+    if ota:
+        plan["current_version"] = __version__
+        plan["ota_asset"] = {
+            "name": plan["asset"]["name"],
+            "platform": system,
+            "arch": arch,
+        }
+    return plan
 
 
 def inspect_upload(upload, proxy=""):
@@ -1327,6 +1449,8 @@ def inspect_upload(upload, proxy=""):
         package.rename(canonical)
         plan.update(_upload=str(canonical))
         plan["asset"].update(size=size, sha256=digest.hexdigest())
+        if plan.get("ota_asset"):
+            plan["ota_asset"].update(size=size, sha256=digest.hexdigest())
         check_id = remember_check(plan)
         (directory / "ready").touch()
         return {
@@ -1335,7 +1459,18 @@ def inspect_upload(upload, proxy=""):
             "version": plan["version"],
             "downgrade": plan["downgrade"],
             "manual": True,
-            "message": "安装包版本信息检查通过，请确认安装",
+            "package_kind": plan["manual_kind"],
+            "message": "OTA 差异包起点和目标版本检查通过，请确认安装"
+            if plan["manual_kind"] == "ota"
+            else "安装包版本信息检查通过，请确认安装",
+            "confirm_message": (
+                f"将使用本地 OTA 差异包从 {__version__} 更新到 {plan['version']}。"
+                "安装前会校验当前文件并重建完整程序；校验失败时保留当前安装。"
+                + ("旧版可能无法兼容当前配置或恢复任务。" if plan["downgrade"] else "")
+                + "确认后将重启同一安装目录下的所有运行实例。"
+            )
+            if plan["manual_kind"] == "ota"
+            else None,
         }
     except Exception:
         shutil.rmtree(directory, ignore_errors=True)

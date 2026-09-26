@@ -11,6 +11,7 @@ export const useConfigStore = defineStore('config', () => {
   const adb = ref('')
   const drone_count_limit = ref(0)
   const drone_room = ref('')
+  const swap_contact_train = ref(false)
   const drone_interval = ref(4)
   const enable_party = ref(true)
   const leifeng_mode = ref(true)
@@ -124,6 +125,7 @@ export const useConfigStore = defineStore('config', () => {
   const rogue = ref({})
   const sss = ref({})
   const screenshot = ref(1)
+  const screenshot_archive_limit_mb = ref(5120)
   const screenshot_interval = ref(500)
   const mail_subject = ref('')
   const ai_type = ref('')
@@ -152,6 +154,8 @@ export const useConfigStore = defineStore('config', () => {
   const experimental_dorm_logic = ref(false)
   const dorm_order = ref([])
   const merge_interval = ref(10)
+  const group_rest_in_full_on_mood_gap = ref(true)
+  const group_mood_gap_max_extra_wait_hours = ref(0)
   const fia_fool = ref(true)
   const refresh_backup_plan_after_mood = ref(true)
   const assistant_follows_schedule = ref(false)
@@ -535,6 +539,7 @@ export const useConfigStore = defineStore('config', () => {
     rogue.value = response.data.rogue
     sss.value = response.data.sss
     screenshot.value = response.data.screenshot
+    screenshot_archive_limit_mb.value = response.data.screenshot_archive_limit_mb ?? 5120
     screenshot_interval.value =
       response.data.screenshot_interval ?? fallbackProfile.screenshotInterval
     // 新增：加载Server酱的配置
@@ -579,10 +584,14 @@ export const useConfigStore = defineStore('config', () => {
     experimental_dorm_logic.value = response.data.experimental_dorm_logic ?? false
     dorm_order.value = response.data.dorm_order ? response.data.dorm_order.split(',') : []
     merge_interval.value = response.data.merge_interval
+    group_rest_in_full_on_mood_gap.value = response.data.group_rest_in_full_on_mood_gap ?? true
+    group_mood_gap_max_extra_wait_hours.value =
+      response.data.group_mood_gap_max_extra_wait_hours ?? 0
     fia_fool.value = response.data.fia_fool
     refresh_backup_plan_after_mood.value = response.data.refresh_backup_plan_after_mood ?? true
     assistant_follows_schedule.value = response.data.assistant_follows_schedule
     enable_mastery.value = response.data.enable_mastery ?? true
+    swap_contact_train.value = response.data.swap_contact_train ?? false
     sign_in.value = response.data.sign_in
     droidcast.value = response.data.droidcast
     mumu12IPC.value = response.data.mumu12IPC
@@ -617,6 +626,7 @@ export const useConfigStore = defineStore('config', () => {
       adb: adb.value,
       drone_count_limit: drone_count_limit.value,
       drone_room: drone_room.value,
+      swap_contact_train: swap_contact_train.value,
       drone_interval: drone_interval.value,
       enable_party: enable_party.value ? 1 : 0,
       leifeng_mode: leifeng_mode.value ? 1 : 0,
@@ -711,6 +721,7 @@ export const useConfigStore = defineStore('config', () => {
       rogue: rogue.value,
       sss: sss.value,
       ...(runtime_platform.value === 'android' ? {} : { screenshot: screenshot.value }),
+      screenshot_archive_limit_mb: screenshot_archive_limit_mb.value,
       screenshot_interval: screenshot_interval.value,
       mail_subject: mail_subject.value,
       skland_enable: skland_enable.value,
@@ -742,6 +753,8 @@ export const useConfigStore = defineStore('config', () => {
       experimental_dorm_logic: experimental_dorm_logic.value,
       dorm_order: dorm_order.value.join(','),
       merge_interval: merge_interval.value,
+      group_rest_in_full_on_mood_gap: group_rest_in_full_on_mood_gap.value,
+      group_mood_gap_max_extra_wait_hours: group_mood_gap_max_extra_wait_hours.value,
       fia_fool: fia_fool.value,
       refresh_backup_plan_after_mood: refresh_backup_plan_after_mood.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
@@ -774,6 +787,32 @@ export const useConfigStore = defineStore('config', () => {
       maa_orundum: maa_orundum.value,
       maa_mining: maa_mining.value,
       maa_specialaccess: maa_specialaccess.value
+    }
+  }
+
+  function build_advanced_settings() {
+    return {
+      product_switching: product_switching.value,
+      drone_count_limit: drone_count_limit.value,
+      drone_interval: drone_interval.value,
+      reload_room: Array.isArray(reload_room.value)
+        ? reload_room.value.join(',')
+        : reload_room.value,
+      resting_threshold: resting_threshold.value / 100,
+      version_update_resting_threshold: version_update_resting_threshold.value / 100,
+      version_update_threshold_advance_hours: version_update_threshold_advance_hours.value,
+      free_room: free_room.value,
+      experimental_dorm_logic: experimental_dorm_logic.value,
+      dorm_order: Array.isArray(dorm_order.value) ? dorm_order.value.join(',') : dorm_order.value,
+      merge_interval: merge_interval.value,
+      group_rest_in_full_on_mood_gap: group_rest_in_full_on_mood_gap.value,
+      group_mood_gap_max_extra_wait_hours: group_mood_gap_max_extra_wait_hours.value,
+      fia_fool: fia_fool.value,
+      refresh_backup_plan_after_mood: refresh_backup_plan_after_mood.value,
+      assistant_follows_schedule: assistant_follows_schedule.value,
+      fia_threshold: fia_threshold.value / 100,
+      rescue_threshold: rescue_threshold.value / 100,
+      favorite: Array.isArray(favorite.value) ? favorite.value.join(',') : favorite.value
     }
   }
 
@@ -842,6 +881,7 @@ export const useConfigStore = defineStore('config', () => {
     save_config,
     drone_count_limit,
     drone_room,
+    swap_contact_train,
     drone_interval,
     enable_party,
     leifeng_mode,
@@ -899,6 +939,7 @@ export const useConfigStore = defineStore('config', () => {
     item_list,
     maa_gap,
     build_config,
+    build_advanced_settings,
     defaultLaunchCommand,
     simulator,
     resting_threshold,
@@ -942,6 +983,7 @@ export const useConfigStore = defineStore('config', () => {
     rogue,
     sss,
     screenshot,
+    screenshot_archive_limit_mb,
     screenshot_interval,
     mail_subject,
     recruit_enable,
@@ -970,6 +1012,8 @@ export const useConfigStore = defineStore('config', () => {
     experimental_dorm_logic,
     dorm_order,
     merge_interval,
+    group_rest_in_full_on_mood_gap,
+    group_mood_gap_max_extra_wait_hours,
     fia_fool,
     refresh_backup_plan_after_mood,
     assistant_follows_schedule,

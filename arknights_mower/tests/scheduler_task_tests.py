@@ -23,6 +23,16 @@ with patch.dict("sys.modules", {"save_action_to_sqlite_decorator": MagicMock()})
 
 
 class TestScheduling(unittest.TestCase):
+    def setUp(self):
+        # Scheduling tests use fixed times; a live announcement request makes
+        # their result and runtime depend on the external news service.
+        maintenance = patch(
+            "arknights_mower.utils.scheduler_task.NewsChecker.get_update_time",
+            return_value=(None, None),
+        )
+        maintenance.start()
+        self.addCleanup(maintenance.stop)
+
     def test_adjust_two_orders(self):
         # 测试两个跑单任务被拉开
         task1 = SchedulerTask(
@@ -113,7 +123,7 @@ class TestScheduling(unittest.TestCase):
         self.assertEqual(tasks[2].plan["task"], "Task 4")
         self.assertEqual(res, None)
 
-    def test_experimental_dorm_only_tasks_run_before_run_order(self):
+    def test_experimental_dorm_only_tasks_merge_and_yield_to_run_order(self):
         now = datetime(2026, 9, 23, 2, 15)
         dorm_tasks = [
             SchedulerTask(
@@ -133,12 +143,13 @@ class TestScheduling(unittest.TestCase):
         with patch.object(config.conf, "experimental_dorm_logic", True):
             scheduling(tasks, time_now=now)
 
-        self.assertEqual([task.time for task in dorm_tasks], [now] * 4)
-        self.assertEqual(tasks[-1], run_order)
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0], run_order)
         self.assertEqual(run_order.time, now + timedelta(minutes=3))
-        self.assertFalse(any(task.deferred_by_run_order for task in dorm_tasks))
+        self.assertGreater(tasks[1].time, run_order.time)
+        self.assertEqual(set(tasks[1].plan), {f"dormitory_{i}" for i in range(1, 5)})
 
-    def test_dorm_wakeup_preserves_only_experimental_dorm_batch(self):
+    def test_dorm_wakeup_yields_to_run_order_in_both_modes(self):
         for experimental, work_room in [(True, False), (False, False), (True, True)]:
             for wake_type in (TaskTypes.NOT_SPECIFIC, TaskTypes.RE_ORDER):
                 with self.subTest(
@@ -176,12 +187,9 @@ class TestScheduling(unittest.TestCase):
                         ),
                     ):
                         scheduling(tasks, time_now=now)
-                    if experimental and not work_room:
-                        self.assertEqual(dorm.time, now)
-                        self.assertEqual(wake.time, now)
-                        self.assertFalse(dorm.deferred_by_run_order)
-                    else:
-                        self.assertGreater(dorm.time, order.time)
+                    self.assertGreater(dorm.time, order.time)
+                    if wake in tasks:
+                        self.assertGreater(wake.time, order.time)
 
     def test_deferred_dorm_schedules_are_merged_before_run_order(self):
         shift_off = SchedulerTask(
@@ -263,8 +271,6 @@ class TestScheduling(unittest.TestCase):
                 run_order.time + timedelta(seconds=2),
             ),
         )
-        self.assertTrue(shift_off.deferred_by_run_order)
-        self.assertTrue(shift_on.deferred_by_run_order)
 
         with patch.object(config.conf, "experimental_dorm_logic", False):
             scheduling(stable_tasks, time_now=datetime(2026, 9, 22, 5, 25, 30))
@@ -571,6 +577,7 @@ class TestScheduling(unittest.TestCase):
         target = op_data.operators["麒麟R夜刀"]
         target.current_room, target.current_index = closing.position
         target.dorm_recovery_room = "dormitory_1"
+        target.dorm_recovery_index = target.current_index
         target.dorm_recovery_fixed = ("塑心", "冰酿")
         closing.name = target.name
         closing.time = datetime.now() + timedelta(hours=1)
@@ -581,7 +588,9 @@ class TestScheduling(unittest.TestCase):
 
         destination = next(dorm for dorm in op_data.dorm if dorm.name == target.name)
         self.assertEqual(destination.position[0], "dormitory_1")
-        self.assertEqual(target.dorm_recovery_room, "dormitory_1")
+        target = op_data.operators[target.name]
+        self.assertEqual(target.dorm_recovery_room, "")
+        self.assertEqual(target.dorm_recovery_index, -1)
         self.assertEqual(plan["dormitory_1"][2], "真言")
         self.assertEqual(plan["dormitory_1"][destination.position[1]], target.name)
 
@@ -591,6 +600,7 @@ class TestScheduling(unittest.TestCase):
         target = op_data.operators["麒麟R夜刀"]
         target.current_room, target.current_index = target_bed.position
         target.dorm_recovery_room = target_bed.position[0]
+        target.dorm_recovery_index = target.current_index
         target.dorm_recovery_fixed = ("塑心", "冰酿")
         target_bed.name = target.name
         target_bed.time = datetime.now() + timedelta(hours=1)
@@ -614,6 +624,7 @@ class TestScheduling(unittest.TestCase):
         protected = op_data.operators["麒麟R夜刀"]
         protected.current_room, protected.current_index = protected_bed.position
         protected.dorm_recovery_room = protected_bed.position[0]
+        protected.dorm_recovery_index = protected.current_index
         protected.dorm_recovery_fixed = ("塑心", "冰酿")
         protected.mood = 23
         protected.time_stamp = datetime.now()

@@ -55,6 +55,28 @@ def release(
     }
 
 
+def release_index(item, history=()):
+    def record(value):
+        return {
+            "schema": 1,
+            "version": value["tag_name"],
+            "published_at": value["published_at"],
+            "source_release": value["html_url"],
+            "notes": value["body"],
+            "full_assets": [
+                {
+                    **asset,
+                    "url": asset["browser_download_url"].replace(
+                        update.REPO, update.OTA_REPO
+                    ),
+                }
+                for asset in value["assets"]
+            ],
+        }
+
+    return {**record(item), "ota_assets": [], "history": [record(r) for r in history]}
+
+
 class ReleaseDiscoveryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -86,7 +108,11 @@ class ReleaseDiscoveryTests(unittest.TestCase):
             patch.object(update, "__version__", "4.1.6-alpha.8"),
             patch.object(runtime, "frozen", return_value=True),
             patch.object(update, "platform_asset", return_value=("windows", "x64")),
-            patch.object(update, "list_releases", return_value=versions),
+            patch.object(
+                update,
+                "release_index",
+                return_value=release_index(versions[4], reversed(versions[:4])),
+            ),
             patch.object(update.network_settings, "apply_http_proxy"),
             patch.object(
                 update.network_settings,
@@ -113,6 +139,7 @@ class ReleaseDiscoveryTests(unittest.TestCase):
     def test_channels_are_separate_and_drafts_are_excluded(self):
         data = [
             release("v4.1.6-alpha.3", True),
+            release("v4.1.6-alpha.9.g12345678", True),
             release("v4.1.5"),
             release("v4.1.7", draft=True),
             release("v4.1.6-alpha.12", True),
@@ -126,6 +153,7 @@ class ReleaseDiscoveryTests(unittest.TestCase):
         versions = [
             "4.1.6-alpha.3+abc",
             "v4.1.6-alpha.12",
+            "v4.1.6-alpha.12.g12345678",
             "4.1.6-beta.1",
             "4.1.6-rc.1",
             "4.1.6",
@@ -142,31 +170,39 @@ class ReleaseDiscoveryTests(unittest.TestCase):
             with self.subTest(first=data[0]["tag_name"]):
                 self.assertIs(update.choose_release(data, "stable"), stable)
 
-    def test_stable_channel_uses_github_latest_without_scanning_old_releases(self):
+    def test_release_channel_reads_one_index_without_scanning_old_releases(self):
         latest = release("v4.1.5")
         latest["assets"] = []
         with (
             patch.object(update, "__version__", "4.1.5"),
             patch.object(runtime, "frozen", return_value=True),
-            patch.object(update, "github", return_value=latest) as api,
+            patch.object(
+                update, "release_index", return_value=release_index(latest)
+            ) as api,
+            patch.object(update, "github") as github,
         ):
             result = update.check("stable")
         self.assertEqual(result["version"], "v4.1.5")
         self.assertFalse(result["available"])
-        api.assert_called_once()
-        self.assertEqual(api.call_args.args[0], "/releases/latest")
+        api.assert_called_once_with("stable")
+        github.assert_not_called()
 
-    def test_missing_latest_is_reported_without_falling_back_to_an_old_release(self):
-        response = update.requests.Response()
-        response.status_code = 404
-        error = update.requests.HTTPError(response=response)
+    def test_stable_without_mirror_uses_existing_latest_release(self):
+        latest = release("v4.1.5")
         with (
+            patch.object(update, "__version__", "4.1.5"),
             patch.object(runtime, "frozen", return_value=True),
-            patch.object(update, "github", side_effect=error) as api,
+            patch.object(
+                update,
+                "release_index",
+                side_effect=ValueError("MowerRelease 版本索引暂时不可用"),
+            ) as api,
+            patch.object(update, "github", return_value=latest) as github,
         ):
-            with self.assertRaisesRegex(ValueError, "暂无已发布的 Latest"):
-                update.check("stable")
-        api.assert_called_once()
+            result = update.check("stable")
+        self.assertEqual(result["version"], "v4.1.5")
+        api.assert_called_once_with("stable")
+        github.assert_called_once_with("/releases/latest", "")
 
     def test_publication_timestamps_use_timezone_and_ignore_invalid_dates(self):
         older = release("v4.2.0", published_at="2026-09-09T08:00:00+08:00")
@@ -195,11 +231,7 @@ class ReleaseDiscoveryTests(unittest.TestCase):
                 patch.object(update, "__version__", version.lstrip("v") + "+abcdef"),
                 patch.object(runtime, "frozen", return_value=True),
                 patch.object(update, "platform_asset", return_value=(system, arch)),
-                patch.object(
-                    update,
-                    "github",
-                    return_value=data if channel == "stable" else [data],
-                ),
+                patch.object(update, "release_index", return_value=release_index(data)),
                 patch.object(update, "choose_asset") as asset,
             ):
                 result = update.check(channel)
@@ -241,8 +273,8 @@ class ReleaseDiscoveryTests(unittest.TestCase):
                 patch.object(update, "platform_asset", return_value=(system, arch)),
                 patch.object(
                     update,
-                    "github",
-                    return_value=target if channel == "stable" else [legacy, target],
+                    "release_index",
+                    return_value=release_index(target, [legacy]),
                 ),
             ):
                 result = update.check(channel)
@@ -286,9 +318,7 @@ class ReleaseDiscoveryTests(unittest.TestCase):
                 patch.object(runtime, "frozen", return_value=True),
                 patch.object(update, "platform_asset", return_value=("macos", "arm64")),
                 patch.object(
-                    update,
-                    "github",
-                    return_value=target if channel == "stable" else [target],
+                    update, "release_index", return_value=release_index(target)
                 ) as api,
                 patch.object(update, "start_job", return_value={"ok": True}) as start,
             ):
@@ -325,20 +355,16 @@ class ReleaseDiscoveryTests(unittest.TestCase):
                     ]
                 )
 
-    def test_later_pages_are_checked_even_when_first_page_has_a_candidate(self):
+    def test_source_release_listing_reads_later_pages(self):
         first_page = [release("v4.1.6-alpha.4", prerelease=True)] * 100
         target = release(
             "v4.1.6-alpha.5", prerelease=True, published_at="2026-09-10T00:00:00Z"
         )
         with (
-            patch.object(update, "__version__", "4.1.6-alpha.4"),
-            patch.object(runtime, "frozen", return_value=True),
-            patch.object(update, "platform_asset", return_value=("macos", "arm64")),
             patch.object(update, "github", side_effect=[first_page, [target]]) as api,
         ):
-            result = update.check("beta")
-        self.assertTrue(result["available"])
-        self.assertEqual(result["version"], "v4.1.6-alpha.5")
+            result = update.list_releases("")
+        self.assertEqual(len(result), 101)
         self.assertEqual(
             [call.args[0] for call in api.call_args_list],
             ["/releases?per_page=100&page=1", "/releases?per_page=100&page=2"],
@@ -371,27 +397,133 @@ class ReleaseDiscoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 update.choose_asset(data)
 
-    def test_dev_is_rejected_for_frozen_deployments_without_network(self):
+    def test_frozen_dev_reads_nightly_index_and_keeps_source_update_separate(self):
+        nightly = release(
+            "v4.1.6-alpha.9.g12345678", True, system="windows", arch="x64"
+        )
+        index = release_index(nightly)
+        index["full_assets"][0]["size"] = 100
+        ota_name = (
+            "arknights-mower-ota_4.1.6-alpha.9_to_"
+            "4.1.6-alpha.9.g12345678_windows_x64_v2.zip"
+        )
+        index["ota_assets"] = [
+            {
+                "name": ota_name,
+                "size": 9,
+                "digest": "sha256:" + "b" * 64,
+                "url": f"https://github.com/{update.OTA_REPO}/releases/download/{nightly['tag_name']}/{ota_name}",
+            }
+        ]
+        with (
+            patch.object(update, "__version__", "4.1.6-alpha.9"),
+            patch.object(runtime, "frozen", return_value=True),
+            patch.object(update, "platform_asset", return_value=("windows", "x64")),
+            patch.object(update, "release_index", return_value=index) as index,
+            patch.object(update, "github") as source_api,
+        ):
+            result = update.check("dev")
+            self.assertTrue(result["available"])
+            self.assertFalse(result["downgrade"])
+            self.assertEqual(result["version"], nightly["tag_name"])
+            self.assertEqual(
+                update._checks[result["check_id"]]["ota_asset"]["name"], ota_name
+            )
+            index.assert_called_once_with("dev")
+            source_api.assert_not_called()
+
         with (
             patch.object(runtime, "frozen", return_value=True),
-            patch.object(update, "github") as network,
+            patch.object(update, "platform_asset", return_value=("linux", "x64")),
         ):
-            with self.assertRaisesRegex(ValueError, "仅支持源码"):
+            with self.assertRaisesRegex(ValueError, "Windows x64"):
                 update.check("dev")
-            network.assert_not_called()
 
-    def test_prerelease_check_does_not_use_latest_endpoint(self):
+        with (
+            patch.object(update, "__version__", "4.1.6-alpha.9.g87654321"),
+            patch.object(runtime, "frozen", return_value=True),
+            patch.object(update, "platform_asset", return_value=("windows", "x64")),
+            patch.object(update, "release_index", return_value=release_index(nightly)),
+        ):
+            result = update.check("dev")
+            self.assertTrue(result["available"])
+            self.assertFalse(result["downgrade"])
+
+    def test_prerelease_check_uses_channel_index(self):
         with (
             patch.object(runtime, "frozen", return_value=True),
             patch.object(update, "platform_asset", return_value=("macos", "arm64")),
             patch.object(
-                update, "github", return_value=[release("v4.2.0-alpha.1", True)]
+                update,
+                "release_index",
+                return_value=release_index(release("v4.2.0-alpha.1", True)),
             ) as network,
+            patch.object(update, "github") as github,
         ):
             result = update.check("beta")
             self.assertTrue(result["available"])
             self.assertTrue(result["check_id"])
-            self.assertIn("/releases?", network.call_args.args[0])
+            network.assert_called_once_with("beta")
+            github.assert_not_called()
+
+    def test_release_index_prefers_optimized_ota_and_uses_mirrored_full_package(self):
+        target = release("v4.1.6-alpha.8", True, system="windows", arch="x64")
+        index = release_index(target)
+        base = "arknights-mower-ota_4.1.6-alpha.7_to_4.1.6-alpha.8_windows_x64"
+        index["full_assets"][0]["size"] = 100
+        index["ota_assets"] = [
+            {
+                "name": base + suffix,
+                "size": size,
+                "digest": "sha256:" + "b" * 64,
+                "url": f"https://github.com/{update.OTA_REPO}/releases/download/v4.1.6-alpha.8/{base}{suffix}",
+            }
+            for suffix, size in ((".zip", 40), ("_v2.zip", 9))
+        ]
+        with (
+            patch.object(update, "__version__", "4.1.6-alpha.7"),
+            patch.object(runtime, "frozen", return_value=True),
+            patch.object(update, "platform_asset", return_value=("windows", "x64")),
+            patch.object(update, "release_index", return_value=index) as network,
+            patch.object(update, "github") as github,
+        ):
+            result = update.check("beta")
+        plan = update._checks[result["check_id"]]
+        self.assertEqual(plan["asset"]["size"], 100)
+        self.assertIn(update.OTA_REPO, plan["asset"]["url"])
+        self.assertEqual(plan["ota_asset"]["name"], base + "_v2.zip")
+        network.assert_called_once_with("beta")
+        github.assert_not_called()
+
+    def test_stable_install_can_use_ota_to_beta_or_development(self):
+        for channel, version in (
+            ("beta", "v4.1.6-alpha.9"),
+            ("dev", "v4.1.6-alpha.9.g12345678"),
+        ):
+            target = release(version, True, system="windows", arch="x64")
+            index = release_index(target)
+            index["full_assets"][0]["size"] = 100
+            name = f"arknights-mower-ota_4.1.5_to_{version[1:]}_windows_x64_v2.zip"
+            index["ota_assets"] = [
+                {
+                    "name": name,
+                    "size": 9,
+                    "digest": "sha256:" + "b" * 64,
+                    "url": f"https://github.com/{update.OTA_REPO}/releases/download/{version}/{name}",
+                }
+            ]
+            with (
+                self.subTest(channel=channel),
+                patch.object(update, "__version__", "4.1.5"),
+                patch.object(runtime, "frozen", return_value=True),
+                patch.object(update, "platform_asset", return_value=("windows", "x64")),
+                patch.object(update, "release_index", return_value=index),
+            ):
+                result = update.check(channel)
+                self.assertTrue(result["available"])
+                self.assertEqual(
+                    update._checks[result["check_id"]]["ota_asset"]["name"], name
+                )
 
     def test_source_release_resolves_tag_not_default_branch(self):
         with (
@@ -945,6 +1077,10 @@ class WorkerTests(unittest.TestCase):
                     self.assertEqual(
                         env["MOWER_RESUME_RUN"], "1" if record.get("running") else "0"
                     )
+                    if record["kind"] == "instance" and record.get("running"):
+                        self.assertEqual(env["MOWER_RESUME_MODE"], "0")
+                    else:
+                        self.assertNotIn("MOWER_RESUME_MODE", env)
                     self.assertEqual(
                         env["MOWER_RESTART_PORT"], str(record.get("port") or "")
                     )
@@ -971,6 +1107,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(instance_env["MOWER_BACKGROUND"], "1")
         self.assertEqual(instance_env["MOWER_MANAGED"], "1")
         self.assertEqual(instance_env["MOWER_RESUME_RUN"], "1")
+        self.assertEqual(instance_env["MOWER_RESUME_MODE"], "0")
         self.assertEqual(instance_env["MOWER_RESTART_PORT"], "58100")
 
         with patch.object(subprocess, "Popen") as process:

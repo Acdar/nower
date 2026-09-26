@@ -19,6 +19,7 @@ from arknights_mower.utils.scheduler_task import (  # noqa: E402
     SchedulerTask,
     TaskTypes,
     generate_plan_by_drom,
+    plan_metadata,
     rebalance_closing_dorm_slots,
     try_add_release_dorm,
     try_reorder,
@@ -148,6 +149,35 @@ def test_group_larger_than_bed_count_validates_and_round_trip_converges(solver):
     assert data.operators["黑角"].current_room == ""
     # 下一轮仍可使用相同替班。
     assert shift_off(solver)[0]["dormitory_1"][0] == "黑角"
+
+
+def test_group_mood_gap_full_rest_can_be_disabled(solver):
+    shift_off(solver)
+    data = solver.op_data
+    now = datetime.now()
+    for index, bed in enumerate(data.dorm):
+        bed.time = now + timedelta(hours=4 - index)
+
+    def group_return_time():
+        return min(
+            task.time
+            for task in plan_metadata(data, [])
+            if task.type == TaskTypes.SHIFT_ON
+            and "伊内丝" in (name for names in task.plan.values() for name in names)
+        )
+
+    assert config.conf.group_rest_in_full_on_mood_gap
+    full_rest_time = group_return_time()
+    config.conf.group_mood_gap_max_extra_wait_hours = 0.5
+    capped_time = group_return_time()
+    config.conf.group_rest_in_full_on_mood_gap = False
+    earliest_time = group_return_time()
+    assert full_rest_time > earliest_time + timedelta(hours=1)
+    assert capped_time == earliest_time + timedelta(minutes=30)
+
+    config.conf.group_rest_in_full_on_mood_gap = True
+    data.operators[data.dorm[0].name].rest_in_full = True
+    assert group_return_time() == full_rest_time
 
 
 def test_zero_mood_worker_only_follows_group_shift(solver):
@@ -640,7 +670,9 @@ def test_explicit_free_correction_can_remove_fixed_resident(solver):
 
     solver.preserve_resting_crafters(agents, "dormitory_1")
 
-    assert agents == ["冰酿", "泥岩", "能天使", "年", ""]
+    # 显式组下班仍应移走固定宿管；有满心情替班可用时补齐，不制造空床。
+    assert agents[0] in {"陈", "初雪", "红", "黑角"}
+    assert agents[1:] == ["冰酿", "泥岩", "能天使", "年"]
 
 
 def test_explicit_free_resident_slot_reduces_required_free_beds(solver):
@@ -712,6 +744,7 @@ def test_closing_bed_keeps_existing_single_recovery_target(solver):
     target = data.operators["年"]
     target.mood = 23
     target.dorm_recovery_room = "dormitory_1"
+    target.dorm_recovery_index = target.current_index
     target.dorm_recovery_fixed = ("塑心",)
     plan = {
         "meeting": ["伊内丝", "银灰"],

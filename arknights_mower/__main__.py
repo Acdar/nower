@@ -29,6 +29,18 @@ _maintenance_timer_lock = Lock()
 _notified_maintenance_ids = set()
 _flash_probe_ids = set()
 
+_ADB_CONNECTION_FAILURES = {
+    "Can't start adb server",
+    "ADB server is not working",
+    "Device connection failure",
+}
+
+
+def _is_adb_connection_failure(error: Exception) -> bool:
+    return isinstance(error, ConnectionError) or (
+        isinstance(error, RuntimeError) and str(error) in _ADB_CONNECTION_FAILURES
+    )
+
 
 def _stop_for_major_update(info: MaintenanceInfo):
     """Stop the automation thread and tell the user to update the game client."""
@@ -350,7 +362,9 @@ def simulate(saved, restart_after_mood_read=False):
             if config.stop_mower.is_set():
                 raise MowerExit
             base_scheduler = initialize([], connection_retries=connection_retries)
-            base_scheduler.restart_after_mood_read = restart_after_mood_read
+            base_scheduler.restart_after_mood_read = (
+                restart_after_mood_read and not config.conf.experimental_dorm_logic
+            )
             # saved=None 表示没有可载入的运行缓存。此时干员 current_room 尚未读取，
             # 首轮任务开始前必须暂缓副表判断，避免把“未知”误判成“不在工作”。
             base_scheduler.defer_backup_plan_until_mood_read = saved is None
@@ -403,8 +417,14 @@ def simulate(saved, restart_after_mood_read=False):
                 base_scheduler.op_data.operators[k].depletion_rate = v.depletion_rate
                 base_scheduler.op_data.operators[k].current_room = v.current_room
                 base_scheduler.op_data.operators[k].current_index = v.current_index
+                base_scheduler.op_data.operators[k].dorm_position_version = getattr(
+                    v, "dorm_position_version", 0
+                )
                 base_scheduler.op_data.operators[k].dorm_recovery_room = getattr(
                     v, "dorm_recovery_room", ""
+                )
+                base_scheduler.op_data.operators[k].dorm_recovery_index = getattr(
+                    v, "dorm_recovery_index", -1
                 )
                 base_scheduler.op_data.operators[k].resting_from_train = getattr(
                     v, "resting_from_train", False
@@ -610,7 +630,11 @@ def simulate(saved, restart_after_mood_read=False):
         except DeviceRecoveryError:
             raise
         except (ConnectionError, ConnectionAbortedError, AttributeError) as e:
-            logger.exception(e)
+            logger.exception(
+                "设备连接或页面识别失败：%s",
+                e,
+                extra={"archive_screenshots": not _is_adb_connection_failure(e)},
+            )
             if _wait_before_early_login_retry():
                 if config.stop_mower.is_set():
                     return
@@ -618,7 +642,7 @@ def simulate(saved, restart_after_mood_read=False):
                 continue
             reconnect_tries += 1
             if reconnect_tries < reconnect_max_tries:
-                logger.warning("出现错误.尝试重启Mower")
+                logger.warning("正在重新连接设备并恢复运行")
                 # 内层重连循环加次数上限，最后失败抛错而非无限重启
                 retry = 0
                 while retry < reconnect_max_tries:
@@ -631,20 +655,28 @@ def simulate(saved, restart_after_mood_read=False):
                     except Exception as e:
                         if retry >= reconnect_max_tries:
                             raise
-                        logger.exception(e)
+                        logger.exception("重新连接设备失败，将再次尝试：%s", e)
                         base_scheduler.device.reconnect()
                 continue
             else:
                 raise e
         except RuntimeError as e:
-            logger.exception(f"程序出错-尝试恢复设备连接->{e}")
+            logger.exception(
+                "运行时发生错误，正在尝试恢复设备连接：%s",
+                e,
+                extra={"archive_screenshots": not _is_adb_connection_failure(e)},
+            )
             if _wait_before_early_login_retry():
                 if config.stop_mower.is_set():
                     return
                 continue
             base_scheduler.device.reconnect()
         except Exception as e:
-            logger.exception(f"程序出错--->{e}")
+            logger.exception(
+                "任务执行失败，正在刷新画面后继续：%s",
+                e,
+                extra={"archive_screenshots": True},
+            )
             if _wait_before_early_login_retry():
                 if config.stop_mower.is_set():
                     return

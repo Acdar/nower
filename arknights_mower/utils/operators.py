@@ -13,6 +13,7 @@ from arknights_mower.utils.manufacture_product import (
 from arknights_mower.utils.plan import BaseProduct, PlanConfig
 from arknights_mower.utils.resting_priority import (
     RestingTier,
+    has_resting_mood,
     resting_key,
     resting_mood,
     resting_tier,
@@ -178,6 +179,8 @@ def build_global_plan():
         rest_in_full=config.plan.conf.rest_in_full,
         exhaust_require=config.plan.conf.exhaust_require,
         resting_priority=config.plan.conf.resting_priority,
+        resting_priority_replacement=config.plan.conf.resting_priority_replacement,
+        free_room_exclusions=config.plan.conf.free_room_exclusions,
         resting_standby=config.plan.conf.resting_standby,
         ling_xi=config.plan.conf.ling_xi,
         mood_limits=plan["conf"].get("mood_limits"),
@@ -240,6 +243,10 @@ def build_global_plan():
             dorm_order_override=i["conf"].get("dorm_order_override", False),
             experimental_dorm_logic=conf.experimental_dorm_logic,
             resting_standby=i["conf"].get("resting_standby", ""),
+            free_room_exclusions=i["conf"].get("free_room_exclusions", ""),
+            resting_priority_replacement=i["conf"].get(
+                "resting_priority_replacement", ""
+            ),
             resting_threshold=conf.resting_threshold,
             refresh_trading_config=i["conf"]["refresh_trading"],
             refresh_drained=i["conf"]["refresh_drained"],
@@ -611,6 +618,29 @@ class Operators:
             for room in self.plan.values()
             if room and room[0].product == BaseProduct.Electricity
         )
+        self.refresh_dorm_manager_flags(force=True)
+
+    def refresh_dorm_manager_flags(self, *, force=False):
+        """只标记宿舍前两位及其替班；资源未变时不再匹配。"""
+        from arknights_mower.utils import dorm_skills
+
+        if not force and getattr(self, "_dorm_skill_generation", -1) == (
+            dorm_skills.resource_generation
+        ):
+            return
+        planned = {
+            name
+            for room, slots in self.plan.items()
+            if room.startswith("dorm")
+            for slot in slots[:2]
+            for name in (slot.agent, *slot.replacement)
+            if name in self.operators
+        }
+        for name, op in self.operators.items():
+            op.single_recovery_manager = name in planned and (
+                dorm_skills.is_single_recovery_manager(name)
+            )
+        self._dorm_skill_generation = dorm_skills.resource_generation
 
     def set_mood_limit(self, name, upper_limit=24, lower_limit=0):
         if name in self.operators and self.is_planned_operator(name):
@@ -618,9 +648,10 @@ class Operators:
             self.operators[name].lower_limit = lower_limit
 
     def has_rest_mood_limit(self, name):
-        """自定义上下限或令夕自动规则要求到上限立即离宿。"""
+        """仅个人设置和令夕上限强制离宿；全体设置是回满目标。"""
         return self.is_planned_operator(name) and (
-            self.custom_mood_limits(name) is not None
+            self.experimental_dorm_logic
+            and name in self.config.operator_mood_limits
             or name == {1: "令", 2: "夕"}.get(self.config.ling_xi)
         )
 
@@ -643,8 +674,49 @@ class Operators:
         return (
             self.has_rest_mood_limit(name)
             and op is not None
-            and resting_mood(op) != float("inf")
-            and op.current_mood() >= op.upper_limit
+            and has_resting_mood(op)
+            and resting_mood(op) >= op.upper_limit
+        )
+
+    def is_free_room_excluded(self, name):
+        """名单内入住者不被清退或接管床位；达到个人上限仍须离宿。"""
+        return (
+            bool(name)
+            and self.experimental_dorm_logic
+            and getattr(self.config, "free_room", False)
+            and name in getattr(self.config, "free_room_exclusions", ())
+            and resting_tier(self, name) != RestingTier.EXCLUDED
+            and not self.rest_mood_complete(name)
+        )
+
+    def is_full_dorm_fallback(self, name):
+        """游戏心情升序选出的替班也已满时，停止本轮无效清退。"""
+        op = self.operators.get(name)
+        return bool(
+            self.experimental_dorm_logic
+            and self.config.free_room
+            and op is not None
+            and op.current_room.startswith("dorm")
+            and getattr(op, "dorm_mood_fallback", "") == op.current_room
+            and resting_tier(self, name) != RestingTier.EXCLUDED
+            and resting_mood(op) >= op.upper_limit
+            and not self.has_rest_mood_limit(name)
+        )
+
+    def skip_idle_dorm_release(self, name):
+        return self.is_free_room_excluded(name) or self.is_full_dorm_fallback(name)
+
+    def idle_rest_checked(self, name):
+        """同批最低者也达到上限后，空闲期间不重复试住；不伪造缓存心情。"""
+        op = self.operators.get(name)
+        checked = getattr(op, "idle_rest_check", None)
+        return bool(
+            self.experimental_dorm_logic
+            and op is not None
+            and not op.current_room
+            and checked is not None
+            and checked[0] >= op.upper_limit
+            and checked[1:] == (op.mood, op.time_stamp)
         )
 
     def apply_custom_mood_limits(self, operator):
@@ -726,7 +798,7 @@ class Operators:
             old_upper = previous.get(op.name, op.upper_limit)
             if old_upper == op.upper_limit:
                 continue
-            if resting_mood(op) == float("inf"):
+            if not has_resting_mood(op):
                 bed.time = None
                 op.time_stamp = None
             elif op.mood >= op.upper_limit:
@@ -1052,6 +1124,30 @@ class Operators:
         agent.current_room = current_room
         agent.current_index = current_index
         agent.mood = mood
+        if update_time:
+            agent.idle_rest_check = None
+            if (
+                self.experimental_dorm_logic
+                and current_room == getattr(agent, "dorm_mood_fallback", "")
+                and 0 <= mood <= 24
+            ):
+                for peer_name, stamp in getattr(agent, "dorm_mood_peers", {}).items():
+                    peer = self.operators.get(peer_name)
+                    if (
+                        peer is not None
+                        and not peer.current_room
+                        and peer.time_stamp == stamp
+                        and mood >= peer.upper_limit
+                    ):
+                        peer.idle_rest_check = (
+                            peer.upper_limit,
+                            peer.mood,
+                            peer.time_stamp,
+                        )
+            agent.dorm_mood_peers = {}
+        if update_time and 0 <= mood < agent.upper_limit:
+            # 最低者确实需要恢复时，之后回满仍按普通不养闲人处理。
+            agent.dorm_mood_fallback = ""
         self.update_standby_low_priority(agent, returned_to_post=returned_to_post)
         if current_room == "train" and current_index == 0:
             agent.resting_from_train = True
@@ -1106,16 +1202,9 @@ class Operators:
         # 记录真实用尽时间
         if room in self.true_exhaust_room and _name in self.operators.keys():
             _agent = self.operators[_name]
-            time_elapsed = (agent["time"] - datetime.now()).total_seconds()
-            _agent.exhaust_time = agent["time"]
-            if _agent.mood > 0 and _agent.lower_limit > 0:
-                _agent.exhaust_time = datetime.now() + timedelta(
-                    seconds=(_agent.mood - _agent.lower_limit)
-                    * time_elapsed
-                    / _agent.mood
-                )
-            if time_elapsed < 0 or _agent.exhaust_time < datetime.now():
-                _agent.exhaust_time = datetime.now()
+            _agent.exhaust_time = Operator.exhaust_time_at_lower_limit(
+                _agent, agent["time"]
+            )
             logger.debug(f"{_name} 真实用尽时间：{_agent.exhaust_time}")
             return
 
@@ -1134,12 +1223,18 @@ class Operators:
                     dorm.time = None
                 else:
                     if dorm.time is not None and dorm.time < datetime.now():
+                        if (
+                            self.experimental_dorm_logic
+                            and op.time_stamp is not None
+                            and op.mood >= op.upper_limit
+                        ):
+                            # 全体上限不是实际心情封顶，保留已读到的较高心情及读数时间。
+                            op.depletion_rate = 0
+                            continue
                         op.mood = op.upper_limit
                         op.time_stamp = dorm.time
                         op.depletion_rate = 0
-                        logger.debug(
-                            f"检测到{op.name}心情恢复满，设置心情至{op.upper_limit}"
-                        )
+                        logger.debug(f"检测到{op.name}心情恢复满，设置心情至{op.mood}")
 
     def get_train_support(self):
         for name in self.operators.keys():
@@ -1209,9 +1304,14 @@ class Operators:
             operator.depletion_rate = exist.depletion_rate
             operator.current_room = exist.current_room
             operator.current_index = exist.current_index
+            operator.dorm_position_version = getattr(exist, "dorm_position_version", 0)
             operator.dorm_recovery_room = getattr(exist, "dorm_recovery_room", "")
+            operator.dorm_recovery_index = getattr(exist, "dorm_recovery_index", -1)
             operator.resting_from_train = getattr(exist, "resting_from_train", False)
             operator.dorm_recovery_fixed = getattr(exist, "dorm_recovery_fixed", ())
+            operator.dorm_mood_fallback = getattr(exist, "dorm_mood_fallback", "")
+            operator.dorm_mood_peers = getattr(exist, "dorm_mood_peers", {}).copy()
+            operator.idle_rest_check = getattr(exist, "idle_rest_check", None)
             operator.standby_low_priority = getattr(
                 exist, "standby_low_priority", False
             )
@@ -1634,12 +1734,16 @@ class Operators:
                     self.operators[name].time_stamp = time
         return available_high if free_type == "high" else available_low
 
-    def legacy_standby_can_yield(self, op):
-        """稳定逻辑候补可让床；强制恢复或低于急救线者仍占主班名额。"""
-        if self.experimental_dorm_logic or not self._can_standby(op):
+    def standby_can_yield(self, op):
+        """候补有有效非急救心情且无强制恢复要求时，才可离宿待命。"""
+        if not self._can_standby(op):
             return False
         mood = resting_mood(op)
-        return mood != float("inf") and mood >= self.rescue_mood_threshold(op)
+        return has_resting_mood(op) and mood >= self.rescue_mood_threshold(op)
+
+    def legacy_standby_can_yield(self, op):
+        """稳定逻辑沿用原候补让床条件。"""
+        return not self.experimental_dorm_logic and self.standby_can_yield(op)
 
     def active_high_resting_count(self, time=None):
         """正在占用恢复床位的主班人数。"""
@@ -1673,6 +1777,7 @@ class Operators:
             reserved_for = self.reserved_product_beds.get(dorm.position)
             if reserved_for and requester != reserved_for:
                 if requester is None or resting_tier(self, requester) not in (
+                    RestingTier.PRIORITY_REPLACEMENT,
                     RestingTier.REPLACEMENT,
                     RestingTier.IDLE,
                 ):
@@ -1681,6 +1786,8 @@ class Operators:
         if name == "" or name not in self.operators:
             return True
         op = self.operators[name]
+        if self.is_free_room_excluded(name):
+            return False
         if not self.experimental_dorm_logic:
             if dorm.time is not None and dorm.time < datetime.now():
                 return True
@@ -1705,20 +1812,23 @@ class Operators:
         if (op.current_room, op.current_index) != dorm.position:
             return False
         tier = resting_tier(self, name)
-        # 候补及以上只按层级、心情换床位顺序；一旦入住便不被其他休息者踢出。
-        if tier <= RestingTier.STANDBY:
+        # 必需休息的主班保留床位；普通候补可给更高层级让床，离宿后待命。
+        # 急救候补已提升到 LOW_MAIN，不会因此被踢出。
+        if tier <= RestingTier.LOW_MAIN:
+            return False
+        if tier == RestingTier.STANDBY and not self.standby_can_yield(op):
             return False
         if requester is None:
             return False
         incoming_tier = resting_tier(self, requester)
         if incoming_tier >= tier:
             return False
-        if incoming_tier <= RestingTier.LOW_MAIN:
+        if incoming_tier <= RestingTier.PRIORITY_REPLACEMENT:
             return True
         if tier == RestingTier.IDLE:
             mood = resting_mood(self.operators[requester])
-            # 未知心情不代表满心情；只有有效读数超过 22 才阻止接管空闲者。
-            return mood == float("inf") or mood <= 22
+            # 无有效缓存按 24 心情，不抢占正在恢复的空闲者。
+            return mood <= 22
         return (
             incoming_tier == RestingTier.STANDBY
             and tier == RestingTier.REPLACEMENT
@@ -1778,9 +1888,9 @@ class Operators:
             bed = self.dorm[index]
             if not bed.name:
                 return (0, 0, 0)
-            tier, mood = resting_key(self, bed.name, now)
-            # 先使用空位，再接管层级最低、同级心情最高的占位者。
-            return (1, -tier, -mood)
+            tier, recovery_order = resting_key(self, bed.name, now)
+            # 先使用空位，再接管层级最低、同级距回满最近的占位者。
+            return (1, -tier, -recovery_order)
 
         return min(candidates, key=takeover_cost, default=None)
 
@@ -2051,8 +2161,14 @@ class Operator:
         # 测试宿舍逻辑：候补跌破急救线后，本轮休息周期锁定为低优。
         self.standby_low_priority = False
         self.dorm_recovery_room = ""
+        self.dorm_recovery_index = -1
         self.resting_from_train = False
+        # (单回宿管姓名, 床位, 移动版本)；旧缓存的全宿管姓名元组会自动失效。
         self.dorm_recovery_fixed = ()
+        self.single_recovery_manager = False
+        self.dorm_mood_fallback = ""
+        self.dorm_mood_peers = {}
+        self.idle_rest_check = None
         self._current_room = None
         self.current_room = current_room
         self.exhaust_require = exhaust_require
@@ -2074,18 +2190,40 @@ class Operator:
     @current_room.setter
     def current_room(self, value):
         if self._current_room != value:
+            self.dorm_position_version = getattr(self, "dorm_position_version", 0) + 1
+            was_working = self.is_working()
+            self.idle_rest_check = None
+            if value != getattr(self, "dorm_mood_fallback", ""):
+                self.dorm_mood_fallback = ""
+                self.dorm_mood_peers = {}
             self.clear_dorm_recovery()
             self._current_room = value
+            started_working = not was_working and self.is_working()
             if Operators.current_room_changed_callback and (
-                self.refresh_order_room[0] or self.refresh_drained
+                started_working or self.refresh_order_room[0] or self.refresh_drained
             ):
-                Operators.current_room_changed_callback(self)
+                Operators.current_room_changed_callback(
+                    self, started_working=started_working
+                )
                 logger.debug(
                     f"触发当前房间变更回调: {self.name} 现在在 {self._current_room}, 刷新交易所房间: {self.refresh_order_room}, 刷新疲劳: {self.refresh_drained}"
                 )
 
+    @property
+    def current_index(self):
+        # 保留旧 pickle 的字段名，升级和回退都能读取同一份床位缓存。
+        return self.__dict__.get("current_index", -1)
+
+    @current_index.setter
+    def current_index(self, value):
+        if self.current_index != value:
+            self.dorm_position_version = getattr(self, "dorm_position_version", 0) + 1
+            self.clear_dorm_recovery()
+        self.__dict__["current_index"] = value
+
     def clear_dorm_recovery(self):
         self.dorm_recovery_room = ""
+        self.dorm_recovery_index = -1
         self.dorm_recovery_fixed = ()
 
     def is_high(self):
@@ -2145,6 +2283,15 @@ class Operator:
             return predict
         else:
             return self.mood
+
+    def exhaust_time_at_lower_limit(self, zero_time, now=None):
+        """按本次读到的心情，把游戏的归零倒计时换算到设置下限。"""
+        now = now or datetime.now()
+        if self.mood > 0 and self.lower_limit > 0:
+            zero_time = now + (zero_time - now) * (
+                (self.mood - self.lower_limit) / self.mood
+            )
+        return max(now, zero_time)
 
     def predict_exhaust(self):
         if self.workaholic or self.exhaust_require or self.room in ["factory", "train"]:

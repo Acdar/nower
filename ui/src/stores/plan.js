@@ -5,6 +5,10 @@ import { deepcopy } from '@/utils/deepcopy'
 import { factory_product_ids } from '@/utils/base_products'
 
 export const usePlanStore = defineStore('plan', () => {
+  let advancedSettingsSource = null
+  function set_advanced_settings_source(source) {
+    advancedSettingsSource = source
+  }
   const ling_xi = ref(1)
   const mood_limits = ref(null)
   const operator_mood_limits = ref({})
@@ -14,6 +18,8 @@ export const usePlanStore = defineStore('plan', () => {
   const default_dorm_order = ['dormitory_1', 'dormitory_2', 'dormitory_3', 'dormitory_4']
   const dorm_order = ref([...default_dorm_order])
   const resting_priority = ref([])
+  const resting_priority_replacement = ref([])
+  const free_room_exclusions = ref([])
   const resting_standby = ref([])
   const workaholic = ref([])
   const refresh_trading = ref([])
@@ -84,6 +90,8 @@ export const usePlanStore = defineStore('plan', () => {
     'exhaust_require',
     'rest_in_full',
     'resting_priority',
+    'resting_priority_replacement',
+    'free_room_exclusions',
     'resting_standby',
     'workaholic',
     'free_blacklist',
@@ -172,6 +180,8 @@ export const usePlanStore = defineStore('plan', () => {
     ope_resting_priority.value = str2list(response.data.conf.ope_resting_priority)
     dorm_order.value = normalizeDormOrder(response.data.conf.dorm_order)
     resting_priority.value = str2list(response.data.conf.resting_priority)
+    resting_priority_replacement.value = str2list(response.data.conf.resting_priority_replacement)
+    free_room_exclusions.value = str2list(response.data.conf.free_room_exclusions)
     resting_standby.value = str2list(response.data.conf.resting_standby)
     workaholic.value = str2list(response.data.conf.workaholic)
     refresh_trading.value = str2list(response.data.conf.refresh_trading)
@@ -230,6 +240,8 @@ export const usePlanStore = defineStore('plan', () => {
         ope_resting_priority: list2str(ope_resting_priority.value),
         dorm_order: list2str(dorm_order.value),
         resting_priority: list2str(resting_priority.value),
+        resting_priority_replacement: list2str(resting_priority_replacement.value),
+        free_room_exclusions: list2str(free_room_exclusions.value),
         resting_standby: list2str(resting_standby.value),
         workaholic: list2str(workaholic.value),
         refresh_trading: list2str(refresh_trading.value),
@@ -237,6 +249,7 @@ export const usePlanStore = defineStore('plan', () => {
       },
       backup_plans: deepcopy(backup_plans.value)
     }
+    if (advancedSettingsSource) result.advanced_settings = advancedSettingsSource()
     for (const b of result.backup_plans) {
       for (const i of backup_conf_convert_list) {
         b.conf[i] = list2str(b.conf[i])
@@ -309,6 +322,7 @@ export const usePlanStore = defineStore('plan', () => {
     autosave_paused,
     wait_for_plan_save: () => planSaveRequest,
     save_plan,
+    set_advanced_settings_source,
     load_plan,
     load_operators,
     ling_xi,
@@ -317,6 +331,8 @@ export const usePlanStore = defineStore('plan', () => {
     exhaust_require,
     rest_in_full,
     resting_priority,
+    resting_priority_replacement,
+    free_room_exclusions,
     resting_standby,
     ope_resting_priority,
     workaholic,

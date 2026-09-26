@@ -20,6 +20,7 @@ from arknights_mower.utils.skland import (
     log,
     token_password_url,
 )
+from arknights_mower.utils.skland_log import redact_signing_text
 
 
 class SKLand:
@@ -33,6 +34,7 @@ class SKLand:
         self.sign_token = ""
         self.all_recorded = True
         self.all_recorded_ef = True
+        self._log_secrets = set()
 
     def start(self):
 
@@ -64,7 +66,11 @@ class SKLand:
                     ).json()
                     if resp["code"] != 0:
                         self.reward.append(
-                            {"nickName": item.account, "reward": resp.get("message")}
+                            {
+                                "nickName": item.account,
+                                "game": "明日方舟{}".format(i.get("channelName")),
+                                "reward": resp.get("message"),
+                            }
                         )
                         logger.info(f"{i.get('nickName')}：{resp.get('message')}")
                         continue
@@ -126,6 +132,7 @@ class SKLand:
     def save_param(self, cred_resp):
         header["cred"] = cred_resp["cred"]
         self.sign_token = cred_resp["token"]
+        self._log_secrets.update((cred_resp["cred"], cred_resp["token"]))
 
     def log(self, account):
         r = requests.post(
@@ -244,6 +251,10 @@ class SKLand:
                 return res
         except Exception as e:
             msg = "测试出错-{}".format(e)
-            logger.exception(msg)
+            logger.error(
+                "森空岛测试签到失败（%s）：%s",
+                type(e).__name__,
+                redact_signing_text(e, *self._log_secrets),
+            )
             res.append(msg)
         return res

@@ -943,7 +943,8 @@ class TestReadRoomState(unittest.TestCase):
             ]
             + [
                 call(
-                    "[mastery] 训练室倒计时与面板状态连续 5 次不一致，保守按训练中处理"
+                    "[mastery] 训练室倒计时与面板状态连续 5 次不一致，保守按训练中处理",
+                    extra={"archive_screenshots": True},
                 )
             ],
         )
@@ -1273,18 +1274,6 @@ class TestReconcileRecoverSwap(unittest.TestCase):
         plan = make_plan(status="training", swap_frozen=1)
         with patch("arknights_mower.solvers.mastery._schedule_swap_if_needed") as sched:
             reader._maybe_recover_swap(solver, plan, self._room())
-        sched.assert_not_called()
-
-    def test_recover_queued_swap_task_skips(self):
-        # 队列已有同计划 SWAP 任务（重启恢复的队列可能还留着旧任务）→ 不重复补排
-        solver = self._solver()
-        task = reader.SchedulerTask(
-            time=datetime.now(), task_type=reader.TaskTypes.SWAP_SUPPORT
-        )
-        task.plan_key = "1"
-        solver.tasks = [task]
-        with patch("arknights_mower.solvers.mastery._schedule_swap_if_needed") as sched:
-            reader._maybe_recover_swap(solver, self._training_plan(), self._room())
         sched.assert_not_called()
 
     def test_recover_countdown_missing_skips(self):
@@ -3127,8 +3116,9 @@ class TestRefreshTrainingHalfOverlap(unittest.TestCase):
         sc.assert_not_called()
 
     def test_queued_swap_task_skips_collect(self):
-        # 队列已有同计划 SWAP 任务 → _maybe_recover_swap 返回 True（不重复排）→ 不排收取
+        # 真实队列判断：已有同计划换人任务时，既不补排换人，也不排收取。
         solver = MagicMock()
+        solver.task = None
         task = reader.SchedulerTask(
             time=datetime.now(), task_type=reader.TaskTypes.SWAP_SUPPORT
         )
@@ -3137,11 +3127,22 @@ class TestRefreshTrainingHalfOverlap(unittest.TestCase):
         plan = make_plan(status="training", swap_frozen=0)
         with (
             patch.object(reader, "_update_expiry"),
-            patch.object(reader, "_maybe_recover_swap", return_value=True),
+            patch(
+                "arknights_mower.solvers.mastery._get_plan_route",
+                return_value={"operator": "夜半", "swap_target": "逻各斯"},
+            ),
+            patch.object(
+                reader,
+                "_read_slots_checked",
+                return_value=("夜半", "测试干员", [], True),
+            ),
+            patch("arknights_mower.solvers.mastery._schedule_swap_if_needed") as sched,
             patch.object(reader, "_schedule_collect") as sc,
         ):
             reader._refresh_training_plan(solver, plan, self._room())
+        sched.assert_not_called()
         sc.assert_not_called()
+        self.assertEqual(solver.tasks, [task])
 
 
 class TestReconcileProtectedRelease(unittest.TestCase):
@@ -3259,10 +3260,21 @@ class TestLogJudgment(unittest.TestCase):
     def setUp(self):
         self.solver = MagicMock()
 
+    def test_remaining_time_does_not_wrap_at_midnight(self):
+        self.assertEqual(
+            reader._format_remaining_time(
+                NOW + timedelta(hours=27, minutes=4, seconds=5), NOW
+            ),
+            "27:04:05",
+        )
+        self.assertEqual(
+            reader._format_remaining_time(NOW - timedelta(seconds=1), NOW), "00:00:00"
+        )
+
     @patch.object(reader.logger, "info")
     def test_log_training_consistent_with_mood(self, mock_info):
         # 正常训练中：协助位年，训练位泡泡，带心情与倒计时
-        countdown = datetime(2026, 9, 21, 4, 12, 30)
+        countdown = NOW + timedelta(hours=4, minutes=12, seconds=30)
         panel = make_panel(
             operator_name="泡泡",
             skill_name="挨打",
@@ -3280,7 +3292,11 @@ class TestLogJudgment(unittest.TestCase):
             slots_read=True,
             slots_reliable=True,
         )
-        reader._log_judgment(self.solver, room, "training", "更新专精完成的收取时间")
+        with patch.object(reader, "datetime") as clock:
+            clock.now.return_value = NOW
+            reader._log_judgment(
+                self.solver, room, "training", "更新专精完成的收取时间"
+            )
         mock_info.assert_called_once()
         msg = mock_info.call_args[0][0]
         self.assertIn("房间 训练室[训练中]：", msg)
@@ -3293,7 +3309,7 @@ class TestLogJudgment(unittest.TestCase):
     @patch.object(reader.logger, "info")
     def test_log_unreliable_slots(self, mock_info):
         # 进驻浮窗读取失败/不可靠
-        countdown = datetime(2026, 9, 21, 4, 12, 30)
+        countdown = NOW + timedelta(hours=4, minutes=12, seconds=30)
         panel = make_panel(
             operator_name="泡泡",
             skill_name="挨打",
@@ -3309,7 +3325,11 @@ class TestLogJudgment(unittest.TestCase):
             slots_read=True,
             slots_reliable=False,
         )
-        reader._log_judgment(self.solver, room, "training", "更新专精完成的收取时间")
+        with patch.object(reader, "datetime") as clock:
+            clock.now.return_value = NOW
+            reader._log_judgment(
+                self.solver, room, "training", "更新专精完成的收取时间"
+            )
         mock_info.assert_called_once()
         msg = mock_info.call_args[0][0]
         self.assertIn("房间 训练室[训练中]：", msg)
@@ -3319,7 +3339,7 @@ class TestLogJudgment(unittest.TestCase):
     @patch.object(reader.logger, "info")
     def test_log_ocr_fail_slots_unread(self, mock_info):
         # 识别异常早返回：未展开浮窗
-        countdown = datetime(2026, 9, 21, 2, 30, 15)
+        countdown = NOW + timedelta(hours=2, minutes=30, seconds=15)
         panel = make_panel(
             operator_name="",
             skill_name="[泡泡“挨打”",
@@ -3334,7 +3354,11 @@ class TestLogJudgment(unittest.TestCase):
             slots_read=False,
             slots_reliable=False,
         )
-        reader._log_judgment(self.solver, room, "ocr_fail", "保守训练中，等待排班重读")
+        with patch.object(reader, "datetime") as clock:
+            clock.now.return_value = NOW
+            reader._log_judgment(
+                self.solver, room, "ocr_fail", "保守训练中，等待排班重读"
+            )
         mock_info.assert_called_once()
         msg = mock_info.call_args[0][0]
         self.assertIn("房间 训练室[识别异常]：", msg)

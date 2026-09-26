@@ -3,12 +3,14 @@ import datetime
 import json
 import mimetypes
 import os
+import shutil
 import subprocess
 import time
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
 from threading import RLock, Thread, Timer
+from urllib.parse import urlparse
 from uuid import uuid4
 from zlib import error as ZlibError
 
@@ -21,9 +23,19 @@ from werkzeug.security import safe_join
 from arknights_mower import __system__
 from arknights_mower.solvers.record import clear_data, load_state, save_state
 from arknights_mower.utils import config, network_settings
+from arknights_mower.utils.config.plan_advanced import (
+    apply_advanced_settings,
+    export_advanced_settings,
+)
 from arknights_mower.utils.config_backup import backup_lock
 from arknights_mower.utils.csv_utils import parse_cell_num, read_dicts
 from arknights_mower.utils.datetime import get_server_time
+from arknights_mower.utils.diagnostics import (
+    archive_window,
+    error_events,
+    export_bundle,
+    timeline,
+)
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.log_stream import LogStream
 from arknights_mower.utils.maa_check import (
@@ -737,8 +749,12 @@ def load_config():
         from arknights_mower.utils.workshop_config import read_user_config
 
         data = read_user_config()
-        data["runtime_platform"] = __system__
-        from arknights_mower.utils.performance import effective_performance_profile
+        from arknights_mower.utils.performance import (
+            effective_performance_profile,
+            is_android_runtime,
+        )
+
+        data["runtime_platform"] = "android" if is_android_runtime() else __system__
 
         performance = effective_performance_profile(
             config.conf, config.screenshot_avg, config.screenshot_count
@@ -815,6 +831,8 @@ def load_plan_from_json():
         from arknights_mower.utils.workshop_config import workshop_lock
 
         plan = config.PlanModel(**request.json)
+        # 校验随排班保存的设置；网页配置保存仍负责更新运行配置。
+        apply_advanced_settings(config.conf, plan.advanced_settings)
         with workshop_lock:
             previous_plan = config.plan
             config.plan = plan
@@ -1051,10 +1069,11 @@ def _start_mower(start_type):
         saved_state = {} if start_type == "2" else (load_state() or {})
         if start_type == "1":
             saved_state["tasks"] = []
-        # 清空缓存后 current_room 与心情均未知。开关默认开启：首次读取完成后
-        # 按新缓存重载调度器，确保副表先于主表规划刷新。
+        # 测试宿舍在首次扫描后直接收敛副表；旧宿舍保留可选重载流程。
         restart_after_mood_read = (
-            start_type == "2" and config.conf.refresh_backup_plan_after_mood
+            start_type == "2"
+            and not config.conf.experimental_dorm_logic
+            and config.conf.refresh_backup_plan_after_mood
         )
         try:
             from arknights_mower.__main__ import main
@@ -1147,6 +1166,153 @@ def serve_screenshot(filename):
     """
     screenshot_dir = get_path("@app/screenshot")
     return send_from_directory(screenshot_dir, filename)
+
+
+@app.route("/diagnostics/timeline")
+@require_token
+def diagnostic_timeline():
+    timestamp = request.args.get("at", type=int)
+    if timestamp is None or timestamp < 0 or timestamp > (time.time() + 3600) * 1000:
+        return {"error": "请选择有效的查看时间"}, 400
+    try:
+        center = datetime.datetime.fromtimestamp(timestamp / 1000)
+    except (OverflowError, OSError, ValueError):
+        return {"error": "请选择有效的查看时间"}, 400
+    return {"logs": timeline(get_path("@app/log"), get_path("@app/screenshot"), center)}
+
+
+@app.route("/diagnostics/errors")
+@require_token
+def diagnostic_errors():
+    return {"events": error_events(get_path("@app/screenshot"))}
+
+
+def _send_diagnostic_bundle(center, archive_id=None):
+    bundle = export_bundle(
+        get_path("@app/log"), get_path("@app/screenshot"), center, archive_id
+    )
+    response = send_file(
+        bundle,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"日志调度-{center:%Y%m%d-%H%M%S}.zip",
+        max_age=0,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.call_on_close(bundle.close)
+    return response
+
+
+@app.route("/diagnostics/export")
+@require_token
+def diagnostic_export():
+    timestamp = request.args.get("at", type=int)
+    if timestamp is None or timestamp < 0 or timestamp > (time.time() + 3600) * 1000:
+        return {"error": "请选择有效的导出时间"}, 400
+    try:
+        center = datetime.datetime.fromtimestamp(timestamp / 1000)
+    except (OverflowError, OSError, ValueError):
+        return {"error": "请选择有效的导出时间"}, 400
+    return _send_diagnostic_bundle(center)
+
+
+@app.route("/diagnostics/errors/<archive_id>/logs")
+@require_token
+def diagnostic_error_logs(archive_id):
+    if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
+        abort(404)
+    folder = get_path("@app/screenshot") / "errors" / archive_id
+    if not (folder / "event.json").is_file():
+        abort(404)
+    saved = folder / "logs.json"
+    if saved.is_file():
+        return {"logs": json.loads(saved.read_text(encoding="utf-8"))}
+    try:
+        center = datetime.datetime.fromtimestamp(int(archive_id) / 10**9)
+    except (OverflowError, OSError, ValueError):
+        abort(404)
+    start, end = archive_window(folder, center)
+    return {
+        "logs": timeline(
+            get_path("@app/log"),
+            get_path("@app/screenshot"),
+            center,
+            limit=None,
+            start=start,
+            end=end,
+        )
+    }
+
+
+@app.route("/diagnostics/errors/<archive_id>/export")
+@require_token
+def diagnostic_error_export(archive_id):
+    if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
+        abort(404)
+    folder = get_path("@app/screenshot") / "errors" / archive_id
+    if not (folder / "event.json").is_file():
+        abort(404)
+    try:
+        center = datetime.datetime.fromtimestamp(int(archive_id) / 10**9)
+    except (OverflowError, OSError, ValueError):
+        abort(404)
+    return _send_diagnostic_bundle(center, archive_id)
+
+
+def _diagnostic_delete_origin_allowed(origin):
+    if not origin:
+        return True
+    try:
+        source = urlparse(origin)
+        target = urlparse(request.host_url)
+        if (
+            source.scheme not in {"http", "https"}
+            or not source.hostname
+            or source.username
+            or source.password
+            or source.path
+            or source.params
+            or source.query
+            or source.fragment
+        ):
+            return False
+        if source.scheme == target.scheme and source.netloc == target.netloc:
+            return True
+        # 本机 Vite 开发服务器与后端分别使用 5173 和 8000 等端口。
+        loopback = {"localhost", "127.0.0.1", "::1"}
+        return (
+            target.hostname in loopback
+            and source.hostname in loopback
+            and source.scheme == "http"
+            and source.port == 5173
+        )
+    except ValueError:
+        return False
+
+
+@app.route("/diagnostics/errors/<archive_id>", methods=["DELETE"])
+@require_token
+def diagnostic_error_delete(archive_id):
+    if request.headers.get("X-Mower-Diagnostics") != "1":
+        abort(403)
+    origin = request.headers.get("Origin")
+    if not _diagnostic_delete_origin_allowed(origin):
+        abort(403)
+    if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
+        abort(404)
+    screenshot_root = get_path("@app/screenshot")
+    folder = screenshot_root / "errors" / archive_id
+    from arknights_mower.utils.log import get_screenshot_store
+
+    store = get_screenshot_store()
+    if store is not None and store.folder == screenshot_root:
+        if not store.delete_error_archive(archive_id):
+            abort(404)
+    else:
+        if not (folder / "event.json").is_file():
+            abort(404)
+        shutil.rmtree(folder)
+    return "", 204
 
 
 @app.route("/screenshot/latest")
@@ -1247,12 +1413,30 @@ def import_from_image():
             imported_plan = parse_plan_document(qrcode.decode(img))
     except (ValueError, TypeError, RecursionError, OSError, ZlibError):
         return "排班表导入失败：请选择有效的排班 JSON、排班图片或包含 config 文件夹的 ZIP 备份"
+    try:
+        imported_conf = apply_advanced_settings(
+            config.conf, imported_plan.advanced_settings
+        )
+    except (ValueError, TypeError):
+        return "排班表导入失败：高级设置无效"
     previous_plan = config.plan
+    previous_conf = config.conf
+    plan_saved = False
     try:
         config.plan = imported_plan
         config.save_plan()
+        plan_saved = True
+        if imported_plan.advanced_settings is not None:
+            config.conf = imported_conf
+            config.save_conf()
     except OSError:
         config.plan = previous_plan
+        config.conf = previous_conf
+        if plan_saved:
+            try:
+                config.save_plan()
+            except OSError:
+                logger.exception("排班表回滚失败")
         logger.exception("排班表写入失败")
         return "排班表导入失败：文件写入失败，原排班已保留"
     return "排班已加载"
@@ -1308,9 +1492,9 @@ def save_file_dialog():
 
     upper = Image.open(img)
 
-    img = qrcode.export(
-        config.plan.model_dump(exclude_none=True), upper, config.conf.theme
-    )
+    plan_data = config.plan.model_dump(exclude_none=True)
+    plan_data["advanced_settings"] = export_advanced_settings(config.conf)
+    img = qrcode.export(plan_data, upper, config.conf.theme)
     buffer = BytesIO()
     img.save(buffer, format="JPEG")
     buffer.seek(0)
@@ -1320,7 +1504,13 @@ def save_file_dialog():
 @app.route("/export-json")
 @require_token
 def export_json():
-    return send_file(config.plan_path)
+    plan_data = config.plan.model_dump(exclude_none=True)
+    plan_data["advanced_settings"] = export_advanced_settings(config.conf)
+    return app.response_class(
+        json.dumps(plan_data, ensure_ascii=False, indent=2),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=plan.json"},
+    )
 
 
 @app.route("/validate-plan", methods=["POST"])

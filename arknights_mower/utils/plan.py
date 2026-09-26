@@ -78,6 +78,8 @@ class PlanConfig:
         experimental_dorm_logic: bool = False,
         mood_limits: Optional[dict] = None,
         operator_mood_limits: Optional[dict] = None,
+        resting_priority_replacement: str = "",
+        free_room_exclusions: str = "",
     ):
         """排班的设置
 
@@ -96,6 +98,8 @@ class PlanConfig:
         self.exhaust_require = to_list(exhaust_require)
         self.workaholic = to_list(workaholic)
         self.resting_priority = to_list(resting_priority)
+        self.resting_priority_replacement = to_list(resting_priority_replacement)
+        self.free_room_exclusions = to_list(free_room_exclusions)
         self.resting_standby = to_list(resting_standby)
         self.free_blacklist = to_list(free_blacklist)
         # 0 为均衡模式
@@ -178,6 +182,8 @@ class PlanConfig:
             "exhaust_require",
             "workaholic",
             "resting_priority",
+            "resting_priority_replacement",
+            "free_room_exclusions",
             "resting_standby",
             "free_blacklist",
             "refresh_trading_config",
