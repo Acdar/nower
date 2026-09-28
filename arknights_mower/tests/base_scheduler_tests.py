@@ -13,7 +13,10 @@ sys.modules.setdefault("arknights_mower.utils.skland", MagicMock())
 
 import arknights_mower.solvers.base_schedule as base_schedule  # noqa: E402
 from arknights_mower.solvers import mastery_reader  # noqa: E402
-from arknights_mower.solvers.base_mixin import BaseMixin  # noqa: E402
+from arknights_mower.solvers.base_mixin import (  # noqa: E402
+    AgentSelectionNotReady,
+    BaseMixin,
+)
 from arknights_mower.solvers.base_schedule import (  # noqa: E402
     BaseSchedulerSolver,
     _add_group_to_fix_plan,
@@ -310,6 +313,22 @@ class TestInitialSimulatorRecovery(unittest.TestCase):
         self.main.simulate({"tasks": []})
 
         self.assertFalse(scheduler.defer_backup_plan_until_mood_read)
+
+    def test_saved_unfinished_mood_read_still_defers_backup_plan(self):
+        scheduler = MagicMock()
+        scheduler.initialize_operators.return_value = "测试完成"
+        self.initialize.return_value = scheduler
+        layout = {"dormitory_1": ["陈", "", "", "", ""]}
+        self.main.simulate(
+            {
+                "tasks": [],
+                "initial_mood_pending": True,
+                "initial_mood_probe_layout": layout,
+            }
+        )
+        self.assertTrue(scheduler.defer_backup_plan_until_mood_read)
+        self.assertEqual(scheduler._initial_mood_probe_layout, layout)
+        self.assertIsNot(scheduler._initial_mood_probe_layout, layout)
 
     def test_experimental_initialization_never_requests_mood_reload(self):
         scheduler = MagicMock()
@@ -1451,7 +1470,7 @@ class TestBaseScheduler(unittest.TestCase):
                     patch.object(
                         solver,
                         "backup_plan_solver",
-                        side_effect=lambda: events.append("backup"),
+                        side_effect=lambda **kwargs: events.append("backup"),
                     ),
                     patch.object(
                         solver,
@@ -2947,11 +2966,11 @@ class TestDormShiftOffMerge(unittest.TestCase):
         )
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_disabled_idle_fill_does_not_add_vacancy_tasks(self):
+    def test_legacy_dorm_does_not_add_priority_vacancy_tasks(self):
         solver = BaseSchedulerSolver()
         solver.op_data = SimpleNamespace(
-            experimental_dorm_logic=True,
-            config=SimpleNamespace(free_room=False),
+            experimental_dorm_logic=False,
+            config=SimpleNamespace(free_room=True),
         )
         solver.tasks = [SchedulerTask()]
         with patch.object(base_schedule, "try_add_release_dorm") as fill:
@@ -3330,6 +3349,47 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         self.assertEqual(result, {room: ["旧干员"]})
         self.assertEqual(solver.choose_agent.call_count, 2)
         solver.get_order_remaining_time.assert_called_once_with()
+
+    def test_selection_feedback_error_is_counted_at_room_retry_boundary(self):
+        solver, room, _ = self.make_solver()
+        solver.choose_agent.side_effect = [
+            AgentSelectionNotReady("排序反馈未到"),
+            None,
+        ]
+        solver.scene.return_value = Scene.INFRA_MAIN
+        solver.get_agent_from_room.side_effect = [
+            [{"agent": "旧干员"}],
+            [{"agent": "旧干员"}],
+            [{"agent": "但书"}],
+        ]
+        with (
+            patch.object(base_schedule, "save_exception"),
+            patch.object(BaseSchedulerSolver, "record_selection_failure") as failure,
+            patch.object(BaseSchedulerSolver, "record_selection_success") as success,
+        ):
+            solver.agent_arrange_room({}, room, solver.task.plan)
+        failure.assert_called_once_with()
+        success.assert_called_once_with()
+
+    def test_confirm_error_reconciled_as_success_clears_selection_failure(self):
+        solver, room, _ = self.make_solver()
+        solver.tap_confirm.side_effect = RecognizeError(
+            "干员确认点击未生效，返回房间重试"
+        )
+        solver.scene.return_value = Scene.INFRA_MAIN
+        solver.get_agent_from_room.return_value = [{"agent": "但书"}]
+        solver.get_agent_from_room.side_effect = None
+
+        with (
+            patch.object(base_schedule, "save_exception"),
+            patch.object(BaseSchedulerSolver, "record_selection_failure") as failure,
+            patch.object(BaseSchedulerSolver, "record_selection_success") as success,
+        ):
+            solver.agent_arrange_room({}, room, solver.task.plan)
+
+        failure.assert_called_once_with()
+        success.assert_called_once_with()
+        solver.choose_agent.assert_called_once()
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
     def test_agent_arrange_reads_countdown_after_arrangement_verification(self):

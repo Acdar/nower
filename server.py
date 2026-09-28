@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime
+import hmac
 import json
 import mimetypes
 import os
@@ -17,6 +18,7 @@ from zlib import error as ZlibError
 from flask import Flask, abort, g, request, send_file, send_from_directory
 from flask_cors import CORS
 from flask_sock import Sock
+from simple_websocket import ConnectionClosed
 from werkzeug.exceptions import NotFound
 from werkzeug.security import safe_join
 
@@ -64,7 +66,7 @@ mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("image/webp", ".webp")
 
 app = Flask(__name__, static_folder="ui/dist", static_url_path="")
-app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
+app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25, "max_message_size": 64 * 1024}
 sock = Sock(app)
 CORS(app)
 network_settings.start_proxy_sync()
@@ -563,6 +565,45 @@ def require_token(f):
     return decorated_function
 
 
+def require_ai_token(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        expected = getattr(app, "token", "")
+        supplied = request.headers.get("token", "")
+        if not expected or not hmac.compare_digest(supplied, expected):
+            abort(403)
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def _authorize_websocket(ws):
+    """Authenticate before either WebSocket may read data or call local tools."""
+
+    def reject():
+        try:
+            ws.close()
+        except (ConnectionClosed, OSError):
+            pass
+        return False
+
+    expected = getattr(app, "token", "")
+    origin = request.headers.get("Origin", "")
+    if not expected or not origin or not _diagnostic_delete_origin_allowed(origin):
+        return reject()
+    try:
+        first = ws.receive(timeout=5)
+        if not isinstance(first, str) or len(first) > 4096:
+            return reject()
+        payload = json.loads(first)
+        supplied = payload.get("token") if isinstance(payload, dict) else None
+        if not isinstance(supplied, str) or not hmac.compare_digest(supplied, expected):
+            return reject()
+    except (ConnectionClosed, OSError, ValueError, TypeError):
+        return reject()
+    return True
+
+
 @app.before_request
 def serialize_configuration_requests():
     # Export/restore must not interleave with form saves, plan edits or startup.
@@ -571,6 +612,7 @@ def serialize_configuration_requests():
         in {
             "/conf",
             "/plan",
+            "/plan/restore-running",
             "/import",
             "/sss-copilot",
             "/network/settings",
@@ -757,19 +799,13 @@ def load_config():
         data["runtime_platform"] = "android" if is_android_runtime() else __system__
 
         performance = effective_performance_profile(
-            config.conf, config.screenshot_avg, config.screenshot_count
+            config.conf,
+            config.operation_feedback_avg,
+            config.operation_feedback_count,
+            config.operation_feedback_mode,
+            config.operation_feedback_cap,
         )
         data["performance_effective_mode"] = performance.mode
-        if config.conf.performance_mode == "auto":
-            data["low_frame_rate_mode"] = performance.low_frame_rate
-            data["screenshot_interval"] = performance.screenshot_interval
-            data["selection_poll_interval"] = performance.poll_interval
-            data["selection_transition_timeout"] = performance.transition_timeout
-            data["run_order_delay"] = performance.run_order_delay
-            data["run_order_grandet_mode"] = {
-                **data["run_order_grandet_mode"],
-                "buffer_time": performance.grandet_buffer_time,
-            }
         if manager is not None:
             data["maa_weekly_plan_active"] = manager.get_active_plan_key()
         return data
@@ -842,6 +878,32 @@ def load_plan_from_json():
                 config.plan = previous_plan
                 raise
         return {"message": "New plan saved。"}
+
+
+@app.route("/plan/restore-running", methods=["POST"])
+@require_token
+def restore_running_plan():
+    from arknights_mower.__main__ import base_scheduler
+    from arknights_mower.utils.workshop_config import workshop_lock
+
+    if not mower_thread or not mower_thread.is_alive() or base_scheduler is None:
+        return {"error": "Mower 未运行，无法还原运行排班"}, 409
+    source_plan = getattr(base_scheduler, "source_plan", None)
+    if source_plan is None:
+        return {"error": "运行排班尚未就绪"}, 409
+
+    with workshop_lock:
+        previous_plan = config.plan
+        restored = config.PlanModel(**source_plan)
+        # Advanced settings belong to the live configuration, not the schedule snapshot.
+        restored.advanced_settings = previous_plan.advanced_settings
+        config.plan = restored
+        try:
+            config.save_plan()
+        except Exception:
+            config.plan = previous_plan
+            raise
+    return {"message": "已还原为当前运行排班"}
 
 
 @app.route("/operator")
@@ -1156,6 +1218,8 @@ def stop_maa():
 
 @sock.route("/log")
 def log(ws):
+    if not _authorize_websocket(ws):
+        return
     log_stream.serve(ws)
 
 
@@ -1242,6 +1306,33 @@ def diagnostic_error_logs(archive_id):
             end=end,
         )
     }
+
+
+@app.route("/diagnostics/errors/<archive_id>/analyze", methods=["POST"])
+@require_ai_token
+def diagnostic_error_analyze(archive_id):
+    if request.headers.get("X-Mower-Diagnostics") != "1":
+        abort(403)
+    if not _diagnostic_delete_origin_allowed(request.headers.get("Origin")):
+        abort(403)
+    if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
+        abort(404)
+    folder = get_path("@app/screenshot") / "errors" / archive_id
+    try:
+        event = json.loads((folder / "event.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        abort(404)
+    rows = diagnostic_error_logs(archive_id)["logs"]
+    from arknights_mower.agent.schedule_error import analyze_schedule_error
+
+    try:
+        analysis = analyze_schedule_error(event, rows, config.conf.resolved_ai_key)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    except Exception:
+        logger.exception("排班报错 AI 分析失败")
+        return {"error": "模型服务调用失败，请检查接口设置后重试"}, 502
+    return {"analysis": analysis}
 
 
 @app.route("/diagnostics/errors/<archive_id>/export")
@@ -2870,17 +2961,29 @@ def submit_feedback():
 
 @sock.route("/ws/chat")
 def ws_chat(ws):
+    if not _authorize_websocket(ws):
+        return
     context = []
     while True:
-        data = ws.receive()
+        try:
+            data = ws.receive()
+        except (ConnectionClosed, OSError):
+            break
         if not data:
             break
         try:
             req = json.loads(data)
+            if not isinstance(req, dict):
+                ws.send(json.dumps({"error": "消息格式无效"}))
+                continue
             last_reply = None
             if "message" in req:
                 user_input = req["message"]
+                if not isinstance(user_input, str) or len(user_input) > 4000:
+                    ws.send(json.dumps({"error": "消息过长或格式无效"}))
+                    continue
                 context.append({"role": "user", "content": user_input})
+                context = context[-20:]
                 logger.debug(f"收到llm请求：{user_input}")
                 # 用流式生成器
                 from arknights_mower.agent.agent import ask_llm
@@ -2892,9 +2995,14 @@ def ws_chat(ws):
                     last_reply = reply
                 if last_reply:
                     context.append({"role": "assistant", "content": reply})
+        except (ConnectionClosed, OSError):
+            break
         except Exception as e:
             logger.exception(f"WebSocket处理错误：{str(e)}")
-            ws.send(json.dumps({"error": str(e)}))
+            try:
+                ws.send(json.dumps({"error": str(e)}))
+            except (ConnectionClosed, OSError):
+                break
 
 
 app.register_blueprint(mastery_bp)

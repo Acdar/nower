@@ -57,7 +57,7 @@ export const useConfigStore = defineStore('config', () => {
   const reload_room = ref('')
   const run_order_delay = ref(10)
   const low_frame_rate_mode = ref(false)
-  const performance_mode = ref('high')
+  const performance_mode = ref('auto')
   const performance_effective_mode = ref('high')
   const selection_poll_interval = ref(0.1)
   const selection_transition_timeout = ref(2.5)
@@ -130,6 +130,9 @@ export const useConfigStore = defineStore('config', () => {
   const mail_subject = ref('')
   const ai_type = ref('')
   const ai_key = ref('')
+  const ai_custom_key = ref('')
+  const ai_base_url = ref('')
+  const ai_model = ref('')
   const skland_enable = ref(false)
   const skland_info = ref([])
   const recruit_enable = ref(true)
@@ -445,7 +448,7 @@ export const useConfigStore = defineStore('config', () => {
           ? 'medium'
           : 'high'
         : performance_mode.value)
-    const fallbackProfile = performanceProfile(performance_mode.value, runtime_platform.value)
+    const fallbackProfile = performanceProfile('auto', runtime_platform.value)
     low_frame_rate_mode.value =
       response.data.low_frame_rate_mode ?? fallbackProfile.lowFrameRateMode
     selection_poll_interval.value =
@@ -548,7 +551,10 @@ export const useConfigStore = defineStore('config', () => {
     mail_subject.value = response.data.mail_subject
     skland_enable.value = response.data.skland_enable != 0
     ai_key.value = response.data.ai_key
+    ai_custom_key.value = response.data.ai_custom_key || ''
     ai_type.value = response.data.ai_type
+    ai_base_url.value = response.data.ai_base_url || ''
+    ai_model.value = response.data.ai_model || ''
     skland_info.value = response.data.skland_info
     recruit_enable.value = response.data.recruit_enable
     recruitment_permit.value = response.data.recruitment_permit
@@ -669,10 +675,8 @@ export const useConfigStore = defineStore('config', () => {
       custom_smtp_server: custom_smtp_server.value,
       reload_room: reload_room.value.join(','),
       run_order_delay: run_order_delay.value,
-      low_frame_rate_mode:
-        performance_mode.value === 'auto'
-          ? performanceProfile('auto', runtime_platform.value).lowFrameRateMode
-          : low_frame_rate_mode.value,
+      low_frame_rate_mode: performanceProfile(performance_mode.value, runtime_platform.value)
+        .lowFrameRateMode,
       performance_mode: performance_mode.value,
       selection_poll_interval: selection_poll_interval.value,
       selection_transition_timeout: selection_transition_timeout.value,
@@ -727,6 +731,9 @@ export const useConfigStore = defineStore('config', () => {
       skland_enable: skland_enable.value,
       ai_type: ai_type.value,
       ai_key: ai_key.value,
+      ai_custom_key: ai_custom_key.value,
+      ai_base_url: ai_base_url.value,
+      ai_model: ai_model.value,
       skland_info: skland_info.value,
       recruit_enable: recruit_enable.value,
       recruitment_permit: recruitment_permit.value,
@@ -993,6 +1000,9 @@ export const useConfigStore = defineStore('config', () => {
     skland_enable,
     ai_type,
     ai_key,
+    ai_custom_key,
+    ai_base_url,
+    ai_model,
     skland_info,
     run_order_grandet_mode,
     product_switching,

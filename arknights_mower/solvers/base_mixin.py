@@ -2,6 +2,7 @@ import lzma
 import pickle
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import wraps
 from time import perf_counter
 
 import cv2
@@ -17,14 +18,15 @@ from arknights_mower.utils.log import logger
 from arknights_mower.utils.operation_timing import timed_step
 from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
-    default_performance_profile,
     effective_performance_profile,
     is_android_runtime,
+    lower_performance_mode,
 )
 from arknights_mower.utils.resource_pkg import (
     register_resource_reload,
     resource_pkg_path,
 )
+from arknights_mower.utils.scene import Scene
 from arknights_mower.utils.swipe import NOINERTIA_OFFSET
 
 
@@ -51,6 +53,46 @@ class AgentSelectionNotReady(RuntimeError):
     """当前页面不足以继续选人；交由排班原有重试恢复，不结束任务线程。"""
 
 
+def agent_card_selected(img, scope, *, train=False):
+    """读取选人卡片四周的青蓝色选中边框。
+
+    scope 是 operator_list/operator_list_train 返回的姓名框。普通列表卡片
+    比训练室卡片更宽且略高；只取边缘，避开立绘和技能图标。
+    边框不完整时返回 None，让调用方停下重读而非盲点。
+    """
+    if not isinstance(img, np.ndarray) or img.ndim != 3 or scope is None:
+        return None
+    (name_left, name_top), (name_right, name_bottom) = scope
+    if train:
+        left, right = name_left - 19, name_right + 10
+        top, bottom = name_top - 366, name_bottom + 20
+    else:
+        # alexsun 归档普通选人页实测：姓名框 (631,488)-(820,520)，
+        # 蓝框约 (609,113)-(834,536)。
+        left, right = name_left - 22, name_right + 14
+        top, bottom = name_top - 375, name_bottom + 16
+    if left < 0 or top < 0 or right > img.shape[1] or bottom > img.shape[0]:
+        return None
+    frame = cv2.cvtColor(img[top:bottom, left:right], cv2.COLOR_RGB2HSV)
+    blue = cv2.inRange(frame, (96, 140, 160), (105, 255, 255)) > 0
+    # 略过角落；青蓝描边应同时沿上下两条长边出现。
+    upper = blue[:8, 8:-8].mean()
+    lower = blue[-8:, 8:-8].mean()
+    side = max(blue[8:-8, :8].mean(), blue[8:-8, -8:].mean())
+    if upper > 0.45 and lower > 0.45 and side > 0.45:
+        return True
+    # 相邻卡片只隔几像素，前一张的边框可能擦到本卡一条边；
+    # 另一条边仍明显缺失时判为未选中，避免整页校验一直等待。
+    if min(upper, lower) < 0.20 and max(upper, lower) < 0.45:
+        return False
+    return None
+
+
+def train_card_selected(img, scope):
+    """保留训练室调用接口，复用所有选人页的蓝框检测。"""
+    return agent_card_selected(img, scope, train=True)
+
+
 @dataclass
 class AgentPageObservation:
     """相邻操作间的一次性稳定观测，消费后仍须读取新画面复核。"""
@@ -74,6 +116,23 @@ class AgentPageObservation:
         self.page = ()
         self.recognizer = self.image = None
         return page
+
+
+def fixed_selection_profile(function):
+    """Keep AUTO's strategy unchanged during one selection operation."""
+
+    @wraps(function)
+    def wrapped(self, *args, **kwargs):
+        previous = getattr(self, "_selection_profile_snapshot", None)
+        if previous is None:
+            self._selection_profile_snapshot = self.performance_profile
+        try:
+            return function(self, *args, **kwargs)
+        finally:
+            if previous is None:
+                del self._selection_profile_snapshot
+
+    return wrapped
 
 
 # #85：排序列→x 坐标单一来源（detect_arrange_order / switch_arrange_order 共用；
@@ -151,26 +210,82 @@ def _resolve_operator_room_prefix(
 class BaseMixin:
     @property
     def performance_profile(self):
+        snapshot = getattr(self, "_selection_profile_snapshot", None)
+        if snapshot is not None:
+            return snapshot
         profile = effective_performance_profile(
             config.conf,
-            config.screenshot_avg,
-            config.screenshot_count,
+            config.operation_feedback_avg,
+            config.operation_feedback_count,
+            config.operation_feedback_mode,
+            config.operation_feedback_cap,
         )
-        # Compatibility for integrations that still change only the former
-        # boolean. In AUTO, only a deviation from the platform baseline is an
-        # explicit legacy override; the baseline itself remains adaptive.
-        if not is_android_runtime() and config.conf.performance_mode == "auto":
-            legacy_enabled = config.conf.low_frame_rate_mode
-            if legacy_enabled != default_performance_profile().low_frame_rate:
-                return PERFORMANCE_PRESETS["medium" if legacy_enabled else "high"]
-        elif (
+        if config.conf.performance_mode == "auto":
+            config.operation_feedback_mode = profile.mode
+        # 未设置档位的旧调用方仍可通过布尔值控制策略；明确选择档位后
+        # 布尔兼容字段不再覆盖所选策略，也不改变用户的时间参数。
+        if (
             not is_android_runtime()
             and config.conf.performance_mode in PERFORMANCE_PRESETS
+            and "performance_mode" not in config.conf.model_fields_set
         ):
             legacy_enabled = config.conf.low_frame_rate_mode
             if legacy_enabled != profile.low_frame_rate:
-                return PERFORMANCE_PRESETS["medium" if legacy_enabled else "high"]
+                from dataclasses import replace
+
+                return replace(
+                    profile,
+                    mode="medium" if legacy_enabled else "high",
+                    low_frame_rate=legacy_enabled,
+                )
         return profile
+
+    @staticmethod
+    def record_operation_feedback(extra_observations):
+        """Track how many additional frames an input needed before feedback."""
+        sample = min(max(extra_observations, 0), 3)
+        previous = config.operation_feedback_avg
+        config.operation_feedback_avg = (
+            sample if previous is None else previous * 0.75 + sample * 0.25
+        )
+        config.operation_feedback_count += 1
+
+    @staticmethod
+    def record_selection_failure():
+        """Downgrade AUTO after repeated selection failures, not unrelated errors."""
+        if getattr(config.conf, "performance_mode", None) != "auto":
+            return
+        config.operation_failure_streak += 1
+        config.operation_recovery_successes = 0
+        if config.operation_failure_streak < 2:
+            return
+        current = (
+            config.operation_feedback_mode
+            or effective_performance_profile(
+                config.conf,
+                config.operation_feedback_avg,
+                config.operation_feedback_count,
+                mode_cap=config.operation_feedback_cap,
+            ).mode
+        )
+        lowered = lower_performance_mode(current)
+        config.operation_feedback_cap = lowered
+        config.operation_feedback_mode = lowered
+        config.operation_failure_streak = 0
+        logger.warning(f"选人连续失败，自动性能档位降至 {lowered}")
+
+    @staticmethod
+    def record_selection_success():
+        """Lift a failure downgrade after three completed selection workflows."""
+        if getattr(config.conf, "performance_mode", None) != "auto":
+            return
+        config.operation_failure_streak = 0
+        if config.operation_feedback_cap is None:
+            return
+        config.operation_recovery_successes += 1
+        if config.operation_recovery_successes >= 3:
+            config.operation_feedback_cap = None
+            config.operation_recovery_successes = 0
 
     @property
     def low_frame_rate_mode(self):
@@ -183,7 +298,9 @@ class BaseMixin:
     def selection_observation_timing(self):
         profile = self.performance_profile
         attempts = (
-            6 if profile.mode in {"high", "medium"} else profile.transition_attempts
+            6
+            if not profile.low_frame_rate
+            else max(profile.stable_page_matches + 1, profile.transition_attempts)
         )
         return profile.poll_interval, attempts
 
@@ -228,11 +345,38 @@ class BaseMixin:
         name_y = 60
         x = self._arrange_order_x(current_room)[name]
         if not self.low_frame_rate_mode:
-            # 普通设备保留点击后单帧检查，不增加第二帧的固定等待。
-            for _ in range(6):
-                self.tap((x, name_y), interval=0.5)
-                if self.detect_arrange_order(current_room) == (name, ascending):
-                    return
+            # 快速档在反馈未到时继续读帧，不盲目重复点击同一个排序按钮。
+            poll_interval, max_attempts = self.selection_transition_timing()
+            before = self.detect_arrange_order(current_room)
+            capture_time = 0
+            for attempt in range(max_attempts):
+                if before is not None:
+                    break
+                self.wait_for_next_observation(capture_time, poll_interval)
+                started = perf_counter()
+                before = self.detect_arrange_order(current_room)
+                capture_time = perf_counter() - started
+            if before is None:
+                raise AgentSelectionNotReady("无法读取干员排序状态，返回房间重试")
+            for _ in range(2):
+                self.tap((x, name_y), interval=0.1)
+                capture_time = 0
+                for attempt in range(max_attempts):
+                    if attempt:
+                        self.wait_for_next_observation(capture_time, poll_interval)
+                    started = perf_counter()
+                    actual = self.detect_arrange_order(current_room)
+                    capture_time = perf_counter() - started
+                    if actual is not None and actual != before:
+                        self.record_operation_feedback(attempt)
+                        if actual == (name, ascending):
+                            return
+                        before = actual
+                        break
+                else:
+                    raise AgentSelectionNotReady(
+                        "干员排序点击后尚未确认画面变化，返回房间重试"
+                    )
             raise AgentSelectionNotReady("干员排序未到达目标状态，返回房间重试")
         before = None
         capture_time = 0
@@ -255,6 +399,7 @@ class BaseMixin:
             self.tap((x, name_y), interval=0.5)
             previous = None
             capture_time = 0
+            first_change_attempt = None
             for attempt in range(max_attempts):
                 if attempt:
                     self.wait_for_next_observation(capture_time, poll_interval)
@@ -265,7 +410,11 @@ class BaseMixin:
                 logger.debug(
                     f"排序复核：点击前{before}，当前{actual}，目标{(name, ascending)}"
                 )
+                if actual is not None and actual != before:
+                    if first_change_attempt is None:
+                        first_change_attempt = attempt
                 if actual is not None and actual != before and actual == previous:
+                    self.record_operation_feedback(first_change_attempt)
                     break
                 previous = actual
             else:
@@ -303,22 +452,28 @@ class BaseMixin:
         return True
 
     @staticmethod
-    def agent_page_reader(*, full_scan=True, train=False):
-        """同一次等待内，名字区域像素完全相同则复用模板匹配结果。"""
-        previous_key = None
-        previous_ret = None
+    def agent_page_reader(
+        *, full_scan=True, train=False, seed_image=None, seed_page=None
+    ):
+        """名字区域未变化时复用已确认页面的姓名匹配结果。"""
 
-        def read(img):
-            nonlocal previous_key, previous_ret
-            key = None
+        def name_key(img):
             if isinstance(img, np.ndarray):
                 left, right = (
                     (545, 1920) if train else (600, 1920 if full_scan else 1860)
                 )
                 rows = ((479, 506), (895, 922)) if train else ((488, 520), (909, 941))
-                key = tuple(img[y1:y2, left:right].tobytes() for y1, y2 in rows)
+                return tuple(img[y1:y2, left:right].tobytes() for y1, y2 in rows)
+            return None
+
+        previous_key = name_key(seed_image) if seed_page is not None else None
+        previous_ret = seed_page
+
+        def read(img):
+            nonlocal previous_key, previous_ret
+            key = name_key(img)
             if key is not None and key == previous_key:
-                logger.debug("选人名字区域未变化，复用本次等待中的识别结果")
+                logger.debug("选人名字区域未变化，复用已确认的识别结果")
                 return previous_ret
             started = perf_counter()
             ret = (
@@ -359,13 +514,21 @@ class BaseMixin:
         attempts 只在明确知道画面变化幅度的场景（如翻页后的停稳确认）
         才调小，默认仍保留完整的 6 次预算。
         """
-        read = self.agent_page_reader(full_scan=full_scan, train=train)
+        seed_image = observation.image if observation is not None else None
         previous = (
             observation.consume(self.recog, full_scan=full_scan, train=train)
             if observation is not None
             else None
         )
+        read = self.agent_page_reader(
+            full_scan=full_scan,
+            train=train,
+            seed_image=seed_image,
+            seed_page=previous,
+        )
         stable = False
+        stable_matches = 0
+        first_changed_attempt = None
         ret = []
         capture_time = 0
         poll_interval, max_attempts = self.selection_observation_timing()
@@ -383,6 +546,8 @@ class BaseMixin:
             if connecting:
                 previous = None
                 stable = False
+                stable_matches = 0
+                first_changed_attempt = None
                 continue
             try:
                 ret = read(self.recog.img)
@@ -392,14 +557,32 @@ class BaseMixin:
                 logger.debug(f"翻页名单读取失败，原地复核：{e}")
                 previous = None
                 stable = False
+                stable_matches = 0
                 continue
+            if (
+                before is not None
+                and ret
+                and first_changed_attempt is None
+                and not self.same_agent_page(ret, before, allow_unknown=True)
+            ):
+                first_changed_attempt = attempt
             # 搜索时允许无关卡片识别为空；仍须整页位置稳定，且只点击识别出的目标。
             # 最终名单校验继续拒绝空名字。
-            stable = self.same_agent_page(ret, previous, allow_unknown=True)
+            if self.same_agent_page(ret, previous, allow_unknown=True):
+                stable_matches += 1
+            else:
+                stable_matches = 0
+            stable = stable_matches >= self.performance_profile.stable_page_matches
             if stable and (
                 before is None
                 or not self.same_agent_page(ret, before, allow_unknown=True)
             ):
+                if before is not None:
+                    self.record_operation_feedback(
+                        first_changed_attempt
+                        if first_changed_attempt is not None
+                        else attempt
+                    )
                 logger.debug(f"确认当前干员页：{ret}")
                 return ret
             previous = ret
@@ -464,6 +647,7 @@ class BaseMixin:
         full_scan=True,
         train=False,
         observation=None,
+        respect_train_selection=False,
     ):
         if not self.low_frame_rate_mode:
             return self._scan_agent_fast(
@@ -472,7 +656,7 @@ class BaseMixin:
                 max_agent_count,
                 full_scan,
                 train,
-                observation,
+                respect_train_selection,
             )
         # 无目标时仍返回已复核的页面供调用方判断，但不进行点击。
         ret = self.wait_for_agent_page(
@@ -484,7 +668,18 @@ class BaseMixin:
             if target is None:
                 return select_name, ret
             name, scope = target
-            self.tap(scope, interval=0.2)
+            selected = (
+                agent_card_selected(self.recog.img, scope, train=train)
+                if isinstance(self.recog.img, np.ndarray)
+                or (respect_train_selection and train)
+                else False
+            )
+            if selected is None:
+                raise AgentSelectionNotReady("干员选中边框不清晰，返回房间重试")
+            if not selected:
+                self.tap(scope, interval=0.2)
+            else:
+                logger.debug(f"干员 {name} 已有蓝框，跳过再次点击")
             select_name.append(name)
             agent.remove(name)
             if not agent or (
@@ -495,38 +690,52 @@ class BaseMixin:
             ret = self.wait_for_agent_page(full_scan=full_scan, train=train)
 
     def _scan_agent_fast(
-        self, agent, error_count, max_agent_count, full_scan, train, observation=None
+        self,
+        agent,
+        error_count,
+        max_agent_count,
+        full_scan,
+        train,
+        respect_train_selection=False,
     ):
         """普通设备沿用单帧批量选人及缩小扫描区域的识别重试。"""
-        if observation is not None:
-            # 刚翻页：点击坐标必须取自停稳后的画面。翻页时列表可能仍在
-            # 滑行、末页被边界夹住时还会回弹，沿用旧帧就会点到拖动中的
-            # 位置，因此这里不再退回单帧点击，读不到稳定页时交给外层重试。
-            ret = self.wait_for_agent_page(
-                full_scan=full_scan, train=train, observation=observation
+        try:
+            self.recog.update()
+            while self.find("connecting"):
+                self.sleep()
+            ret = (
+                operator_list_train(self.recog.img)
+                if train
+                else operator_list(self.recog.img, full_scan=full_scan)
             )
-        else:
-            try:
-                self.recog.update()
-                while self.find("connecting"):
-                    self.sleep()
-                ret = (
-                    operator_list_train(self.recog.img)
-                    if train
-                    else operator_list(self.recog.img, full_scan=full_scan)
-                )
-            except MowerExit:
+        except MowerExit:
+            raise
+        except Exception:
+            if error_count >= 2:
                 raise
-            except Exception:
-                if error_count >= 2:
-                    raise
-                return self._scan_agent_fast(
-                    agent, error_count + 1, max_agent_count, False, train
-                )
+            return self._scan_agent_fast(
+                agent,
+                error_count + 1,
+                max_agent_count,
+                False,
+                train,
+                respect_train_selection,
+            )
         selected = []
         for name, scope in ret:
             if name and name in agent:
-                self.tap(scope, interval=0)
+                is_selected = (
+                    agent_card_selected(self.recog.img, scope, train=train)
+                    if isinstance(self.recog.img, np.ndarray)
+                    or (respect_train_selection and train)
+                    else False
+                )
+                if is_selected is None:
+                    raise AgentSelectionNotReady("干员选中边框不清晰，返回房间重试")
+                if not is_selected:
+                    self.tap(scope, interval=0)
+                else:
+                    logger.debug(f"干员 {name} 已有蓝框，跳过再次点击")
                 selected.append(name)
                 agent.remove(name)
                 if max_agent_count != -1 and len(selected) >= max_agent_count:
@@ -538,6 +747,7 @@ class BaseMixin:
         self, agent, *, ordered=True, full_scan=True, train=False, observation=None
     ):
         """校验当前名单；低帧率适配还要求连续两帧的位置和名字一致。"""
+        seed_image = observation.image if observation is not None else None
         page = (
             observation.consume(self.recog, full_scan=full_scan, train=train)
             if observation is not None
@@ -545,9 +755,15 @@ class BaseMixin:
         )
         if not agent:
             return []
-        read = self.agent_page_reader(full_scan=full_scan, train=train)
+        read = self.agent_page_reader(
+            full_scan=full_scan,
+            train=train,
+            seed_image=seed_image,
+            seed_page=page,
+        )
         previous = page[: len(agent)] if page else None
         stable = False
+        stable_matches = 0
         actual = []
         capture_time = 0
         poll_interval, max_attempts = self.selection_observation_timing()
@@ -562,6 +778,7 @@ class BaseMixin:
             if connecting:
                 previous = None
                 stable = False
+                stable_matches = 0
                 continue
             try:
                 ret = read(self.recog.img)
@@ -571,6 +788,7 @@ class BaseMixin:
                 logger.debug(f"选人名单读取失败，等待下一帧：{e}")
                 previous = None
                 stable = False
+                stable_matches = 0
                 continue
             if not train and ret and ret[0][1] is not None and ret[0][1][0][0] > 650:
                 logger.debug(
@@ -578,14 +796,36 @@ class BaseMixin:
                 )
                 previous = None
                 stable = False
+                stable_matches = 0
                 actual = []
                 continue
-            selected = ret[: len(agent)]
+            if train or isinstance(self.recog.img, np.ndarray):
+                # 排序或筛选变化后，前几张卡并不一定都已选；重排前先读蓝框。
+                states = [
+                    (
+                        name,
+                        scope,
+                        agent_card_selected(self.recog.img, scope, train=train),
+                    )
+                    for name, scope in ret
+                ]
+                if any(state is None for _, _, state in states):
+                    previous = None
+                    stable = False
+                    stable_matches = 0
+                    continue
+                selected = [(name, scope) for name, scope, state in states if state]
+            else:
+                selected = ret[: len(agent)]
             actual = [name for name, _ in selected]
             logger.debug(f"选人校验第{attempt + 1}次读取：{actual}")
-            stable = len(actual) == len(agent) and self.same_agent_page(
+            if len(actual) == len(agent) and self.same_agent_page(
                 selected, previous if self.low_frame_rate_mode else selected
-            )
+            ):
+                stable_matches += 1
+            else:
+                stable_matches = 0
+            stable = stable_matches >= self.performance_profile.stable_page_matches
             matches = actual == agent if ordered else sorted(actual) == sorted(agent)
             if matches and stable:
                 return actual
@@ -609,11 +849,17 @@ class BaseMixin:
         full_scan=True,
         train=False,
         observation=None,
+        ordered=True,
     ):
         try:
+            options = {} if ordered else {"ordered": False}
             return (
                 self.wait_for_arranged_agents(
-                    agent, full_scan=full_scan, train=train, observation=observation
+                    agent,
+                    full_scan=full_scan,
+                    train=train,
+                    observation=observation,
+                    **options,
                 )
                 is not None
             )
@@ -631,6 +877,7 @@ class BaseMixin:
                     max_agent_count,
                     full_scan=False,
                     train=train,
+                    ordered=ordered,
                 )
             else:
                 logger.exception(e)
@@ -640,10 +887,8 @@ class BaseMixin:
     def swipe_left(
         self, right_swipe, special_filter, *, train=False, return_page=False
     ):
-        if not self.low_frame_rate_mode and right_swipe <= 3:
-            # 未翻页时不触发筛选/截图；普通设备保留短距离返回路径。
-            for _ in range(2 if right_swipe == 3 else right_swipe):
-                self.swipe_noinertia((650, 540), (2500, 0))
+        if not self.low_frame_rate_mode and right_swipe == 0:
+            # 没有翻页时无需复位；翻页后用职业筛选确保回到首列。
             return (0, None) if return_page else 0
         # 保留旧接口供选人调用；实际通过切换职业筛选复位，不再反向拖动。
         # 即使计数为零也要真正切换，重复点击当前筛选不能证明列表已归零。
@@ -730,6 +975,7 @@ class BaseMixin:
             if attempt:
                 self.sleep(poll_interval)
             if self.get_color(position)[2] >= 240:
+                self.record_operation_feedback(attempt)
                 return
         raise AgentSelectionNotReady("职业筛选尚未生效，返回房间重试")
 
@@ -771,13 +1017,19 @@ class BaseMixin:
             "加工站": 32,
         }
         img = cropimg(self.recog.img, ((568, 18), (957, 95)))
-        hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        # 只读取标题栏左侧的设施图标。整条标题栏会透出房间背景，
+        # 加工站的暖色装饰曾被当成制造站的黄色。
+        hsv = cv2.cvtColor(img[2:74, 2:74], cv2.COLOR_RGB2HSV)
         colored_room = None
-        for room, color in color_map.items():
-            mask = cv2.inRange(hsv, (color - 1, 0, 0), (color + 2, 255, 255))
-            if cv2.countNonZero(mask) > 1000:
-                colored_room = room
-                break
+        color_scores = {
+            room: cv2.countNonZero(
+                cv2.inRange(hsv, (color - 1, 80, 90), (color + 2, 255, 255))
+            )
+            for room, color in color_map.items()
+        }
+        best_room = max(color_scores, key=color_scores.get)
+        if color_scores[best_room] > 150:
+            colored_room = best_room
         if colored_room in ["制造站", "贸易站", "发电站"]:
             digit_1 = cropimg(img, ((211, 24), (232, 54)))
             digit_2 = cropimg(img, ((253, 24), (274, 54)))
@@ -800,6 +1052,8 @@ class BaseMixin:
             result = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
             min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
             score.append(max_val)
+        if max(score) < 0.78:
+            return ""
         room = white_room[score.index(max(score))]
         if room == "central":
             logger.debug("控制中枢")
@@ -897,7 +1151,16 @@ class BaseMixin:
                 elif self.detect_room() == room:
                     return
                 else:
-                    self.sleep()
+                    # 上一个房间的返回键可能没有生效。确认仍在房间页时，
+                    # 先回基建地图；只等待会在错误房间里耗尽全部进房次数。
+                    if self.scene() in (
+                        Scene.INFRA_DETAILS,
+                        Scene.CTRLCENTER_ASSISTANT,
+                    ):
+                        logger.info("仍在其他房间，返回基建地图后进入 %s", room)
+                        self.back_to_infrastructure()
+                    else:
+                        self.sleep()
             # 最后一次点击也可能成功，检查其刷新后的画面再决定是否重试。
             if (
                 not self.find("connecting")
