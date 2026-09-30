@@ -53,6 +53,14 @@ class AgentSelectionNotReady(RuntimeError):
     """当前页面不足以继续选人；交由排班原有重试恢复，不结束任务线程。"""
 
 
+# 选中描边实测约 7px 厚且贯通整条边；上方/下方相邻卡片擦进裁切框的边框只有
+# 1~3 行，卡片自带的青色技能图标只覆盖长边的一小段宽度。按厚度过滤后，
+# 只有真正的选中描边能让整条边都达到该厚度。
+CARD_FRAME_MIN_THICKNESS = 4
+# 选中描边应覆盖整条边：实机选中卡为 1.0，图标/相邻卡边框最多 0.273。
+CARD_FRAME_EDGE_COVERAGE = 0.6
+
+
 def agent_card_selected(img, scope, *, train=False):
     """读取选人卡片四周的青蓝色选中边框。
 
@@ -75,15 +83,22 @@ def agent_card_selected(img, scope, *, train=False):
         return None
     frame = cv2.cvtColor(img[top:bottom, left:right], cv2.COLOR_RGB2HSV)
     blue = cv2.inRange(frame, (96, 140, 160), (105, 255, 255)) > 0
-    # 略过角落；青蓝描边应同时沿上下两条长边出现。
-    upper = blue[:8, 8:-8].mean()
-    lower = blue[-8:, 8:-8].mean()
-    side = max(blue[8:-8, :8].mean(), blue[8:-8, -8:].mean())
-    if upper > 0.45 and lower > 0.45 and side > 0.45:
+    # 略过角落；按列/行统计「连续够厚」的青蓝覆盖比例，而不是边缘区域的平均
+    # 像素：均值会把相邻卡片的边框、卡片右下等处的零星青蓝也算进来。
+    upper = (blue[:8, 8:-8].sum(axis=0) >= CARD_FRAME_MIN_THICKNESS).mean()
+    lower = (blue[-8:, 8:-8].sum(axis=0) >= CARD_FRAME_MIN_THICKNESS).mean()
+    side = max(
+        (blue[8:-8, :8].sum(axis=1) >= CARD_FRAME_MIN_THICKNESS).mean(),
+        (blue[8:-8, -8:].sum(axis=1) >= CARD_FRAME_MIN_THICKNESS).mean(),
+    )
+    if min(upper, lower, side) > CARD_FRAME_EDGE_COVERAGE:
         return True
-    # 相邻卡片只隔几像素，前一张的边框可能擦到本卡一条边；
-    # 另一条边仍明显缺失时判为未选中，避免整页校验一直等待。
-    if min(upper, lower) < 0.20 and max(upper, lower) < 0.45:
+    # 上下长边只要有一条不成形，蓝色就不是本卡的选中框：相邻卡片的边框只能
+    # 擦到最外侧几行、卡片自带图标只能覆盖一小段宽度都凑不出厚描边。判为未
+    # 选中，避免整页校验的每一帧都被当成「判定不明确」丢弃。
+    # 注意左右侧带会被左右相邻卡片的竖边框污染，所以只参与上面的确认，
+    # 不能用来反推未选中。
+    if min(upper, lower) < CARD_FRAME_EDGE_COVERAGE:
         return False
     return None
 
@@ -765,6 +780,7 @@ class BaseMixin:
         stable = False
         stable_matches = 0
         actual = []
+        ambiguous_frames = 0
         capture_time = 0
         poll_interval, max_attempts = self.selection_observation_timing()
         for attempt in range(max_attempts):
@@ -810,6 +826,11 @@ class BaseMixin:
                     for name, scope in ret
                 ]
                 if any(state is None for _, _, state in states):
+                    ambiguous_frames += 1
+                    logger.debug(
+                        "选人蓝框判定不明确，丢弃本帧："
+                        f"{[name for name, _, state in states if state is None]}"
+                    )
                     previous = None
                     stable = False
                     stable_matches = 0
@@ -835,9 +856,16 @@ class BaseMixin:
         if stable:
             logger.warning(f"干员名单已稳定但不符合预期：预期{agent}，实际{actual}")
             return None
+        # actual 仍是最后一次可用的读取；帧被丢弃时要说清是「没读到可用帧」，
+        # 否则空列表会被误读成「页面上确实没有已选干员」。
+        discarded = (
+            f"（{ambiguous_frames} 帧因蓝框判定不明确被丢弃，未得到可用读取）"
+            if ambiguous_frames
+            else ""
+        )
         raise AgentSelectionNotReady(
             f"干员名单或位置仍在变化、左侧裁切或识别不全，返回房间重试："
-            f"预期{agent}，最后读取{actual}"
+            f"预期{agent}，最后读取{actual}{discarded}"
         )
 
     def verify_agent(

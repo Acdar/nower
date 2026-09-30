@@ -167,3 +167,46 @@ def test_unselected_card_below_blue_frame_is_not_ambiguous():
     lower_scope = ((631, 909), (820, 941))
     assert agent_card_selected(frame, NORMAL_SCOPE) is True
     assert agent_card_selected(frame, lower_scope) is False
+
+
+def test_unselected_card_above_blue_frame_with_top_icon_is_not_ambiguous():
+    """上方未选卡下沿擦到下方蓝框、上沿又命中自带青色图标时仍判未选中。
+
+    实机复现：裁切框与下方卡片重叠 2px（bottom8 行有 2 行全蓝），卡片右上的
+    青色技能图标（H≈96，贴 inRange 边界）落在 top8 行内，两条长边都不满足
+    「另一条边明显缺失」时旧判定返回 None，整帧被静默丢弃。
+    """
+    frame = normal_card_frame(False)
+    cv2.rectangle(frame, (609, 534), (830, 953), (0, 180, 230), 7)
+    cv2.rectangle(frame, (760, 113), (817, 120), (12, 146, 183), -1)
+    assert agent_card_selected(frame, NORMAL_SCOPE) is False
+
+
+def test_unselected_card_beside_and_above_blue_frames_is_not_ambiguous():
+    """左右相邻卡的竖边框会污染侧带，侧带不能用来反推未选中。"""
+    frame = normal_card_frame(False)
+    # 右侧卡片选中：它的左边框落进本卡裁切框的右侧带
+    cv2.rectangle(frame, (825, 113), (1050, 532), (0, 180, 230), 7)
+    # 下方卡片选中：它的上边框擦到本卡裁切框最外侧两行
+    cv2.rectangle(frame, (609, 534), (830, 953), (0, 180, 230), 7)
+    # 本卡右上的青色技能图标
+    cv2.rectangle(frame, (760, 113), (817, 120), (12, 146, 183), -1)
+    assert agent_card_selected(frame, NORMAL_SCOPE) is False
+
+
+def test_all_ambiguous_frames_report_discard_reason(monkeypatch):
+    """所有帧都被丢弃时，报错要说明未得到可用读取，而不是「读取到空名单」。"""
+    monkeypatch.setattr(config.conf, "low_frame_rate_mode", False)
+    page = (
+        ("褐果", NORMAL_SCOPE),
+        ("凯尔希", ((631, 909), (820, 941))),
+    )
+    solver = BaseMixin()
+    solver.recog = SimpleNamespace(img=normal_card_frame(False), update=MagicMock())
+    solver.find = MagicMock(return_value=False)
+    solver.sleep = MagicMock()
+    monkeypatch.setattr(base_mixin, "operator_list", lambda img, **kwargs: page)
+    monkeypatch.setattr(base_mixin, "agent_card_selected", lambda *args, **kwargs: None)
+
+    with pytest.raises(AgentSelectionNotReady, match="蓝框判定不明确被丢弃"):
+        solver.wait_for_arranged_agents(["褐果"])
