@@ -31,9 +31,7 @@ class RestingTier(IntEnum):
 
 
 def _replacement_tier(op_data, name):
-    if getattr(op_data, "experimental_dorm_logic", False) and name in getattr(
-        op_data.config, "resting_priority_replacement", ()
-    ):
+    if name in getattr(op_data.config, "resting_priority_replacement", ()):
         return RestingTier.PRIORITY_REPLACEMENT
     return RestingTier.REPLACEMENT
 
@@ -42,6 +40,17 @@ def resting_tier(op_data, name):
     op = op_data.operators.get(name)
     if name in op_data.config.free_blacklist or (op is not None and op.workaholic):
         return RestingTier.EXCLUDED
+    if (
+        (
+            getattr(op_data, "rescue_mode", False)
+            or getattr(op_data, "rescue_plan_active", False)
+        )
+        and name in getattr(op_data, "main_rescue_priority", ())
+        and op is not None
+        and not getattr(op, "temporary_dorm_fill", False)
+        and (not has_resting_mood(op) or resting_mood(op) < op.upper_limit)
+    ):
+        return RestingTier.PRIORITY
     if name in op_data.config.ope_resting_priority:
         return RestingTier.PRIORITY
     if op is not None:
@@ -50,10 +59,8 @@ def resting_tier(op_data, name):
         ):
             return _replacement_tier(op_data, name)
         if op.is_high():
-            if (
-                getattr(op_data, "experimental_dorm_logic", False)
-                and op.resting_priority == "standby"
-                and getattr(op, "standby_low_priority", False)
+            if (op.resting_priority == "standby") and getattr(
+                op, "standby_low_priority", False
             ):
                 return RestingTier.LOW_MAIN
             return {
@@ -92,9 +99,8 @@ def resting_mood(op, now=None):
 def resting_key(op_data, name, now=None):
     op = op_data.operators.get(name)
     mood = resting_mood(op, now)
-    if op_data.experimental_dorm_logic:
-        # 同级按尚需恢复的心情点数降序；恢复速度不按个人上下限成比例。
-        mood -= op.upper_limit if op is not None else 24
+    # 同级按尚需恢复的心情点数降序；恢复速度不按个人上下限成比例。
+    mood -= op.upper_limit if op is not None else 24
     return resting_tier(op_data, name), mood
 
 

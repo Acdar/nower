@@ -24,7 +24,6 @@ def dorm_solver(monkeypatch):
     config.conf.book_operators = []
     config.conf.workshop_manual_backup = None
     config.conf.enable_mastery = False
-    config.conf.experimental_dorm_logic = True
     solver = object.__new__(BaseSchedulerSolver)
     solver.global_plan = {
         "default_plan": Plan(
@@ -35,7 +34,7 @@ def dorm_solver(monkeypatch):
                     for name in ["塑心", "冰酿", "Free", "Free", "Free"]
                 ],
             },
-            PlanConfig("", "", "", experimental_dorm_logic=True),
+            PlanConfig("", "", ""),
         ),
         "backup_plans": [],
     }
@@ -107,7 +106,7 @@ def test_vacancy_fill_allocates_last_free_slot_to_regular_replacement_first(
     dorm_solver.total_agent = [crafter, replacement]
     dorm_solver.resting()
     assert next(d for d in dorm_solver.op_data.dorm if d.position[1] == 3).name == ""
-    assert dorm_solver._fill_empty_dorms()
+    assert dorm_solver._fill_empty_dorms(primary_planned=True)
     assert len(dorm_solver.tasks) == 1
     assert dorm_solver.tasks[0].type == TaskTypes.FILL_DORM
     assert dorm_solver.tasks[0].plan["dormitory_1"][3] == "红"
@@ -123,7 +122,7 @@ def test_crafter_uses_spare_slot_when_replacements_are_full(dorm_solver, free_ro
     dorm_solver.op_data.operators["陈"].mood = 24
     dorm_solver.total_agent = [crafter, replacement]
     dorm_solver.resting()
-    assert dorm_solver._fill_empty_dorms()
+    assert dorm_solver._fill_empty_dorms(primary_planned=True)
     assert len(dorm_solver.tasks) == 1
     assert dorm_solver.tasks[0].type == TaskTypes.FILL_DORM
     assert dorm_solver.tasks[0].plan["dormitory_1"][3] == "空爆"

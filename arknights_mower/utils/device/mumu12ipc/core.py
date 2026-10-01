@@ -3,7 +3,6 @@
 # It only binds to the public C API exposed by external_renderer_ipc.dll.
 
 import ctypes
-import functools
 import json
 import os
 import subprocess
@@ -14,76 +13,79 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from arknights_mower.utils import config
-from arknights_mower.utils.csleep import MowerExit
+from arknights_mower.utils.device.mumu12ipc.paths import resolve_mumu_paths
 from arknights_mower.utils.log import logger
-from arknights_mower.utils.simulator import restart_simulator
-
-
-def retry_wrapper(max_retries: int = 3, delay: float = 0.5):
-    """
-    通用重试装饰器（适配 @retry_wrapper(3) 用法）
-    - 捕获异常 -> 重置连接状态 -> 尝试重启模拟器 -> 睡眠 -> 重试
-    - 命中 MowerExit 直接向上抛出，避免吞掉退出信号
-    """
-
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
-            last_exc = None
-            for attempt in range(1, max_retries + 1):
-                try:
-                    return func(self, *args, **kwargs)
-                except MowerExit:
-                    raise
-                except RuntimeError as e:
-                    last_exc = e
-                    logger.info(
-                        f"{func.__name__} runtime error (attempt {attempt}/{max_retries}): {e}"
-                    )
-                    try:
-                        # 若有该方法则调用
-                        if hasattr(self, "device") and hasattr(
-                            self.device, "check_current_focus"
-                        ):
-                            self.device.check_current_focus()
-                    except Exception as inner:
-                        logger.info(f"check_current_focus failed: {inner}")
-                except Exception as e:
-                    last_exc = e
-                    logger.info(
-                        f"{func.__name__} failed (attempt {attempt}/{max_retries}): {e}"
-                    )
-                    # 瞬时错误：重置 IPC 状态 + 重连，不杀游戏/不重启模拟器
-                    try:
-                        if hasattr(self, "_conn"):
-                            self._conn = 0
-                        if hasattr(self, "_display_id"):
-                            self._display_id = -1
-                        if hasattr(self, "device") and hasattr(
-                            self.device, "reconnect"
-                        ):
-                            self.device.reconnect()
-                    except Exception as inner:
-                        logger.error(f"reconnect failed: {inner}")
-                time.sleep(delay)
-            # 重试耗尽且设备无法连接时自动重启模拟器，再试最后一次
-            if last_exc is not None:
-                logger.warning(
-                    f"{func.__name__} 重试 {max_retries} 次仍失败，判定设备无法连接，自动重启模拟器"
-                )
-                restart_simulator()
-                if hasattr(self, "device") and hasattr(self.device, "reconnect"):
-                    self.device.reconnect()
-                return func(self, *args, **kwargs)
-            raise RuntimeError(f"{func.__name__} failed after {max_retries} retries")
-
-        return wrapper
-
-    return decorator
+from arknights_mower.utils.update_runtime import hidden_console_options
 
 
 class MuMuIpcError(RuntimeError):
-    pass
+    def __init__(self, message, *, return_code=None, actual_size=None):
+        self.return_code = return_code
+        self.actual_size = actual_size
+        super().__init__(message)
+
+
+def bind_display(dll, connection: int, package: str = "") -> int:
+    """Return this instance's render display; a package binding is a fallback.
+
+    The renderer resolves a display per package, so binding the game package
+    failed with -1 whenever that app was not rendering, even while the emulator
+    displayed fine. The instance's own display is 0 and serves both capture and
+    input, so the emulator alone keeps the IPC channel usable.
+    """
+    whole = dll.nemu_get_display_id(connection, b"", 0)
+    if whole >= 0:
+        return whole
+    bound = -1
+    if package:
+        bound = dll.nemu_get_display_id(connection, package.encode("utf-8"), 0)
+        if bound >= 0:
+            return bound
+    raise MuMuIpcError(
+        f"MuMu IPC 获取 Display ID 失败：实例显示 {whole}，游戏包 {bound}；"
+        "请确认实例已启动并完成渲染后重试。",
+        return_code=whole,
+    )
+
+
+def capture_native_frame(dll, connection, display_id, buffer) -> np.ndarray:
+    """Capture one native RGBA frame and preserve failure diagnostics."""
+    width = ctypes.c_int(0)
+    height = ctypes.c_int(0)
+    result = dll.nemu_capture_display(
+        connection,
+        display_id,
+        len(buffer),
+        ctypes.byref(width),
+        ctypes.byref(height),
+        buffer,
+    )
+    actual_size = (width.value, height.value)
+    if result != 0:
+        raise MuMuIpcError(
+            f"MuMu IPC 截图失败：原生返回码 {result}，实际尺寸 "
+            f"{width.value}×{height.value}",
+            return_code=result,
+            actual_size=actual_size,
+        )
+    if actual_size != (1920, 1080):
+        raise MuMuIpcError(
+            f"MuMu IPC 实际帧尺寸错误：{width.value}×{height.value}，"
+            "需要横屏 1920×1080；原生返回码 0",
+            return_code=result,
+            actual_size=actual_size,
+        )
+    pixels = np.frombuffer(buffer, dtype=np.uint8)
+    if pixels.size != 1920 * 1080 * 4:
+        raise MuMuIpcError(
+            f"MuMu IPC 帧数据长度错误：{pixels.size}，需要 8294400；"
+            "原生返回码 0，实际尺寸 1920×1080",
+            return_code=result,
+            actual_size=actual_size,
+        )
+    frame = pixels.reshape((1080, 1920, 4))
+    # The native buffer is reused on the next capture; callers own this frame.
+    return np.flipud(frame[:, :, :3]).copy()
 
 
 class MuMu12IPC:
@@ -120,9 +122,6 @@ class MuMu12IPC:
         )
 
         # Manager path (CLI JSON for version/status)
-        manager_path = os.path.join(
-            config.conf.simulator.simulator_folder, "MuMuManager.exe"
-        )
         if not os.path.isfile(manager_path):
             raise MuMuIpcError(
                 f"MuMuManager.exe 不存在，请检查 simulator.simulator_folder "
@@ -149,6 +148,38 @@ class MuMu12IPC:
         candidates = [
             os.path.join(self._emu_root, "shell", "sdk", "external_renderer_ipc.dll"),
             os.path.join(self._emu_root, "nx_main", "sdk", "external_renderer_ipc.dll"),
+            os.path.join(self._emu_root, "sdk", "external_renderer_ipc.dll"),
+            os.path.join(
+                self._emu_root,
+                "nx_device",
+                "12.0",
+                "shell",
+                "sdk",
+                "external_renderer_ipc.dll",
+            ),
+            os.path.join(
+                self._emu_root,
+                "nx_device",
+                "15.0",
+                "shell",
+                "sdk",
+                "external_renderer_ipc.dll",
+            ),
+            os.path.join(
+                os.path.dirname(self._emu_root),
+                "shell",
+                "sdk",
+                "external_renderer_ipc.dll",
+            ),
+            os.path.join(
+                os.path.dirname(self._emu_root),
+                "nx_main",
+                "sdk",
+                "external_renderer_ipc.dll",
+            ),
+            os.path.join(
+                os.path.dirname(self._emu_root), "sdk", "external_renderer_ipc.dll"
+            ),
         ]
         last_err = None
         for path in candidates:
@@ -289,9 +320,34 @@ class MuMu12IPC:
             logger.error(f"无法找到 MuMuManager.exe，请检查路径: {self._manager}")
             raise
         except Exception as e:
-            # 捕获其他所有异常
-            logger.error(f"执行 MuMuManager 命令时发生未知错误: {e}")
-            raise
+            raise Exception(f"MuMuManager `{subcmd}` failed: {e}")
+
+    def get_setting_core_version(self):
+        """获取模拟器 core_version 信息，只执行一次并缓存"""
+        if self._setting_info is None:
+            cmd = [
+                self._manager,
+                "setting",
+                "-v",
+                str(self._index),
+                "get_key",
+                "core_version",
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    **hidden_console_options(),
+                )
+                output = result.stdout.strip()
+                return output
+                # logger.debug("MuMu setting info loaded and cached.")
+            except Exception as e:
+                logger.error(f"获取 MuMu setting 失败: {e}")
+                raise
+        return self._setting_info
 
     def _emu_version(self) -> tuple:
         """
@@ -304,6 +360,36 @@ class MuMu12IPC:
             # MuMu 12 changed coordinate arguments since 4.1.21
             self._is_new_coord = parts >= (4, 1, 21)
         return parts
+
+    def get_emulator_info(self):
+        """获取模拟器运行状态（实时查询）"""
+        cmd = [self._manager, "api", "-v", str(self._index), "player_state"]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                **hidden_console_options(),
+            )
+            player_index = None
+            found_condition = False
+            stdout = result.stdout
+            pattern1 = r"player index: (\d+)(?:\r\n|\r|\n)"
+            match1 = re.search(pattern1, stdout)
+            if match1:
+                player_index = int(match1.group(1))
+                found_condition = True
+            if found_condition:
+                if player_index == self._index:
+                    pattern2 = r"state: state=([^\s\r\n]+)(?:\r\n|\r|\n|$)"
+                    match2 = re.search(pattern2, stdout)
+                    if match2:
+                        return match2.group(1)
+            raise
+        except Exception as e:
+            logger.error(f"获取 MuMu 模拟器 info 失败: {e}")
+            raise
 
     def _emu_state(self) -> str:
         """
@@ -329,10 +415,22 @@ class MuMu12IPC:
         if self._emu_state() != "running":
             raise Exception("模拟器未启动，请启动模拟器")
         path = ctypes.c_wchar_p(self._emu_root)
-        self._conn = self._dll.nemu_connect(path, self._index)
-        if self._conn == 0:
-            raise Exception("连接模拟器失败，请启动模拟器")
-        logger.info("MuMu IPC connected.")
+        result = self._dll.nemu_connect(path, self._index)
+        if result <= 0:
+            self._conn = 0
+            raise MuMuIpcError(
+                f"MuMu IPC 连接失败：原生返回码 {result}", return_code=result
+            )
+        self._conn = result
+        logger.info("已连接 MuMu 截图增强引擎")
+
+    def disconnect(self):
+        """Release only this backend's current native connection."""
+        connection = self._conn
+        self._conn = 0
+        self._display_id = -1
+        if connection:
+            self._dll.nemu_disconnect(connection)
 
     def get_display_id(self):
         """
@@ -372,10 +470,9 @@ class MuMu12IPC:
         )
         raise RuntimeError("获取Display ID失败")
 
-    @retry_wrapper(3)  # type: ignore
     def _ensure_ready(self):
         """
-        Ensure connection and display id are valid; auto-recover if needed.
+        Initialize once; the screenshot caller owns the single rebuild budget.
         """
         if self._conn == 0:
             self.connect()
@@ -460,82 +557,32 @@ class MuMu12IPC:
         return int(self._H - y), int(x)
 
     def key_down(self, key_code: int):
-        try:
-            self._ensure_ready()
-            rc = self._dll.nemu_input_event_key_down(
-                self._conn, self._display_id, int(key_code)
-            )
-            if rc != 0:
-                raise MuMuIpcError(f"key_down failed: {rc}")
-        except Exception as e:
-            logger.error(f"key_down error: {e}")
-            self._conn = 0
-            self._display_id = -1
+        self._input_event("key_down", int(key_code))
 
     def key_up(self, key_code: int):
-        try:
-            self._ensure_ready()
-            rc = self._dll.nemu_input_event_key_up(
-                self._conn, self._display_id, int(key_code)
-            )
-            if rc != 0:
-                raise MuMuIpcError(f"key_up failed: {rc}")
-        except Exception as e:
-            logger.error(f"key_up error: {e}")
-            self._conn = 0
-            self._display_id = -1
+        self._input_event("key_up", int(key_code))
 
     def touch_down(self, x: int, y: int):
-        try:
-            self._ensure_ready()
-            tx, ty = self._map_xy(x, y)
-            rc = self._dll.nemu_input_event_touch_down(
-                self._conn, self._display_id, tx, ty
-            )
-            if rc != 0:
-                raise MuMuIpcError(f"touch_down failed: {rc}")
-        except Exception as e:
-            logger.error(f"touch_down error: {e}")
-            self._conn = 0
-            self._display_id = -1
+        self._input_event("touch_down", *self._map_xy(x, y))
 
     def touch_up(self):
-        try:
-            self._ensure_ready()
-            rc = self._dll.nemu_input_event_touch_up(self._conn, self._display_id)
-            if rc != 0:
-                raise MuMuIpcError(f"touch_up failed: {rc}")
-        except Exception as e:
-            logger.error(f"touch_up error: {e}")
-            self._conn = 0
-            self._display_id = -1
+        self._input_event("touch_up")
 
     def finger_touch_down(self, finger_id: int, x: int, y: int):
-        try:
-            self._ensure_ready()
-            tx, ty = self._map_xy(x, y)
-            rc = self._dll.nemu_input_event_finger_touch_down(
-                self._conn, self._display_id, int(finger_id), tx, ty
-            )
-            if rc != 0:
-                raise MuMuIpcError(f"finger_touch_down failed: {rc}")
-        except Exception as e:
-            logger.error(f"finger_touch_down error: {e}")
-            self._conn = 0
-            self._display_id = -1
+        self._input_event("finger_touch_down", int(finger_id), *self._map_xy(x, y))
 
     def finger_touch_up(self, finger_id: int):
-        try:
-            self._ensure_ready()
-            rc = self._dll.nemu_input_event_finger_touch_up(
-                self._conn, self._display_id, int(finger_id)
-            )
-            if rc != 0:
-                raise MuMuIpcError(f"finger_touch_up failed: {rc}")
-        except Exception as e:
-            logger.error(f"finger_touch_up error: {e}")
-            self._conn = 0
-            self._display_id = -1
+        self._input_event("finger_touch_up", int(finger_id))
+
+    def _input_event(self, event, *args):
+        self._ensure_ready()
+        result = getattr(self._dll, f"nemu_input_event_{event}")(
+            self._conn, self._display_id, *args
+        )
+        if result != 0:
+            # Keep ownership until Device closes the connection. Never swallow
+            # an uncertain send or reconnect halfway through the same gesture.
+            raise MuMuIpcError(f"{event} failed: {result}", return_code=result)
 
     def tap(self, x: int, y: int, hold_time: float = 0.07):
         self.touch_down(x, y)
@@ -601,7 +648,5 @@ class MuMu12IPC:
                 duration=max(0.01, d_ms / 1000.0),
                 fall=(i == 0),
                 lift=(i == len(durations) - 1),
-                update=(i == len(durations) - 1) and update,
                 interval=interval if i == len(durations) - 1 else 0.0,
-                func=func,
             )

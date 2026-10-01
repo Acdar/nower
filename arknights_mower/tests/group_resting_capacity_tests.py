@@ -63,7 +63,6 @@ def solver(monkeypatch):
     monkeypatch.setattr(config, "save_conf", lambda: None)
     monkeypatch.setattr(base_schedule, "_is_mastery_busy", lambda name: False)
     config.conf.enable_mastery = False
-    config.conf.experimental_dorm_logic = True
     for field in (
         "fodder_operators",
         "t5_operators",
@@ -91,6 +90,7 @@ def solver(monkeypatch):
             *[Room("Free", "", []) for _ in range(3)],
         ]
     instance = object.__new__(BaseSchedulerSolver)
+    instance._scan_card_moods = MagicMock()
     instance.global_plan = {
         "default_plan": Plan(
             rooms,
@@ -100,7 +100,6 @@ def solver(monkeypatch):
                 "",
                 resting_standby=",".join(DEEP[1:]),
                 ope_resting_priority=DEEP[0],
-                experimental_dorm_logic=True,
             ),
         ),
         "backup_plans": [],
@@ -380,6 +379,7 @@ def test_workshop_selection_does_not_disable_group_standby(solver):
 
 
 def test_ungrouped_candidate_waits_without_bed_and_fills_later_free_bed(solver):
+    config.conf.rescue_threshold = 0
     name = OTHERS[0]
     observed = {
         room: [slot.agent for slot in slots]
@@ -397,7 +397,7 @@ def test_ungrouped_candidate_waits_without_bed_and_fills_later_free_bed(solver):
         occupant = data.operators[occupant_name]
         occupant.current_room, occupant.current_index = bed.position
         occupant.resting_priority = "high"
-        occupant.mood = 5
+        occupant.mood = 10
         occupant.time_stamp = now
         bed.name = occupant_name
         bed.time = now + timedelta(hours=1 if index == 0 else 2)
@@ -407,6 +407,7 @@ def test_ungrouped_candidate_waits_without_bed_and_fills_later_free_bed(solver):
     candidate.mood = 10
     candidate.time_stamp = now
     solver.total_agent = [candidate]
+    assert not data.rescue_needed()
 
     plan = solver.resting()
 
@@ -561,17 +562,6 @@ def test_candidate_below_rescue_line_cannot_wait_without_bed(solver):
     assert plan == {}
     assert replacements == []
     assert [(bed.name, bed.time) for bed in data.dorm] == before
-
-
-def test_ungrouped_candidate_extension_is_disabled_with_stable_logic(solver):
-    name = OTHERS[0]
-    conf = solver.global_plan["default_plan"].config
-    conf.resting_standby = [name]
-    conf.experimental_dorm_logic = False
-
-    assert solver.initialize_operators() is None
-    assert solver.op_data.operators[name].resting_priority != "standby"
-    assert not solver.op_data._can_standby(solver.op_data.operators[name])
 
 
 def test_normal_low_gets_last_spare_bed_before_candidate(solver):
