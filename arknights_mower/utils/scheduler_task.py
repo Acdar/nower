@@ -126,16 +126,14 @@ def scheduling(tasks, run_order_delay=5, execution_time=0.75, time_now=None):
     if fixed:
         ordinary_ids = {id(task) for task in ordinary}
         tasks[:] = [task for task in tasks if id(task) in fixed | ordinary_ids]
-    swap_conflict = protect_priority_tasks(
-        tasks, run_order_delay, execution_time, time_now
-    )
-    if swap_conflict:
-        return swap_conflict
+    protect_priority_tasks(tasks, run_order_delay, execution_time, time_now)
     if enabled:
-        # Near a handoff, stop optional drone adjustment loops as well as dispatch.
+        # 临近换人暂停可选无人机调时，关键任务保护决定执行顺序。
         if any(
             t.type == TaskTypes.SWAP_SUPPORT
-            and t.time <= time_now + _support_swap_gap(run_order_delay)
+            and t.time
+            <= time_now
+            + timedelta(minutes=_ordinary_task_minutes(t, execution_time) + 1)
             for t in tasks
         ):
             return None
@@ -143,18 +141,10 @@ def scheduling(tasks, run_order_delay=5, execution_time=0.75, time_now=None):
     return conflict
 
 
-def _support_swap_gap(run_order_delay):
-    # The order countdown is offset by the configured entry delay, even when a
-    # caller uses scheduling()'s default conflict interval.
-    return timedelta(
-        minutes=max(10, run_order_delay * 2, config.conf.run_order_delay * 2)
-    )
-
-
 def protect_priority_tasks(
     tasks, run_order_delay=5, execution_time=0.75, time_now=None
 ):
-    """保留专精与跑单的冲突处理，并统一保护二者不被宿舍操作挤占。"""
+    """按操作耗时保护关键任务，跑单冲突时提前专精换人。"""
     now = time_now or datetime.now()
     for task in tasks:
         simplify_dorm_fill(task, tasks, now)
@@ -166,11 +156,8 @@ def protect_priority_tasks(
         ),
         key=lambda t: t.time,
     )
-    gap = _support_swap_gap(run_order_delay)
-    conflict = None
     for swap in swaps:
-        order_conflict = _avoid_swap_with_orders(tasks, swap, (now, gap))
-        conflict = conflict or order_conflict
+        _advance_swap_before_orders(tasks, swap, now, execution_time)
         _defer_work_before_swap(tasks, swap, (now, execution_time))
     cursor = now
     for task in sorted(tasks, key=lambda t: t.time):
@@ -190,13 +177,23 @@ def protect_priority_tasks(
             cursor = start + timedelta(minutes=minutes)
     _advance_mood_limit_releases(tasks, run_order_delay, execution_time, now)
     _sort_dispatch_tasks(tasks, now)
-    return conflict
 
 
 def _sort_dispatch_tasks(tasks, now):
     # 尚未开始的清退可以提前；关键任务已经到点时，不再被清退抢占。
     due_priority = {id(task) for task in _priority_tasks(tasks) if task.time <= now}
-    tasks.sort(key=lambda task: (id(task) not in due_priority, task.time))
+    tasks.sort(
+        key=lambda task: (
+            id(task) not in due_priority,
+            not (
+                config.conf.enable_mastery
+                and task.type == TaskTypes.SWAP_SUPPORT
+                and getattr(task, "advance_support_swap", False)
+                and task.time <= now
+            ),
+            task.time,
+        )
+    )
 
 
 def _advance_mood_limit_releases(tasks, run_order_delay, execution_time, now):
@@ -251,7 +248,7 @@ def _advance_mood_limit_releases(tasks, run_order_delay, execution_time, now):
                     + 2 * execution_time
                 )
             elif task.type == TaskTypes.SWAP_SUPPORT:
-                minutes = max(3, _ordinary_task_minutes(task, execution_time))
+                minutes = _ordinary_task_minutes(task, execution_time)
             elif _is_dorm_only_task(task):
                 minutes = sum(estimate_dorm_minutes(room) for room in task.plan)
             else:
@@ -268,20 +265,31 @@ def _advance_mood_limit_releases(tasks, run_order_delay, execution_time, now):
         next_start = start
 
 
-def _avoid_swap_with_orders(tasks, swap, timing):
-    now, gap = timing
-    conflict = None
-    for task in tasks:
-        if task.type != TaskTypes.RUN_ORDER or not task.meta_data:
+def _advance_swap_before_orders(tasks, swap, now, execution_time):
+    entry_delay = timedelta(minutes=config.conf.run_order_delay)
+    order_operations = timedelta(minutes=2 * execution_time)
+    swap_duration = timedelta(minutes=_ordinary_task_minutes(swap, execution_time))
+    # 从晚到早检查，提前产生的新冲突在同一轮内收敛。
+    orders = sorted(
+        (t for t in tasks if t.type == TaskTypes.RUN_ORDER and t.meta_data),
+        key=lambda t: t.time,
+        reverse=True,
+    )
+    for task in orders:
+        start = max(now, task.time)
+        # 已流逝的提前量不再占用后续时间，过期任务仍预留进驻与归位。
+        finish = max(start, task.time + entry_delay) + order_operations
+        if finish <= swap.time or start >= max(now, swap.time) + swap_duration:
             continue
-        if max(now, task.time) + gap <= swap.time or task.time > swap.time + gap:
-            continue
-        if now + gap < swap.time:
-            conflict = conflict or (task, swap)
-        else:
-            task.time = max(now, swap.time) + gap + timedelta(seconds=1)
-            logger.warning("跑单来不及提前避开专精换人，先执行换人后再处理跑单")
-    return conflict
+        if swap.time > now:
+            original = swap.time
+            swap.time = max(now, task.time - swap_duration - timedelta(seconds=1))
+            logger.info(
+                f"专精换人与跑单冲突，换人从 {original:%H:%M:%S} "
+                f"提前至 {swap.time:%H:%M:%S}，随后执行跑单"
+            )
+        # 到点或已过期的换人同样先执行，跑单时间保持原值。
+        swap.advance_support_swap = True
 
 
 def _ordinary_task_minutes(task, execution_time):
@@ -332,7 +340,7 @@ def simplify_dorm_fill(task, tasks, time_now=None):
     ):
         return
     now = time_now or datetime.now()
-    window_end = now + _support_swap_gap(5)
+    window_end = now + timedelta(minutes=max(10, config.conf.run_order_delay * 2))
     if not any(
         t.time <= window_end and (task.time <= now or task.time <= t.time)
         for t in _priority_tasks(tasks)
@@ -681,7 +689,6 @@ def _recovery_aware_assignments(
         candidate[2]
         for candidate in candidates
         if _active_recovery_room(op_data, candidate[2])
-        or op_data.is_rescue_recovering(candidate[2])
     }
     kept = list(candidates[:capacity])
     kept_names = {candidate[2] for candidate in kept}
@@ -694,6 +701,8 @@ def _recovery_aware_assignments(
                 index
                 for index in range(len(kept) - 1, -1, -1)
                 if kept[index][2] not in protected
+                and resting_key(op_data, name)[0]
+                <= resting_key(op_data, kept[index][2])[0]
             ),
             None,
         )
@@ -1762,15 +1771,107 @@ def try_workshop_tasks(op_data, tasks):
             logger.info("尚无仓库读数，无法核验加工原料及成品库存，跳过任务生成")
 
 
+def dorm_residents(op_data):
+    """床位缓存缺名时用实际驻员补齐，让床补偿与接管判定使用同一身份。"""
+    return {
+        bed.position: bed.name
+        or (
+            resident.name
+            if (resident := op_data.get_current_operator(*bed.position)) is not None
+            and op_data.is_recovery_dorm(bed, resident.name)
+            else ""
+        )
+        for bed in op_data.dorm
+    }
+
+
+def restore_displaced_resting(op_data, previous, plan, tasks):
+    """接管保留候补的回班来源；必需组员失床时显式召回整组。"""
+    current = dorm_residents(op_data)
+    for bed in op_data.dorm:
+        names = plan.get(bed.position[0], [])
+        index = bed.position[1]
+        if (
+            index < len(names)
+            and names[index] != "Current"
+            and not (
+                names[index] in ("Free", "")
+                and bed.name != previous.get(bed.position, "")
+                and bed.name
+            )
+        ):
+            current[bed.position] = "" if names[index] in ("Free", "") else names[index]
+    retained = set(current.values())
+    displaced = {
+        name
+        for position, name in previous.items()
+        if name and name != current.get(position) and name not in retained
+    }
+    recalled = set()
+    for name in displaced:
+        op = op_data.operators.get(name)
+        if op is None or not op.is_high() or op.room not in op_data.plan:
+            continue
+        members = op_data.groups[op.group] if op.group else [name]
+        if op_data._can_standby(op) and any(
+            anchor.name in retained
+            and anchor.is_high()
+            and not op_data._can_standby(anchor)
+            and not anchor.room.startswith("dorm")
+            and not anchor.workaholic
+            and not op_data.rest_mood_complete(anchor.name)
+            and (not op.group or anchor.group == op.group)
+            for anchor in op_data.operators.values()
+        ):
+            logger.info(f"{name}的候补床位被接管，随组待命")
+            continue
+        recalled.update(members)
+    for name in recalled:
+        op = op_data.operators[name]
+        plan.setdefault(op.room, ["Current"] * len(op_data.plan[op.room]))[op.index] = (
+            name
+        )
+    if recalled:
+        logger.info(f"休息床位被更高优先级接管，安排整组回班：{sorted(recalled)}")
+        for bed in op_data.dorm:
+            if bed.name in recalled:
+                room, index = bed.position
+                if current.get(bed.position) in recalled:
+                    plan.setdefault(room, ["Current"] * len(op_data.plan[room]))[
+                        index
+                    ] = "Free"
+                bed.reset()
+    changed_slots = {
+        bed.position
+        for bed in op_data.dorm
+        if previous.get(bed.position) != current.get(bed.position)
+    }
+    # 已接管床位不能继续执行旧的释放任务；已召回成员也不重复预约回班。
+    for task in tasks[:]:
+        if task.plan is plan or task.type not in (
+            TaskTypes.SHIFT_ON,
+            TaskTypes.RELEASE_DORM,
+        ):
+            continue
+        for room, names in list(task.plan.items()):
+            for index, name in enumerate(names):
+                if (task.type == TaskTypes.SHIFT_ON and name in recalled) or (
+                    task.type == TaskTypes.RELEASE_DORM
+                    and (room, index) in changed_slots
+                ):
+                    names[index] = "Current"
+            if all(name == "Current" for name in names):
+                del task.plan[room]
+        if not task.plan:
+            tasks.remove(task)
+
+
 def try_add_release_dorm(plan, time, op_data, tasks, *, empty_only=False):
     """普通宿舍补位先使用真空床，再按统一候选与接管规则替换住客。"""
     if not op_data.config.free_room:
         if plan:
             return
         # 空床补位独立于不养闲人；关闭清退时只填空床，不替换已入住者。
-        empty_only = True
-    if op_data.rescue_mode and not plan:
-        # 主班轮休先预约床位；集中恢复期间普通人只填剩余真空床。
         empty_only = True
     if plan:
         for names in plan.values():
@@ -1803,7 +1904,10 @@ def try_add_release_dorm(plan, time, op_data, tasks, *, empty_only=False):
             if name not in candidates.recovering and name not in candidates.unknown
         )
         search_unknown = bool(candidates.unknown)
-        replacement_search = search_unknown and not op_data.idle_dorm_search_exhausted
+        estimated_recovery = bool(candidates.estimated_recovering)
+        replacement_search = estimated_recovery or (
+            search_unknown and not op_data.idle_dorm_search_exhausted
+        )
         if waiting is None and not candidates.filling:
             return
 
@@ -1825,7 +1929,6 @@ def try_add_release_dorm(plan, time, op_data, tasks, *, empty_only=False):
                     occupant is None
                     or (occupant.current_room, occupant.current_index) != bed.position
                     or op_data.is_free_room_excluded(occupant.name)
-                    or op_data.is_rescue_recovering(occupant.name)
                 ):
                     continue
                 complete = (
@@ -1834,12 +1937,13 @@ def try_add_release_dorm(plan, time, op_data, tasks, *, empty_only=False):
                 ) or (bed.time is not None and bed.time <= now)
                 if not complete:
                     if waiting is None or not op_data._slot_takable(
-                        bed, protect_resting=True, requester=waiting
+                        bed, requester=waiting
                     ):
                         continue
                 elif waiting is None and (
                     not replacement_search
                     or op_data.is_full_dorm_fallback(occupant.name)
+                    and not estimated_recovery
                     or op_data.has_rest_mood_limit(occupant.name)
                 ):
                     continue
@@ -1868,6 +1972,8 @@ def try_add_release_dorm(plan, time, op_data, tasks, *, empty_only=False):
 
         if not arrangement:
             return
+        previous = dorm_residents(op_data)
+        restore_displaced_resting(op_data, previous, arrangement, tasks)
         task = SchedulerTask(
             time=now,
             task_plan=arrangement,

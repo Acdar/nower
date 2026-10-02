@@ -1,7 +1,6 @@
 import ast
 import copy
 from datetime import datetime, timedelta
-from itertools import product
 from typing import Any, Literal, overload
 
 from evalidate import Expr, base_eval_model
@@ -28,6 +27,7 @@ from ..utils.news_checker import NewsChecker
 # 赤金交易订单干员常量
 TRADE_ORDER_AGENTS = ["但书", "龙舌兰", "佩佩", "可露希尔"]
 DORMITORY_ROOMS = [f"dormitory_{index}" for index in range(1, 5)]
+MAX_BACKUP_VALIDATION_COMBINATIONS = 16384
 FACILITY_TYPE_IDS = {
     "贸易站": "trade",
     "制造站": "manufacture",
@@ -1491,11 +1491,16 @@ class Operators:
             if operator.group != "":
                 self.rest_in_full_group.add(operator.group)
         if (
-            (self.config.is_resting_standby(operator.name) and operator.is_high())
+            self.config.is_resting_standby(operator.name)
+            and (
+                operator.is_high()
+                or self.rescue_plan_active
+                and operator.name in self.main_recovery_limits
+            )
             and not operator.room.startswith("dorm")
             and not operator.workaholic
             and not operator.exhaust_require
-            and not operator.rest_in_full
+            and not self.config.is_rest_in_full(operator.name)
         ):
             operator.resting_priority = "standby"
         if operator.resting_priority != "standby":
@@ -1506,11 +1511,10 @@ class Operators:
         return (
             (op.is_high())
             and op.resting_priority == "standby"
-            and not getattr(op, "standby_low_priority", False)
             and not op.room.startswith("dorm")
             and not op.workaholic
             and not op.exhaust_require
-            and not op.rest_in_full
+            and not self.config.is_rest_in_full(op.name)
         )
 
     def rescue_mood_threshold(self, op):
@@ -1576,6 +1580,7 @@ class Operators:
             (self.rescue_mode or self.rescue_plan_active)
             and op is not None
             and op.is_resting()
+            and (op.is_high() or name in self.main_rescue_priority)
             and not getattr(op, "temporary_dorm_fill", False)
             and resting_tier(self, name) != RestingTier.EXCLUDED
             and not self.rest_mood_complete(name)
@@ -1629,7 +1634,7 @@ class Operators:
         return any(
             (
                 member.is_high()
-                and member.resting_priority == "high"
+                and not self._can_standby(member)
                 and not member.room.startswith("dorm")
                 and not member.workaholic
             )
@@ -1900,13 +1905,6 @@ class Operators:
         available_low = total - count_low - max(count_high, dorm_count)
         return available_high if free_type == "high" else available_low
 
-    def standby_can_yield(self, op):
-        """候补有有效非急救心情且无强制恢复要求时，才可离宿待命。"""
-        if not self._can_standby(op):
-            return False
-        mood = resting_mood(op)
-        return has_resting_mood(op) and mood >= self.rescue_mood_threshold(op)
-
     def active_high_resting_count(self, time=None):
         """正在占用恢复床位的主班人数。"""
         if time is None:
@@ -1920,8 +1918,8 @@ class Operators:
             and resting_tier(self, dorm.name) != RestingTier.IDLE
         )
 
-    def _slot_takable(self, dorm, protect_resting, requester=None, active_groups=None):
-        """按严格层级接管；主班免额外心情门槛，同级恢复者不互踢。"""
+    def _slot_takable(self, dorm, requester=None, active_groups=None):
+        """普通和救急均按严格层级接管；排除与待执行预约保留床位。"""
         if not self.is_effective_free_slot(dorm, active_groups=active_groups):
             return False
         reserved_for = self.reserved_product_beds.get(dorm.position)
@@ -1938,58 +1936,25 @@ class Operators:
             and (resident := self.get_current_operator(*dorm.position))
             and self.is_recovery_dorm(dorm, resident.name)
         ):
-            if (
-                self.rescue_mode or self.rescue_plan_active
-            ) and not resident.temporary_dorm_fill:
-                return False
             name = resident.name
-        if name == "":
+        if not name:
             return True
-        if name not in self.operators:
-            return not (self.rescue_mode or self.rescue_plan_active)
-        op = self.operators[name]
-        if (self.rescue_mode or self.rescue_plan_active) and not has_resting_mood(op):
-            return False
-        if self.is_rescue_recovering(name):
-            return False
-        if self.is_free_room_excluded(name):
+        op = self.operators.get(name)
+        if op is None or self.is_free_room_excluded(name):
             return False
         # 已预留、尚未执行入驻的床位不能被本轮后续组重复分配。
         if (op.current_room, op.current_index) != dorm.position:
             return False
-        tier = resting_tier(self, name)
-        # 必需休息的主班保留床位；普通候补可给更高层级让床，离宿后待命。
-        # 急救候补已提升到 LOW_MAIN，不会因此被踢出。
-        if tier <= RestingTier.LOW_MAIN:
-            return False
-        if tier == RestingTier.STANDBY and not self.standby_can_yield(op):
-            return False
-        if requester is None:
-            return False
-        incoming_tier = resting_tier(self, requester)
-        if incoming_tier >= tier:
-            return False
-        if incoming_tier <= RestingTier.PRIORITY_REPLACEMENT:
-            return True
-        if tier == RestingTier.IDLE:
-            mood = resting_mood(self.operators[requester])
-            # 无有效缓存按 24 心情，不抢占正在恢复的空闲者。
-            return mood <= 22
-        return (
-            incoming_tier == RestingTier.STANDBY
-            and tier == RestingTier.REPLACEMENT
-            and not protect_resting
+        return requester is not None and resting_tier(self, requester) < resting_tier(
+            self, name
         )
 
-    def _find_dorm_slot(self, name, used, *, group_resting=False, active_groups=None):
+    def _find_dorm_slot(self, name, used, *, active_groups=None):
         if self.rest_mood_complete(name):
             return None
-        operator = self.operators[name]
         if resting_tier(self, name) == RestingTier.EXCLUDED:
             return None
         is_high = resting_tier(self, name) <= RestingTier.MAIN
-        # 候补接管普通替班只用于随组分床；主班跨级接管由共享判定处理。
-        can_take_over = is_high or (group_resting and self._can_standby(operator))
         max_count = sum(1 for key in self.plan if key.startswith("dorm"))
         order = list(range(len(self.dorm)))
         if not is_high:
@@ -2000,7 +1965,6 @@ class Operators:
             if i not in used
             and self._slot_takable(
                 self.dorm[i],
-                protect_resting=not can_take_over,
                 requester=name,
                 active_groups=active_groups,
             )
@@ -2018,19 +1982,20 @@ class Operators:
         return min(candidates, key=takeover_cost, default=None)
 
     def has_resting_anchor(self, group=None):
-        """是否已有能为候补提供回班时机的高优恢复者。"""
+        """是否已有能为候补提供回班时机的必需恢复者。"""
         return any(
             bed.name in self.operators
             and self.is_effective_free_slot(bed)
             and (op := self.operators[bed.name]).is_high()
-            and op.resting_priority == "high"
+            and not self._can_standby(op)
+            and not self.rest_mood_complete(op.name)
             and (group is None or op.group == group)
             for bed in self.dorm
         )
 
     def standby_candidates(self, names):
         """返回本轮有床则休息、无床可待命的显式候补。"""
-        # 高优确实需要恢复心情时才允许同组候补待命，避免满心情高优在选人
+        # 必需组员确实需要恢复心情时才允许同组候补待命，避免满心情组员在选人
         # 阶段被释放后，整组既没有恢复心情者，也没有回班计时来源。
         anchor_groups = {
             op.group
@@ -2038,7 +2003,7 @@ class Operators:
             if (
                 op.group
                 and op.is_high()
-                and op.resting_priority == "high"
+                and not self._can_standby(op)
                 and not op.workaholic
             )
             and not op.room.startswith("dorm")
@@ -2074,7 +2039,6 @@ class Operators:
             index = self._find_dorm_slot(
                 name,
                 used,
-                group_resting=True,
                 active_groups=active_groups,
             )
             if index is None:
@@ -2129,77 +2093,70 @@ class Operators:
         return ret
 
     def validate_backup_plans(self):
+        """使用换班预演的合并校验检查可能的副表组合，保留当前排班与驻员。"""
+        from arknights_mower.utils.backup_validation import (
+            BackupValidationLimitExceeded,
+            possible_backup_conditions,
+        )
         from arknights_mower.utils.schedule_roster import validate_owned_operators
 
         if error := validate_owned_operators(self.global_plan):
-            return {"success": False, "message": error}
+            return {"success": False, "status": "failed", "message": error}
 
+        baseline = Operators(self.global_plan)
+        if error := baseline.init_and_validate():
+            return {
+                "success": False,
+                "status": "failed",
+                "message": f"基础验证失败：{error}",
+            }
         backup_count = len(self.backup_plans)
-        if backup_count == 0:
-            return {"success": True, "message": "没有备用计划，无需验证"}
-
-        agent_sets = [plan.primary_names() for plan in self.backup_plans]
-        adjacency = [set() for _ in range(backup_count)]
-        for i in range(backup_count):
-            for j in range(i + 1, backup_count):
-                if agent_sets[i].intersection(agent_sets[j]):
-                    adjacency[i].add(j)
-                    adjacency[j].add(i)
-
-        components: list[list[int]] = []
-        visited = [False] * backup_count
-        for i in range(backup_count):
-            if visited[i]:
-                continue
-            stack = [i]
-            component = []
-            while stack:
-                node = stack.pop()
-                if visited[node]:
-                    continue
-                visited[node] = True
-                component.append(node)
-                stack.extend(adjacency[node])
-            components.append(component)
-
-        tested_conditions: set[tuple[bool, ...]] = set()
-        tested_sequence: list[tuple[bool, ...]] = []
-
-        def validate_condition(condition: list[bool]) -> tuple[bool, str]:
-            key = tuple(condition)
-            if key in tested_conditions:
-                return True, ""
-            tested_conditions.add(key)
-            tested_sequence.append(key)
-            logger.debug(f"验证副表条件：{condition}")
-            validation_msg = self.swap_plan(condition, True)
-            if validation_msg is not None:
-                logger.info(
-                    f"替换排班验证错误：{validation_msg}, 附表条件为 {condition}"
+        # 仅按条件证明互斥；主力不重叠不能证明合并配置互不影响。
+        try:
+            combinations = possible_backup_conditions(
+                self.backup_plans,
+                MAX_BACKUP_VALIDATION_COMBINATIONS,
+                known_operators=baseline.operators,
+            )
+        except BackupValidationLimitExceeded as error:
+            return {
+                "success": False,
+                "status": "incomplete",
+                "message": f"{error}。主表已通过检查，允许启动；实际生效的副表组合由运行时检查。",
+            }
+        tested_count = 0
+        for flags in combinations:
+            condition = list(flags)
+            # 每个组合从独立模型开始，失败及检查顺序都不影响实际排班和驻员。
+            simulation = copy.copy(baseline)
+            simulation.operators, simulation.dorm = {}, []
+            error = simulation.swap_plan(condition, refresh=True)
+            tested_count += 1
+            if error is not None:
+                active = "、".join(
+                    backup.name or f"副表{index + 1}"
+                    for index, (backup, enabled) in enumerate(
+                        zip(self.backup_plans, flags)
+                    )
+                    if enabled
                 )
-                return False, validation_msg
-            return True, ""
-
-        success, msg = validate_condition([False] * backup_count)
-        if not success:
-            return {"success": False, "message": f"基础验证失败：{msg}"}
-
-        for component in components:
-            size = len(component)
-            for combo in product([False, True], repeat=size):
-                if not any(combo):
-                    continue
-                condition = [False] * backup_count
-                for idx, flag in enumerate(combo):
-                    condition[component[idx]] = flag
-                success, msg = validate_condition(condition)
-                if not success:
-                    return {"success": False, "message": f"组件验证失败：{msg}"}
-
-        self.swap_plan([False] * backup_count, True)
+                message = (
+                    f"副表组合验证失败（{active}）：{error}"
+                    if active
+                    else f"基础验证失败：{error}"
+                )
+                logger.info(message)
+                return {"success": False, "status": "failed", "message": message}
+        if backup_count == 0:
+            return {
+                "success": True,
+                "status": "passed",
+                "message": "没有备用计划，基础验证通过",
+            }
         return {
             "success": True,
-            "message": f"验证成功，共验证 {len(tested_sequence)} 次",
+            "status": "passed",
+            "message": f"验证成功，共验证 {tested_count} 次",
         }
 
 
@@ -2418,68 +2375,3 @@ class Operator:
 
     def __repr__(self):
         return f"Operator(name='{self.name}', room='{self.room}', index={self.index}, group='{self.group}', replacement={self.replacement}, resting_priority='{self.resting_priority}', current_room='{self.current_room}',exhaust_require={self.exhaust_require},mood={self.mood}, upper_limit={self.upper_limit}, rest_in_full={self.rest_in_full}, current_index={self.current_index}, lower_limit={self.lower_limit}, operator_type='{self.operator_type}',depletion_rate={self.depletion_rate},time_stamp='{self.time_stamp}',refresh_order_room = {self.refresh_order_room})"
-
-
-def validate_backup_plans_offline():
-    """独立的验证函数，不依赖于 BaseSchedulerSolver"""
-    global_plan = build_global_plan()
-    backup_plans = global_plan["backup_plans"]
-
-    backup_count = len(backup_plans)
-    if backup_count == 0:
-        return {"success": True, "message": "没有备用计划，无需验证"}
-
-    agent_sets = [plan.primary_names() for plan in backup_plans]
-    adjacency = [set() for _ in range(backup_count)]
-    for i in range(backup_count):
-        for j in range(i + 1, backup_count):
-            if agent_sets[i].intersection(agent_sets[j]):
-                adjacency[i].add(j)
-                adjacency[j].add(i)
-
-    components: list[list[int]] = []
-    visited = [False] * backup_count
-    for i in range(backup_count):
-        if visited[i]:
-            continue
-        stack = [i]
-        component = []
-        while stack:
-            node = stack.pop()
-            if visited[node]:
-                continue
-            visited[node] = True
-            component.append(node)
-            stack.extend(adjacency[node])
-        components.append(component)
-
-    tested_conditions: set[tuple[bool, ...]] = set()
-    tested_sequence: list[tuple[bool, ...]] = []
-
-    # 复制类方法中的验证逻辑
-    for component in components:
-        if len(component) == 1:
-            continue
-        # 检查连通分量中的计划是否有冲突
-        for mask in product([False, True], repeat=len(component)):
-            if mask in tested_conditions:
-                continue
-            tested_conditions.add(mask)
-            tested_sequence.append(mask)
-            active_plans = [
-                backup_plans[i] for i, active in zip(component, mask) if active
-            ]
-            if not active_plans:
-                continue
-            combined_agents = set()
-            for plan in active_plans:
-                combined_agents.update(plan.primary_names())
-            if len(combined_agents) < sum(
-                len(plan.primary_names()) for plan in active_plans
-            ):
-                return {
-                    "success": False,
-                    "message": f"备用计划 {', '.join(str(i + 1) for i in component)} 中存在干员重复安排",
-                }
-
-    return {"success": True, "message": "备用计划验证通过"}

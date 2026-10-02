@@ -60,6 +60,8 @@ Checklist for evaluating pull requests and git diffs under the Standards axis of
 - [ ] **[INV-DEV-01] Native Back Dispatch**: With MuMu IPC selected, does Android BACK use the owned MuMu IPC worker, and does an uncertain result interrupt the operation without input replay or ADB fallback?
 
 ### 2.2 Base Infrastructure & Scheduling Domain
+- [ ] **[INV-SCHED-17] Mastery Order Timing**: Do genuine conflicts advance mastery handoffs while preserving order times, prioritize due handoffs over overdue orders and retain training and candidate checks without requeueing the ideal handoff time?
+- [ ] **[INV-SCHED-16] Backup Validation Coverage**: Does validation exclude only logically disproven activation combinations, cover all remaining combinations with the runtime merged-plan checker, distinguish incomplete budget warnings from blocking configuration failures, identify active backups on error and preserve the caller's active plan and actual occupancy?
 - [ ] **[INV-SCHED-13] Pending Task Preservation**: Does device recovery preserve the scheduler and pending tasks through real scheduler re-entry, retain future explicit tasks during stale ordinary-plan rebuilding, refresh the Capture Frame before resuming and pause unverified side effects without ending the automation worker or replaying input?
 
 - [ ] **[INV-SCHED-01] Empirical Depletion Rate**: Are operator exhaustion forecasts calculated dynamically from inspection deltas rather than hardcoded assumptions?
@@ -70,11 +72,11 @@ Checklist for evaluating pull requests and git diffs under the Standards axis of
 - [ ] **[INV-SCHED-06] Manufacturing Switch Boundary**: Does a switch after Drone Acceleration track the accelerated current unit and avoid treating the next unit's countdown as unfinished work?
 - [ ] **[INV-SCHED-07] Unified Dormitory Policy**: All scheduling uses the same dormitory policy; retired mode keys neither select legacy behavior nor prevent old configuration imports.
 - [ ] **[INV-SCHED-08] Unscheduled Training Slots**: Unconfigured training-room slots never produce static correction targets; automatic mastery still reads both facility slots.
-- [ ] **[INV-SCHED-09] Rescue Recovery Lifecycle**: Does rescue retain main-plan individual limits and majority completion, prioritize main primaries and priority replacements, and avoid occupied-bed clearing and excluded admissions?
+- [ ] **[INV-SCHED-09] Rescue Recovery Lifecycle**: Does rescue retain main-plan limits and majority completion, apply strict tiers to all bed takeovers, preserve equal-tier residents and pending ownership, and avoid legacy admission protection or excluded admissions?
 - [ ] **[INV-SCHED-10] Completed Exhaust Continuation**: Does an already-resting exhausted group leave normal planning and run-order recalculation enabled without allocating beds again?
 - [ ] **[INV-SCHED-11] Maintenance Backup Ordering**: A maintenance backup checks its configured deadline, completes the existing pre-maintenance drone-accelerated order batch before switching, and suppresses all trade order generation only while its effective primary slots contain trade order agents; its maintenance condition is false from downtime start, and backup exit waits for a normal check after task restart.
 - [ ] **[INV-SCHED-12] Idle Lifecycle Ownership**: Does idle shutdown use the authoritative Device Profile and verified lifecycle adapter, revalidate selected identity before shutdown within the same deadline, record a wake only after confirmed shutdown, and preserve ownership, Android isolation and unsupported-control refusal without legacy commands?
-- [ ] **[INV-SCHED-13] Dormitory Candidate Consistency**: Do planning and selection share candidate states and reservations, confirm unknown mood in the game, replan recovery after completed crafting and staff restoration, and preserve ordinary vacancy-fill identity through projection and runtime snapshot restoration?
+- [ ] **[INV-SCHED-13] Dormitory Candidate Consistency**: Do planning and selection share candidate states and reservations, confirm unknown mood in the game, replan recovery after completed crafting and staff restoration, and preserve ordinary vacancy-fill identity through projection and runtime snapshot restoration? Do eligible low selection-card estimates permit replacing completed ordinary residents despite prior full-occupancy retention or exhausted-search flags while preserving selection-page confirmation and measured-mood isolation?
 - [ ] **[INV-SCHED-14] Complete Group Replacement Matching**: Does every eligible complete group replacement matching succeed, while failure preserves arrangements and beds?
 - [ ] **[INV-SCHED-15] Selection Estimate Isolation**: Selection-card mood estimates support candidate screening, ordering, and primary shift selection only; they never overwrite measured mood, timestamps, depletion rates, recovery deadlines, or mandatory personal limits. Facility-completion events refresh only affected candidates and preserve unrelated estimates and search checks. Regular candidate planning scans cards only when no eligible idle recovery candidate has valid measured or estimated mood.
 
@@ -86,6 +88,9 @@ Checklist for evaluating pull requests and git diffs under the Standards axis of
 - [ ] **[INV-UI-02] Recovery Policy Binding**: Are advanced recovery parameters bidirectionally bound to backend defaults without local shadow overrides?
 
 ### 2.4 Vision & Recognition Domain
+
+- [ ] **[INV-REC-05] Training Panel Identity**: Does training identity use full-name templates on the current Capture Frame with score, closing-bracket and distinct-name margin checks, while unknown readings retain bounded retry without an OCR name fallback or plan-derived occupant?
+- [ ] **[INV-DIAG-06] Error Notification Evidence**: Does every ERROR notification log before mail configuration checks or delivery, while only explicit visual failures request screenshots, including disabled email, through the existing archive store?
 
 - [ ] **[INV-REC-03] Scene Recovery Limit**: Do recognition failures retain one game restart per navigation call, ordinary navigation input faults recover and refresh inside that call, and cancellation and unverified side effects propagate without input replay?
 
