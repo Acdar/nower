@@ -223,6 +223,269 @@
           }
         }
       ]
+    },
+    "AP-5": {
+      "updated_at": "2026-10-02T01:57:01",
+      "stage_type": "DAILY",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1452,
+              145
+            ],
+            "text": "AP-5",
+            "success": true
+          }
+        }
+      ]
+    },
+    "1-7": {
+      "updated_at": "2026-10-03T02:28:04",
+      "stage_type": "MAIN",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              490,
+              1014
+            ],
+            "text": "main_entry"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1690,
+              65
+            ],
+            "text": "open_overview"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1690,
+              65
+            ],
+            "text": "open_overview"
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1451,
+              553
+            ],
+            "text": "黑暗时代·下"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1435,
+              591
+            ],
+            "text": "与天灾一同降临的，还有整合运动的暴君，塔露拉。"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              177,
+              181
+            ],
+            "text": "本章回想"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              959,
+              339
+            ],
+            "text": "1-7",
+            "success": true
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1430,
+              146
+            ],
+            "text": "1-7",
+            "success": true
+          }
+        }
+      ]
     }
   },
   "patterns": {
@@ -398,6 +661,271 @@
               629
             ],
             "text": "SR-6",
+            "success": true
+          }
+        }
+      ]
+    },
+    "AP-*": {
+      "updated_at": "2026-10-02T01:57:01",
+      "stage_type": "DAILY",
+      "source_stage": "AP-5",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1452,
+              145
+            ],
+            "text": "AP-5",
+            "success": true
+          }
+        }
+      ]
+    },
+    "1-*": {
+      "updated_at": "2026-10-03T02:28:04",
+      "stage_type": "MAIN",
+      "source_stage": "1-7",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              490,
+              1014
+            ],
+            "text": "main_entry"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1690,
+              65
+            ],
+            "text": "open_overview"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1690,
+              65
+            ],
+            "text": "open_overview"
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -910
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              960,
+              700
+            ],
+            "vector": [
+              0,
+              -280
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1451,
+              553
+            ],
+            "text": "黑暗时代·下"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1435,
+              591
+            ],
+            "text": "与天灾一同降临的，还有整合运动的暴君，塔露拉。"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              177,
+              181
+            ],
+            "text": "本章回想"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              959,
+              339
+            ],
+            "text": "1-7",
+            "success": true
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1430,
+              146
+            ],
+            "text": "1-7",
             "success": true
           }
         }

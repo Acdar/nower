@@ -243,3 +243,4 @@ openspec/
 .vscode/*
 
 .workbuddy-ai/*
+.agents/*

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from simple_websocket import Client
 from werkzeug.serving import make_server
+from werkzeug.test import EnvironBuilder
 
 import server
 from arknights_mower.utils.log_stream import LogStream
@@ -23,6 +24,70 @@ class FakeSocket:
 
     def close(self, reason=None, message=None):
         self.closed = True
+
+
+class TrustedProxyOriginTests(unittest.TestCase):
+    """X-Forwarded-* only affects origin comparison when the operator opts in."""
+
+    HOST = "xxx.work:55007"
+    BROWSER_ORIGIN = "https://xxx.work:55007"
+
+    def _context(self, headers):
+        return server.app.test_request_context(
+            "/log", headers={"Host": self.HOST, **headers}
+        )
+
+    def test_same_origin_allowed_compares_scheme_and_netloc(self):
+        with self._context({}):
+            self.assertTrue(server.same_origin_allowed("http://xxx.work:55007"))
+            self.assertTrue(server.same_origin_allowed(None))
+            self.assertFalse(server.same_origin_allowed(self.BROWSER_ORIGIN))
+            self.assertFalse(server.same_origin_allowed("https://attacker.example"))
+
+    def test_tls_terminating_proxy_origin_is_rejected_until_opted_in(self):
+        # 未声明可信代理：TLS 在代理终止时后端 scheme 仍是 http，来源不匹配。
+        with self._context({"X-Forwarded-Proto": "https"}):
+            self.assertFalse(server.same_origin_allowed(self.BROWSER_ORIGIN))
+
+    def test_apply_trusted_proxy_reconstructs_forwarded_scheme(self):
+        # 声明 MOWER_TRUSTED_PROXY=1 后，来源比较看到的 scheme 与浏览器一致。
+        for declared, expected_origin_allowed in (("1", True), ("", False), ("0", False)):
+            with self.subTest(declared=declared):
+                declared_app = server.app
+                original_wsgi_app = declared_app.wsgi_app
+                try:
+                    server.apply_trusted_proxy(
+                        declared_app, environ={"MOWER_TRUSTED_PROXY": declared}
+                    )
+                    environ = EnvironBuilder(
+                        path="/log",
+                        base_url=f"http://{self.HOST}",
+                        headers={
+                            "Host": self.HOST,
+                            "Origin": self.BROWSER_ORIGIN,
+                            "X-Forwarded-Proto": "https",
+                        },
+                    ).get_environ()
+                    declared_app.wsgi_app(environ, lambda *_: None)
+                    with server.app.test_request_context(
+                        "/log", environ_overrides=environ
+                    ):
+                        self.assertIs(
+                            server.same_origin_allowed(self.BROWSER_ORIGIN),
+                            expected_origin_allowed,
+                        )
+                finally:
+                    declared_app.wsgi_app = original_wsgi_app
+
+    def test_untrusted_forwarded_headers_cannot_spoof_origin(self):
+        # 未声明可信代理时，伪造 X-Forwarded-Host/Proto 不得放宽来源边界。
+        headers = {
+            "X-Forwarded-Host": "attacker.example",
+            "X-Forwarded-Proto": "https",
+        }
+        with self._context(headers):
+            self.assertTrue(server.same_origin_allowed("http://xxx.work:55007"))
+            self.assertFalse(server.same_origin_allowed("https://attacker.example"))
 
 
 class LocalLogAccessTests(unittest.TestCase):

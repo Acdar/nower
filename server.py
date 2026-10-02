@@ -23,6 +23,7 @@ from flask_sock import Sock
 from pydantic import ValidationError
 from simple_websocket import ConnectionClosed
 from werkzeug.exceptions import NotFound
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import safe_join
 
 from arknights_mower import __system__
@@ -73,6 +74,26 @@ mimetypes.add_type("image/webp", ".webp")
 app = Flask(__name__, static_folder="ui/dist", static_url_path="")
 app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25, "max_message_size": 64 * 1024}
 app.config["WEBVIEW_LOCAL_ONLY_NO_TOKEN"] = False
+
+
+def apply_trusted_proxy(flask_app, environ=None):
+    """Trust ``X-Forwarded-*`` headers only when the operator declares a front proxy.
+
+    A TLS-terminating front proxy makes the browser Origin ``https://`` while the
+    Werkzeug request reports ``http://``; the origin comparison then rejects an
+    otherwise authorized request. ``MOWER_TRUSTED_PROXY=1`` enables that
+    reconstruction. Without the declaration the forwarded headers stay untrusted
+    and cannot widen the browser origin boundary of [INV-WEB-02].
+    """
+    source = os.environ if environ is None else environ
+    if source.get("MOWER_TRUSTED_PROXY", "") == "1":
+        flask_app.wsgi_app = ProxyFix(
+            flask_app.wsgi_app, x_proto=1, x_host=1, x_port=1
+        )
+    return flask_app
+
+
+apply_trusted_proxy(app)
 sock = Sock(app)
 CORS(app)
 network_settings.start_proxy_sync()
@@ -596,7 +617,7 @@ def _local_log_request_allowed(require_origin=False):
     origin = request.headers.get("Origin")
     if require_origin and not origin:
         return False
-    if origin and not _diagnostic_delete_origin_allowed(origin):
+    if origin and not same_origin_allowed(origin):
         return False
     referer = request.headers.get("Referer")
     if referer:
@@ -604,7 +625,7 @@ def _local_log_request_allowed(require_origin=False):
             source = urlparse(referer)
         except ValueError:
             return False
-        if not _diagnostic_delete_origin_allowed(f"{source.scheme}://{source.netloc}"):
+        if not same_origin_allowed(f"{source.scheme}://{source.netloc}"):
             return False
     if request.headers.get("Sec-Fetch-Site") not in {None, "none", "same-origin"}:
         return False
@@ -625,7 +646,13 @@ def require_log_read(f):
     return decorated_function
 
 
-def _diagnostic_delete_origin_allowed(origin):
+def same_origin_allowed(origin):
+    """Report whether a browser Origin matches this service or its dev loopback origin.
+
+    Combined with the loopback and fetch-metadata checks in
+    [_local_log_request_allowed], this establishes the browser origin boundary for
+    read-only log access and for state-changing routes.
+    """
     if not origin:
         return True
     try:
@@ -670,7 +697,7 @@ def _authorize_websocket(ws, allow_local_log=False):
     origin = request.headers.get("Origin", "")
     if allow_local_log and _local_log_request_allowed(require_origin=True):
         return True
-    if not expected or not origin or not _diagnostic_delete_origin_allowed(origin):
+    if not expected or not origin or not same_origin_allowed(origin):
         return reject()
     try:
         first = ws.receive(timeout=5)
@@ -1695,7 +1722,7 @@ def diagnostic_error_logs(archive_id):
 def diagnostic_error_analyze(archive_id):
     if request.headers.get("X-Mower-Diagnostics") != "1":
         abort(403)
-    if not _diagnostic_delete_origin_allowed(request.headers.get("Origin")):
+    if not same_origin_allowed(request.headers.get("Origin")):
         abort(403)
     if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
         abort(404)
@@ -1738,7 +1765,7 @@ def diagnostic_error_delete(archive_id):
     if request.headers.get("X-Mower-Diagnostics") != "1":
         abort(403)
     origin = request.headers.get("Origin")
-    if not _diagnostic_delete_origin_allowed(origin):
+    if not same_origin_allowed(origin):
         abort(403)
     if not archive_id.isascii() or not archive_id.isdigit() or len(archive_id) > 20:
         abort(404)
