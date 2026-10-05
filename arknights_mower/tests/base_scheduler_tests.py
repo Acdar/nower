@@ -216,6 +216,47 @@ class TestMoodInitialization(unittest.TestCase):
         self.enterContext(patch.object(main, "base_scheduler", None))
         self.initialize = self.enterContext(patch.object(main, "initialize"))
 
+    def test_rescue_runs_daily_tasks_during_available_time(self):
+        scheduler = MagicMock()
+        scheduler.initialize_operators.return_value = None
+        scheduler.op_data.validate_backup_plans.return_value = {"success": True}
+        scheduler.emergency_state = {"phase": "recovering"}
+        scheduler._emergency_active.return_value = True
+        scheduler.tasks = []
+        scheduler.daily_visit_friend = scheduler.daily_report = date.min
+        scheduler.daily_skland = scheduler.daily_mail = date.min
+        scheduler.find_next_task.return_value = None
+        scheduler.run.side_effect = lambda: scheduler.tasks.__setitem__(
+            slice(None),
+            [base_schedule.SchedulerTask(time=datetime.now() + timedelta(hours=1))],
+        )
+        scheduler.rest_until_next_task.side_effect = base_schedule.MowerExit
+        self.initialize.return_value = scheduler
+        with (
+            patch.object(self.main.NewsChecker, "get_maintenance", return_value=None),
+            patch.object(self.main, "refresh_resource_at_boundary"),
+            patch.object(
+                base_schedule.config,
+                "conf",
+                base_schedule.config.Conf(
+                    skland_enable=True,
+                    check_mail_enable=True,
+                    recruit_enable=True,
+                    maa_depot_enable=False,
+                    stage_plan_enable=True,
+                    stage_plan_runner="mower",
+                ),
+            ),
+        ):
+            self.main.simulate(None)
+        scheduler.visit_friend_plan_solver.assert_called_once()
+        scheduler.report_plan_solver.assert_called_once()
+        scheduler.skland_plan_solver.assert_called_once()
+        scheduler.mail_plan_solver.assert_called_once()
+        scheduler.recruit_plan_solver.assert_called_once()
+        scheduler.mower_plan_solver.assert_called_once()
+        scheduler.maa_plan_solver.assert_called_once()
+
     def test_fresh_start_defers_backup_plan_until_mood_read(self):
         scheduler = MagicMock()
         scheduler.initialize_operators.return_value = "测试完成"
@@ -291,7 +332,7 @@ class TestMoodInitialization(unittest.TestCase):
         scheduler = MagicMock()
         scheduler.initialize_operators.return_value = None
         scheduler.op_data.validate_backup_plans.return_value = {"success": True}
-        scheduler.op_data.backup_plans = [object()]
+        scheduler.op_data.backup_plans = [SimpleNamespace(name="backup")]
         scheduler.run.side_effect = base_schedule.MowerExit
         self.initialize.return_value = scheduler
         saved = {
@@ -312,6 +353,27 @@ class TestMoodInitialization(unittest.TestCase):
 
 
 class TestBaseScheduler(unittest.TestCase):
+    @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
+    def test_rescue_keeps_clues_drones_and_replenishment(self):
+        solver = BaseSchedulerSolver()
+        solver.find = MagicMock(return_value=True)
+        solver.emergency_state = {"phase": "recovering"}
+        solver.tasks, solver.task = [], None
+        solver.planned, solver.todo_task = True, False
+        solver.enable_party = True
+        solver.last_clue = solver.drone_time = solver.reload_time = None
+        solver.drone_room = "room_1_1"
+        solver.op_data = SimpleNamespace(run_order_rooms={})
+        solver.no_pending_task = MagicMock(return_value=True)
+        solver.clue_new = MagicMock()
+        solver.drone = MagicMock()
+        solver.reload = MagicMock()
+        solver.infra_main()
+        solver.clue_new.assert_called_once()
+        solver.drone.assert_called_once_with("room_1_1")
+        solver.reload.assert_called_once()
+        self.assertTrue(solver.todo_task)
+
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
     def test_wait_drone_interface_can_require_bill_accelerate(self):
         solver = BaseSchedulerSolver()
@@ -2535,7 +2597,6 @@ class TestDormShiftOffMerge(unittest.TestCase):
             operators={},
             dorm=[],
             print=lambda: "{}",
-            rescue_needed=MagicMock(return_value=False),
         )
         solver._prepare_shift_cycle = MagicMock()
         solver._refresh_deferred_product_reservations = MagicMock()
@@ -2577,7 +2638,6 @@ class TestDormShiftOffMerge(unittest.TestCase):
         solver = BaseSchedulerSolver()
         solver.op_data = SimpleNamespace(
             config=SimpleNamespace(free_room=True),
-            rescue_needed=MagicMock(return_value=False),
         )
         order = SchedulerTask(task_type=TaskTypes.RUN_ORDER)
         solver.tasks = [order]
@@ -2750,7 +2810,7 @@ class TestDroneAccelerate(unittest.TestCase):
         solver = BaseSchedulerSolver()
         solver.error = False
         solver.tasks = [task]
-        solver.op_data = SimpleNamespace(dorm=[], operators={})
+        solver.op_data = SimpleNamespace(dorm=[], operators={}, plan={})
 
         def fake_arrange_room(new_plan, room, plan, get_time=False):
             del plan[room]  # 与真实 agent_arrange_room 一致：清空 self.task.plan

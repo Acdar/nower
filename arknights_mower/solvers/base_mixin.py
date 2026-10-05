@@ -788,6 +788,30 @@ class BaseMixin:
     ):
         """复用识别帧记录候选预估，不刷新截图或修改干员实读数据。"""
         eligible = set(candidates)
+        if getattr(getattr(self, "task", None), "emergency_staffing", False):
+            from arknights_mower.utils.emergency_staffing import worker_block_reason
+
+            temporary_workers = {
+                name
+                for room, row in self.task.plan.items()
+                if room in self.op_data.plan and not room.startswith("dorm")
+                for index, name in enumerate(row)
+                if (op := self.op_data.operators.get(name)) is None
+                or (op.current_room, op.current_index) != (room, index)
+            }
+            for name, scope in page:
+                if name not in eligible or name not in temporary_workers:
+                    continue
+                mood = estimate_agent_mood(self.recog.img, scope)
+                if mood is None:
+                    self.op_data.dorm_mood_estimates.pop(name, None)
+                else:
+                    self.op_data.dorm_mood_estimates[name] = (mood, datetime.now())
+                reason = worker_block_reason(self.op_data, name, mood, set())
+                if reason:
+                    raise AgentSelectionNotReady(
+                        f"自动救急候选 {name} {reason}，取消本次选人"
+                    )
         if estimates is None or train:
             return eligible
         now = datetime.now()

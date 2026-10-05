@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta
 from threading import Lock, Timer
 
+from arknights_mower.data import base_room_list
 from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
 from arknights_mower.solvers.reclamation_algorithm import ReclamationAlgorithm
 from arknights_mower.solvers.secret_front import SecretFront
@@ -395,12 +396,14 @@ def simulate(saved):
             if config.stop_mower.is_set():
                 raise MowerExit
             base_scheduler = initialize([], connection_retries=connection_retries)
-            # saved=None 表示没有可载入的运行缓存。此时干员 current_room 尚未读取，
+            # saved 为空表示没有可载入的运行缓存。此时干员 current_room 尚未读取，
             # 首轮任务开始前必须暂缓副表判断，避免把“未知”误判成“不在工作”。
-            base_scheduler.defer_backup_plan_until_mood_read = saved is None or bool(
-                saved.get("initial_mood_pending", False)
+            base_scheduler.defer_backup_plan_until_mood_read = (
+                not saved
+                or bool(saved.get("initial_mood_pending", False))
+                or config.conf.automatic_rescue_enable
+                or bool(saved and saved.get("automatic_rescue_state"))
             )
-            # 旧补读快照的实际宿舍可能已换人，只重读房态，不续跑临时试住。
             base_scheduler._initial_mood_refresh_rooms = set(
                 saved.get("initial_mood_refresh_rooms", ()) if saved else ()
             ) | set(saved.get("initial_mood_probe_layout", {}) if saved else {})
@@ -463,6 +466,7 @@ def simulate(saved):
                     v, "resting_from_train", False
                 )
                 for attr, default in (
+                    ("mood_is_prediction", False),
                     ("rest_mood_release_limit", None),
                     ("dorm_mood_fallback", ""),
                     ("dorm_mood_peers", {}),
@@ -481,14 +485,24 @@ def simulate(saved):
             base_scheduler.op_data.facility_states = copy.deepcopy(
                 saved.get("facility_states", {})
             )
-            rescue = saved.get("rescue_state", {})
-            if rescue.get("main_limits") == base_scheduler.op_data.main_recovery_limits:
-                base_scheduler.op_data.rescue_mode = bool(rescue.get("active", False))
-                base_scheduler.op_data.rescue_armed = bool(rescue.get("armed", True))
-                base_scheduler.op_data.rescue_completed = (
-                    set(rescue.get("completed", ()))
-                    & base_scheduler.op_data.main_recovery_limits.keys()
+            base_scheduler.emergency_state = copy.deepcopy(
+                saved.get("automatic_rescue_state")
+            )
+            if isinstance(base_scheduler.emergency_state, dict):
+                base_scheduler._emergency_validate_state()
+                state = base_scheduler.emergency_state
+                previous = dict(
+                    zip(
+                        state.get("handoff_names", state["backup_names"]),
+                        state.get("handoff_conditions", state["frozen_conditions"]),
+                    )
                 )
+                names = [backup.name for backup in base_scheduler.op_data.backup_plans]
+                error = base_scheduler.op_data.swap_plan(
+                    [previous.get(name, False) for name in names], refresh=True
+                )
+                if error:
+                    raise ValueError(error)
             base_scheduler.op_data.idle_dorm_search_exhausted = saved.get(
                 "idle_dorm_search_exhausted", False
             )
@@ -501,12 +515,51 @@ def simulate(saved):
             base_scheduler.daily_skland = saved["daily_skland"]
             base_scheduler.daily_mail = saved["daily_mail"]
             base_scheduler.task_count = saved["task_count"]
-            base_scheduler.tasks = tasks
+            from arknights_mower.utils.config.plan import migrate_backup_tasks
+
+            base_scheduler.tasks = migrate_backup_tasks(
+                tasks,
+                saved.get("backup_plan_names", []),
+                [backup.name for backup in base_scheduler.op_data.backup_plans],
+                config.retired_backup_indices,
+                retired=bool(saved.get("rescue_state"))
+                or config.retired_backup_migrated
+                or bool(
+                    set(saved.get("backup_plan_names", []))
+                    - {backup.name for backup in base_scheduler.op_data.backup_plans}
+                ),
+            )
             if len(base_scheduler.op_data.backup_plans) > 0:
                 # 启动的时候按照条件触发副表
                 base_scheduler.backup_plan_solver()
         except Exception as ex:
             logger.exception(ex)
+    from arknights_mower.solvers.emergency import RESUME_META
+    from arknights_mower.utils.emergency_recovery import ORDINARY_SHIFTS
+    from arknights_mower.utils.scheduler_task import SchedulerTask
+
+    if saved and saved.get("rescue_state"):
+        base_scheduler.tasks[:] = [
+            task
+            for task in base_scheduler.tasks
+            if task.type not in ORDINARY_SHIFTS
+            and not getattr(task, "backup_shift_active", False)
+        ]
+    if (
+        config.conf.automatic_rescue_enable
+        or isinstance(base_scheduler.emergency_state, dict)
+        or bool(saved and saved.get("initial_mood_pending"))
+    ):
+        base_scheduler._emergency_startup_pending = True
+        base_scheduler.defer_backup_plan_until_mood_read = True
+        base_scheduler.tasks[:] = [
+            task for task in base_scheduler.tasks if task.meta_data != RESUME_META
+        ]
+        if not (saved and saved.get("initial_mood_pending")):
+            base_scheduler._initial_mood_refresh_rooms = {
+                room for room in base_scheduler.op_data.plan if room in base_room_list
+            }
+        base_scheduler.tasks.insert(0, SchedulerTask(time=datetime.now()))
     while True:
         try:
             config.maintenance_recheck.clear()

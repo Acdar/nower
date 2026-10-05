@@ -41,10 +41,18 @@ def dorm_candidate_mood(op_data, name, now=None):
 def dorm_task_reservations(op_data, tasks, excluded=()):
     """规划与执行采用相同预约；待命候补的回班任务不阻止其临时恢复。"""
     names = set(excluded) - {"", "Current", "Free"}
+    names.update(getattr(op_data, "emergency_reserved_agents", ()))
     slots = set()
     for task in tasks:
         if task is None:
             continue
+        names.update(getattr(task, "emergency_staffing_members", ()))
+        names.update(
+            name
+            for row in getattr(task, "emergency_original_roster", {}).values()
+            for name in row
+            if name not in ("", "Current", "Free")
+        )
         returning = getattr(getattr(task, "type", None), "name", "") == "SHIFT_ON"
         for room, row in task.plan.items():
             for index, name in enumerate(row):
