@@ -482,7 +482,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             self._sync_run_order_tasks()
             self._resume_waiting_group_shifts()
             self._fill_empty_dorms()
-            scheduling(self.tasks)
+            scheduling(self.tasks, op_data=getattr(self, "op_data", None))
             self.task = self.tasks[0] if self.tasks else None
             if self.task is None:
                 break
@@ -1022,7 +1022,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
     def _next_workshop_task(self, first_task):
         # 每次交接重新检查队列，兼容新增/删除任务和专精换人保护。
         tasks = getattr(self, "tasks", [])
-        protect_priority_tasks(tasks)
+        protect_priority_tasks(tasks, op_data=getattr(self, "op_data", None))
         pending = sorted(
             (task for task in tasks if task is not first_task),
             key=lambda task: task.time,
@@ -1101,7 +1101,8 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                 agent_room, ["Current"] * len(self.op_data.plan[agent_room])
             )[agent_index] = task.meta_data
         self.agent_arrange({"factory": [task.meta_data]})
-        self.generate_product(task.meta_data, snapshot=snapshot)
+        if self.generate_product(task.meta_data, snapshot=snapshot) is False:
+            raise RuntimeError("加工执行失败，停止本轮连续换人")
         if config.conf.workshop_auto_active and not snapshot.is_current():
             # A confirmed batch advances the recipe generation. Continue with
             # remaining mood instead of waiting for the normal fresh-task gate.
@@ -1273,7 +1274,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             getattr(task, "initial_fia", False) for task in self.tasks
         )
         if initial_fia_pending:
-            protect_priority_tasks(self.tasks)
+            protect_priority_tasks(self.tasks, op_data=getattr(self, "op_data", None))
             candidate = self.tasks[0]
             if candidate.time <= datetime.now() and (
                 getattr(candidate, "initial_fia", False)
@@ -1302,7 +1303,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
         if self.task is not None:
             # Navigation/reconnection may have consumed the margin since run().
             # Recheck at a safe boundary, before any staff arrangement has started.
-            protect_priority_tasks(self.tasks)
+            protect_priority_tasks(self.tasks, op_data=getattr(self, "op_data", None))
             if (
                 self.task.time > datetime.now()
                 or not any(task is self.task for task in self.tasks)
@@ -1883,7 +1884,9 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             force_rooms.discard(room)
             if getattr(self, "_emergency_startup_pending", False):
                 self._emergency_replan_releases()
-                protect_priority_tasks(self.tasks)
+                protect_priority_tasks(
+                    self.tasks, op_data=getattr(self, "op_data", None)
+                )
                 self._emergency_save()
 
     def _read_initial_card_mood(self):
@@ -2402,8 +2405,10 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
         from arknights_mower.utils.workshop_limits import (
             batch_delta,
             batch_limit,
+            blocked_workshop_recipes,
             deer_batch_limit,
             recipe_quantities,
+            reject_workshop_recipe,
         )
         from arknights_mower.utils.workshop_mood import mood_cost, operator_mood_rules
 
@@ -2471,6 +2476,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             blocked_materials = set()
 
             def available_groups():
+                rejected = blocked_workshop_recipes(inventory_data)
                 return {
                     tab: eligible
                     for tab, entries in group.items()
@@ -2479,6 +2485,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                             name: setting
                             for name, setting in entries.items()
                             if name not in blocked_materials
+                            and name not in rejected
                             and recipe_moods[name] <= mood_budget
                             and batch_limit(
                                 name, workshop_formula[name], setting, inventory_data
@@ -2609,12 +2616,12 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                         # Never use MAX: mood can allow more than the stock deficit.
                         for _ in range(batch_count - 1):
                             self.tap(add_btn, interval=0.1)
-                        if self.find("factory_warning") or not self.item_valid():
-                            if (
-                                not self.item_valid()
-                                and self.find("factory_warning") is None
-                            ):
-                                # 材料不够重新选择
+                        warning = self.find("factory_warning")
+                        valid = self.item_valid()
+                        if warning or not valid:
+                            if not valid and not warning:
+                                # Retain the rejection across workers with the same stock.
+                                reject_workshop_recipe(current_name, inventory_data)
                                 blocked_materials.add(current_name)
                                 tasks.insert(0, "select")
                                 tab_queue = deque(available_groups().items())
@@ -2753,6 +2760,8 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                                         del tasks[0]
                                         break
                                     else:
+                                        if not valid:
+                                            reject_workshop_recipe(item, inventory_data)
                                         logger.info(f"检测到{item}不满足条件，跳过")
                                         item_list.remove(item)
                             scan_round += 1
@@ -2772,9 +2781,12 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                 self.recog.update()
             self.back()
             self.back_to_infrastructure()
+        except MowerExit:
+            raise
         except Exception as e:
             save_exception(e)
             logger.exception(e)
+            return False
 
     def _sync_run_order_tasks(self):
         op_data = getattr(self, "op_data", None)
@@ -2839,7 +2851,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                     self.plan_run_order(k)
                 run_order_rooms = self.op_data.run_order_rooms
                 adj_tasks = scheduling(
-                    self.tasks
+                    self.tasks, op_data=self.op_data
                 )  # 修改scheduling 同时输出撞在一起的前后两个任务
                 max_execution = 3
                 adj_count = 0
@@ -2873,7 +2885,9 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                         )
                         return
                     is_run = self.drone(adjust_0_room, adjust_time=True)
-                    adj_tasks = scheduling(self.tasks)
+                    adj_tasks = scheduling(
+                        self.tasks, op_data=getattr(self, "op_data", None)
+                    )
                     adj_count += 1
                     logger.info(f"第{adj_count}次循环结束")
                     if is_run is not None and not is_run:
@@ -3526,10 +3540,27 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             # 迁移须与副表已提出的槽位安排比较，不能把被该安排覆盖的
             # 原住者误判为无需移动，导致合并后丢失其床位。
             migration_data = self.op_data.project_arrangements([transition_plan])
+            priority_changed = (
+                previous_dorm_layout is not None
+                and previous_dorm_layout[0] != current_dorm_layout[0]
+            )
             dorm_migration = rebalance_plan_swap_dorms(
                 migration_data,
                 previous_dorms,
-                reserved_names=_assigned_operator_names(transition_plan),
+                reserved_names=_assigned_operator_names(transition_plan)
+                | (reserved_names if priority_changed else set()),
+                reorder=priority_changed,
+                reserved_slots=(
+                    reserved_slots
+                    | {
+                        (room, index)
+                        for room, names in transition_plan.items()
+                        for index, name in enumerate(names)
+                        if name != "Current"
+                    }
+                    if priority_changed
+                    else ()
+                ),
             )
             self.op_data.dorm = migration_data.dorm
             _merge_shift_transition(transition_plan, dorm_migration, self.op_data)
@@ -4142,11 +4173,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                         and plan.get(x.room, [])[x.index : x.index + 1] == [obj]
                     )
                     and obj not in reserved_names
-                    and (
-                        not self.op_data.is_dorm_replacement(obj)
-                        or x.multi_group
-                        and in_slot
-                    )
+                    and (not self.op_data.is_dorm_replacement(obj) or in_slot)
                     and (
                         x.room.startswith("dorm")
                         or replacement.current_room != x.room
@@ -5815,7 +5842,9 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             return
 
     def adjust_order_time(self, accelerate, room):
-        action_required_task = scheduling(self.tasks)
+        action_required_task = scheduling(
+            self.tasks, op_data=getattr(self, "op_data", None)
+        )
         # logger.error(f"action_required_task:{action_required_task}")
         logger.debug(f"room:{room}")
         logger.debug(self.get_run_order_adjust_room(action_required_task) == room)
@@ -5865,7 +5894,9 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                 logger.info(
                     f"房间 {room} 无人机加速后接单时间为 {task_time.strftime('%H:%M:%S')}"
                 )
-                action_required_task = scheduling(self.tasks)
+                action_required_task = scheduling(
+                    self.tasks, op_data=getattr(self, "op_data", None)
+                )
             else:
                 break
         return None
@@ -10782,7 +10813,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                 else:
                     logger.info("local operation finished without executing any stage")
 
-            scheduling(self.tasks)
+            scheduling(self.tasks, op_data=getattr(self, "op_data", None))
         except (MowerExit, DeviceRecoveryError):
             raise
         except Exception as e:
@@ -10974,7 +11005,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
         self._schedule_maintenance_backup_check()
         if any(getattr(task, "strict_mood_limit", False) for task in self.tasks):
             # 睡眠前就计算提前量，不能睡到原上限时刻才发现需要提前离宿。
-            protect_priority_tasks(self.tasks)
+            protect_priority_tasks(self.tasks, op_data=getattr(self, "op_data", None))
         first = self.tasks[0]
         remaining_time = (first.time - datetime.now()).total_seconds()
         self.handle_idle_action(remaining_time)
