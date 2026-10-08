@@ -18,6 +18,8 @@ from arknights_mower.utils.plan import (  # noqa: E402
 )
 from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes  # noqa: E402
 
+pytestmark = pytest.mark.usefixtures("offline_maintenance")
+
 
 @pytest.fixture
 def solver(monkeypatch):
@@ -82,15 +84,38 @@ def return_task(solver):
     return next(t for t in solver.tasks if t.type == TaskTypes.SHIFT_ON)
 
 
-def test_shift_off_recomputes_emergency_return_after_backup_switch(solver):
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_shift_off_recomputes_emergency_return_after_backup_switch(solver, confirmed):
+    def arrange(plan, read_time):
+        if not confirmed:
+            return
+        # 模拟换人后的读房结果；黑键的恢复床位和时间已在夹具中设置。
+        for room, names in plan.items():
+            for index, name in enumerate(names):
+                if name in ("Current", "Free", ""):
+                    continue
+                occupant = solver.op_data.get_current_operator(room, index)
+                if occupant is not None:
+                    occupant.current_room, occupant.current_index = "", -1
+                op = solver.op_data.operators[name]
+                op.current_room, op.current_index = room, index
+
+    solver.agent_arrange.side_effect = arrange
     solver.task = SchedulerTask(
         time=datetime(2026, 9, 11, 16),
         task_plan={"contact": ["红"]},
         task_type=TaskTypes.SHIFT_OFF,
     )
     solver.tasks = [solver.task]
+    current = solver.task
     solver.infra_main()
     assert solver.op_data.operators["歌蕾蒂娅"].exhaust_require
+    if not confirmed:
+        assert current in solver.tasks
+        assert current.group_shift_expected[("contact", 0)] == "红"
+        assert not any(t.type == TaskTypes.SHIFT_ON for t in solver.tasks)
+        return
+    assert current.group_shift_expected == {}
     assert return_task(solver).time == datetime(2026, 9, 11, 17, 5, 3)
     assert return_task(solver).plan["dormitory_1"][0] == "塑心"
     solver.agent_arrange.assert_called_once()
@@ -234,7 +259,6 @@ def test_backup_staffing_change_invalidates_corresponding_exhaust_task(solver, c
     if change == "room":
         backup.plan = {
             "central": [Room("陈", "", ["红"])],
-            "meeting": [Room("歌蕾蒂娅", "", ["陈"])],
         }
     elif change == "replacement":
         backup.plan = {"central": [Room("歌蕾蒂娅", "", ["红"])]}
@@ -709,7 +733,6 @@ def test_switch_preserves_shift_on_target_when_backup_modifies_room_plan(solver)
     backup.plan = {
         "contact": [Room("陈", "", ["砾"])],
         "central": [Room("黑键", "感知", ["红"])],
-        "meeting": [Room("歌蕾蒂娅", "", ["陈"])],
     }
     backup.config.exhaust_require = ["歌蕾蒂娅"]
 
@@ -732,7 +755,6 @@ def test_deactivation_restores_main_plan_targets_preventing_stickiness(solver):
     backup.plan = {
         "contact": [Room("陈", "", ["砾"])],
         "central": [Room("黑键", "感知", ["红"])],
-        "meeting": [Room("歌蕾蒂娅", "", ["陈"])],
     }
     backup.config.exhaust_require = ["歌蕾蒂娅"]
     solver.backup_plan_solver()

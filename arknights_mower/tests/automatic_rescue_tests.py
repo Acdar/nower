@@ -590,7 +590,7 @@ def test_partial_handoff_persists_plan_and_retry_does_not_replan_temporary_staff
     state = make_episode(solver)
     plan = {"room_1_1": [PRIMARY[0]]}
     solver.backup_plan_solver = MagicMock(return_value=False)
-    solver.agent_get_mood = MagicMock(side_effect=[plan.copy(), None])
+    solver.agent_get_mood = MagicMock(side_effect=[plan.copy(), {}])
     solver._emergency_read_rooms = MagicMock()
     previous_task = SchedulerTask(task_type=TaskTypes.WORKSHOP)
     solver.task = previous_task
@@ -638,7 +638,7 @@ def partial_handoff(solver, monkeypatch, failure="deferred"):
         )
         plan[room] = [name]
     solver.backup_plan_solver = MagicMock(return_value=False)
-    solver.agent_get_mood = MagicMock(side_effect=[copy.deepcopy(plan), None])
+    solver.agent_get_mood = MagicMock(side_effect=[copy.deepcopy(plan), {}])
     solver._emergency_read_rooms = MagicMock()
     solver._read_initial_card_mood = MagicMock()
     solver._emergency_collect = MagicMock()
@@ -782,7 +782,7 @@ def test_handoff_uses_real_arrangement_with_its_own_task_context(solver, previou
     )
     solver.task = previous_task
     solver.backup_plan_solver = MagicMock(return_value=False)
-    solver.agent_get_mood = MagicMock(side_effect=[plan.copy(), None])
+    solver.agent_get_mood = MagicMock(side_effect=[plan.copy(), {}])
     solver._emergency_read_rooms = MagicMock()
     solver.enter_room = MagicMock()
     observed_tasks = []
@@ -2340,3 +2340,144 @@ def test_standby_recovery_target_is_personal_rescue_threshold(solver, with_histo
     )
     op.rest_in_full = True
     assert recovery_target(data, name, *args) == (20, "rest_in_full")
+
+
+@pytest.mark.parametrize("capacity", [2, 3])
+def test_recovery_order_projects_combinations_without_changing_measured_state(
+    solver, capacity
+):
+    state = make_episode(solver)
+    data = solver.op_data
+    for i, name in enumerate(PRIMARY):
+        group = "较慢组" if i < 2 else ("较快组" if capacity == 3 else name)
+        data.operators[name].group = group
+        data.global_plan["default_plan"].plan[data.operators[name].room][
+            0
+        ].group = group
+        data.operators[name].mood = [3, 4, 14, 15][i]
+    data.groups = {"较慢组": PRIMARY[:2]}
+    if capacity == 3:
+        data.groups["较快组"] = PRIMARY[2:]
+    else:
+        data.groups.update({name: [name] for name in PRIMARY[2:]})
+    if capacity == 2:
+        # 固定宿管位不能算作退出后可用床位。
+        from arknights_mower.utils.plan import Room
+
+        data.global_plan["default_plan"].plan["dormitory_1"][2] = Room("杜林", "", [])
+        data.add(Operator("杜林", "", time_stamp=NOW))
+    solver.op_data = data.project_arrangements([state["rescue_plan"]])
+    before = {
+        n: (o.mood, o.time_stamp, o.current_room, o.current_index)
+        for n, o in solver.op_data.operators.items()
+    }
+    state_before = copy.deepcopy(state)
+    order = solver._emergency_recovery_order()
+    assert all(order[name][0] == 0 for name in PRIMARY[2:])
+    assert all(order[name][0] == 1 for name in PRIMARY[:2])
+    assert before == {
+        n: (o.mood, o.time_stamp, o.current_room, o.current_index)
+        for n, o in solver.op_data.operators.items()
+    }
+    assert state == state_before
+    solver.enter_room.assert_not_called()
+
+
+def test_recovery_order_bounds_projections_and_excludes_blacklisted_workers(solver):
+    state = make_episode(solver)
+    solver.op_data = solver.op_data.project_arrangements([state["rescue_plan"]])
+    data = solver.op_data
+    for name in ("杜林", "白面鸮", "桃金娘", "砾"):
+        data.add(Operator(name, "", mood=1, time_stamp=NOW))
+        state["targets"][name] = 16
+    for name in PRIMARY:
+        data.operators[name].mood = 1
+    data.config.free_blacklist = ["砾"]
+    solver._emergency_ready = MagicMock(return_value=False)
+
+    order = solver._emergency_recovery_order()
+
+    assert solver._emergency_ready.call_count == 64
+    assert "砾" not in order
+    assert all(rank == 1 for rank, _ in order.values())
+    assert all(data.operators[name].mood == 1 for name in order)
+    solver.enter_room.assert_not_called()
+
+
+@pytest.mark.parametrize("due", [False, True])
+def test_exhaustion_workers_do_not_trigger_rescue_before_shift_deadline(solver, due):
+    setup_startup(solver)
+    config.conf.automatic_rescue_enable = True
+    data = solver.op_data
+    data.config.exhaust_require = PRIMARY[:2]
+    for name in PRIMARY[:2]:
+        data.operators[name].exhaust_require = True
+        solver.tasks.append(
+            SchedulerTask(
+                time=NOW + timedelta(minutes=-1 if due else 10),
+                task_type=TaskTypes.EXHAUST_OFF,
+                meta_data=name,
+            )
+        )
+    for name in PRIMARY[2:]:
+        data.operators[name].mood = 24
+    for name in COVERS:
+        data.operators[name].mood = 0
+
+    solver._emergency_startup()
+
+    assert solver._emergency_active() is due
+    solver.enter_room.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("working", False),
+        ("floor", True),
+        ("resting", True),
+        ("future", False),
+        ("due", True),
+    ],
+)
+def test_exhaust_group_uses_personal_floor_and_existing_deadline(
+    solver, case, expected
+):
+    data = solver.op_data
+    owner, peer = [data.operators[name] for name in PRIMARY[:2]]
+    owner.exhaust_require = True
+    owner.lower_limit, owner.mood = 4, 6
+    owner.group = peer.group = "用尽组"
+    data.groups[owner.group] = PRIMARY[:2]
+    if case == "floor":
+        owner.mood = 4
+    elif case == "resting":
+        peer._current_room = "dormitory_1"
+    elif case in ("future", "due"):
+        solver.tasks = [
+            SchedulerTask(
+                time=NOW + timedelta(minutes=1 if case == "future" else 0),
+                task_type=TaskTypes.EXHAUST_OFF,
+                meta_data=owner.name,
+            )
+        ]
+    assert (
+        emergency_recovery.exhaust_rest_due(data, peer, solver.tasks, NOW) is expected
+    )
+
+
+def test_rescue_training_selection_never_reads_card_mood(solver, monkeypatch):
+    from arknights_mower.solvers import base_mixin
+
+    make_episode(solver)
+    name = "余"
+    solver.task = SchedulerTask(task_plan={"train": ["黍", name]})
+    solver.task.emergency_staffing = True
+    read = MagicMock(side_effect=AssertionError("training cards have no mood"))
+    monkeypatch.setattr(base_mixin, "estimate_agent_mood", read)
+    estimates = {name: (24, NOW)}
+    assert solver.observe_agent_moods(
+        [(name, ((0, 0), (1, 1)))], [name], estimates, False, train=True
+    ) == {name}
+    assert estimates == {name: (24, NOW)}
+    read.assert_not_called()

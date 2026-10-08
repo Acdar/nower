@@ -5,6 +5,7 @@ import { useMessage } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
 import { useConfigStore } from '@/stores/config'
 import {
+  applyChipLimitPreset,
   createInventoryItemOption,
   createLimitRule,
   createRatioMember,
@@ -16,6 +17,7 @@ import {
 import { WEEKDAYS, getGameWeekdayIndex } from '@/utils/maa_weekly_plan'
 
 const message = useMessage()
+const emit = defineEmits(['chip-limits-applied'])
 const store = useConfigStore()
 const {
   maa_stage_inventory_enable,
@@ -209,6 +211,15 @@ function addLimitRule() {
   limitStageToAdd.value = null
 }
 
+function applyChipLimits() {
+  maa_stage_limit_rules.value = applyChipLimitPreset(
+    maa_stage_limit_rules.value,
+    stageOptions.value
+  )
+  emit('chip-limits-applied')
+  message.success('已绑定芯片上限、勾选芯片关卡，并将排序提升到剿灭之后')
+}
+
 function removeLimitRule(index) {
   maa_stage_limit_rules.value.splice(index, 1)
 }
@@ -320,11 +331,22 @@ watch(maa_weekly_plan_active, loadInventoryRuleData, { immediate: true })
         </n-flex>
         <n-divider />
         <n-space vertical :size="4">
-          <n-text depth="3">• 刷理智前刷新库存；物品上限优先于比例。</n-text>
+          <n-text depth="3"
+            >• 使用本地库存选关，MAA 掉落回调自动更新库存；物品上限优先于比例。</n-text
+          >
+          <n-text depth="3">
+            • 剿灭优先；有效上限或比例绑定关卡仍需刷取时，只执行剿灭和这些关卡。
+          </n-text>
+          <n-text depth="3">
+            • 已选库存关卡全部达到上限后，才执行无有效库存规则的后备关卡（含上次作战）。
+          </n-text>
+          <n-text depth="3">
+            • MAA 保持自动连战，整组结算达标后停止该关；数量可能超过上限一组的掉落量。
+          </n-text>
           <n-text depth="3">• 上限填 0 表示该物品不限上限。</n-text>
           <n-text depth="3">• 比例填 0 表示该关卡不参与比例关系计算。</n-text>
           <n-text depth="3">
-            • 当天全部关卡都被上限规则跳过时，本次恢复原计划；当前剿灭和上次作战不参与绑定。
+            • 全部关卡达标且无后备关卡时停止刷取，继续其他任务；剿灭和上次作战不参与绑定。
           </n-text>
         </n-space>
       </n-card>
@@ -350,6 +372,20 @@ watch(maa_weekly_plan_active, loadInventoryRuleData, { immediate: true })
               <n-button type="primary" :disabled="!limitStageToAdd" @click="addLimitRule">
                 添加关卡上限
               </n-button>
+              <n-space align="center" :size="6" :wrap="false">
+                <n-button
+                  :disabled="loading || !!loadError || stageOptions.length === 0"
+                  @click="applyChipLimits"
+                >
+                  一键芯片上限
+                </n-button>
+                <help-text label="一键芯片上限说明">
+                  绑定全部 8 个芯片关卡：小芯片上限 5、芯片组上限 8，两种都达到才跳过。
+                  覆盖已有芯片上限，仅对当前方案已选关卡生效。
+                  同时勾选全部芯片关卡：开启开放日过滤时仅勾选开放日，关闭时每天勾选。
+                  将全部芯片关卡排在剿灭之后，保留原有其他关卡勾选；之后所有关卡均可自由拖动排序。
+                </help-text>
+              </n-space>
               <n-text depth="3">
                 这里只列出周计划已经选择的关卡；绑定后自动载入常规掉落，也可添加自定义物品。
               </n-text>
@@ -579,8 +615,12 @@ watch(maa_weekly_plan_active, loadInventoryRuleData, { immediate: true })
               </n-tag>
             </n-space>
           </div>
-          <n-alert v-if="previewResult.limitFallback" type="warning" :closable="false">
-            全部关卡均达到上限，本次跳过设置失效并恢复原计划。
+          <n-alert
+            v-if="!previewResult.stages.length && previewResult.limitSkipped.length"
+            type="info"
+            :closable="false"
+          >
+            全部已选关卡均已达到上限，本轮不刷取，继续其他任务。
           </n-alert>
           <div v-else-if="previewResult.limitSkipped.length" class="preview-line">
             <n-text depth="3">达到上限</n-text>

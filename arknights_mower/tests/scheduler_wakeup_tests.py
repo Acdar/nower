@@ -63,6 +63,8 @@ def scheduler(monkeypatch):
     solver._sync_run_order_tasks = MagicMock()
     solver._switch_products_before_arrangement = MagicMock()
     solver._prepare_shift_cycle = MagicMock()
+    solver._prepare_group_shift = MagicMock()
+    solver._complete_group_shift = MagicMock(return_value=True)
     solver.agent_get_mood = MagicMock(return_value=True)
     solver.agent_arrange = MagicMock(side_effect=lambda *args: solver.skip())
     solver.craft_material = MagicMock(side_effect=solver.skip)
@@ -151,6 +153,7 @@ def test_http_workshop_wake_reselects_task_before_dispatch(scheduler):
     scheduler.on_sleep = scheduler.add_workshop
     scheduler.solver.run()
     scheduler.solver.agent_arrange.assert_not_called()
+    scheduler.solver._prepare_group_shift.assert_not_called()
     scheduler.solver.craft_material.assert_called_once_with()
     assert scheduler.clock.now() == scheduler.shift.time - timedelta(seconds=239)
     assert any(task is scheduler.shift for task in scheduler.solver.tasks)
@@ -159,6 +162,7 @@ def test_http_workshop_wake_reselects_task_before_dispatch(scheduler):
     assert not scheduler.solver.sleeping
     scheduler.solver.run()
     scheduler.solver.agent_arrange.assert_called_once_with(scheduler.shift.plan, False)
+    scheduler.solver._complete_group_shift.assert_called_once_with(scheduler.shift)
     assert scheduler.clock.now() == scheduler.shift.time
     assert all(task is not scheduler.shift for task in scheduler.solver.tasks)
 
@@ -168,6 +172,8 @@ def primary_with_vacancies(scheduler, monkeypatch):
     from arknights_mower.utils.plan import Plan, PlanConfig, Room
 
     solver = scheduler.solver
+    solver._scan_card_moods = MagicMock()
+    solver.task = None
     scheduler.clock.current = datetime.now()
     rooms = {
         "meeting": [Room("银灰", "", ["红"])],
@@ -203,10 +209,12 @@ def primary_with_vacancies(scheduler, monkeypatch):
 
 
 @pytest.mark.parametrize("deferred_fill", [False, True])
+@pytest.mark.parametrize("free_room", [False, True])
 def test_run_dispatches_fresh_primary_shift_before_ordinary_dorm_fill(
-    scheduler, monkeypatch, deferred_fill
+    scheduler, monkeypatch, deferred_fill, free_room
 ):
     solver = primary_with_vacancies(scheduler, monkeypatch)
+    solver.op_data.config.free_room = free_room
     if deferred_fill:
         solver.tasks.append(
             SchedulerTask(

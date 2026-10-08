@@ -1,3 +1,4 @@
+import itertools
 import sys
 import unittest
 from datetime import date, datetime, timedelta
@@ -212,6 +213,9 @@ class TestMoodInitialization(unittest.TestCase):
         import arknights_mower.__main__ as main
 
         self.main = main
+        self.enterContext(
+            patch.object(main.NewsChecker, "get_maintenance", return_value=None)
+        )
         self.enterContext(patch.object(base_schedule.config, "stop_mower", Event()))
         self.enterContext(patch.object(main, "base_scheduler", None))
         self.initialize = self.enterContext(patch.object(main, "initialize"))
@@ -309,6 +313,7 @@ class TestMoodInitialization(unittest.TestCase):
         ):
             self.main.simulate(None)
         scheduler.run.assert_called_once_with()
+        scheduler.op_data.validate_backup_plans.assert_called_once_with(max_seconds=5)
         warning.assert_called_once()
         self.assertIn("允许启动", warning.call_args.args[0])
 
@@ -1060,6 +1065,7 @@ class TestBaseScheduler(unittest.TestCase):
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
     def test_replan_scans_stale_mood_before_calculating_tasks(self):
         solver = BaseSchedulerSolver()
+        solver.op_data = SimpleNamespace(operators={})
         solver.task = None
         solver.planned = False
         solver.tasks = []
@@ -2011,7 +2017,13 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
     def _make_solver(plan):
         """可跑 agent_arrange_room("train") 的 solver：当前房间=计划 → 排班直接收尾。"""
         solver = BaseSchedulerSolver()
-        solver.task = None
+        solver.task = SchedulerTask(task_type=TaskTypes.SELF_CORRECTION, task_plan=plan)
+        solver._can_refresh_idle_dorm_search = lambda: False
+        solver.choose_train = MagicMock()
+        solver.record_selection_success = MagicMock()
+        solver.get_agent_from_room = MagicMock(
+            return_value=[{"agent": name} for name in plan["train"]]
+        )
         solver.tasks = []
         solver.waiting_scene = []
         solver.scene = MagicMock(return_value=Scene.INDEX)
@@ -2104,9 +2116,10 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
         ):
             result = solver.agent_arrange_room({}, "train", plan)
         solver.back.assert_called_once_with(0.5)  # 冻结不早退；仅排班收尾 back
-        solver.refresh_current_room.assert_called_once_with(
-            "train", [1]
-        )  # idx1=Current
+        solver.refresh_current_room.assert_not_called()
+        solver.choose_train.assert_called_once_with(
+            ["干员A", "Current"], fast_mode=True, choose_error=0
+        )
         solver.turn_on_room_detail.assert_called_with("train")
         self.assertEqual(result, {})
 
@@ -2315,9 +2328,10 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
             ),
         ):
             result = solver.agent_arrange_room({}, "train", plan)
-        solver.refresh_current_room.assert_called_once_with(
-            "train", [1]
-        )  # idx1=Current
+        solver.refresh_current_room.assert_not_called()
+        solver.choose_train.assert_called_once_with(
+            ["干员A", "Current"], fast_mode=True, choose_error=0
+        )
         self.assertEqual(result, {})
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
@@ -2600,6 +2614,8 @@ class TestDormShiftOffMerge(unittest.TestCase):
         )
         solver._prepare_shift_cycle = MagicMock()
         solver._refresh_deferred_product_reservations = MagicMock()
+        solver._scan_card_moods = MagicMock()
+        solver.task = None
         solver.tasks = []
         solver.find_next_task = MagicMock(return_value=None)
         solver.plan_metadata = MagicMock()
@@ -2620,12 +2636,18 @@ class TestDormShiftOffMerge(unittest.TestCase):
         dorm_plan = {"dormitory_1": ["Current", "Current", "银灰", "讯使", "Current"]}
         with (
             patch.object(base_schedule, "try_reorder", return_value=dorm_plan),
+            patch.object(
+                base_schedule,
+                "dorm_candidates",
+                return_value=SimpleNamespace(recovering=[], estimated_recovering=[]),
+            ),
             patch.object(base_schedule, "try_workshop_tasks"),
             patch.object(base_schedule, "try_add_release_dorm"),
         ):
             solver.plan_solver()
 
         shift_off = [task for task in solver.tasks if task.type == TaskTypes.SHIFT_OFF]
+        solver._scan_card_moods.assert_called_once()
         self.assertEqual(len(shift_off), 1)
         self.assertEqual(shift_off[0].plan["meeting"], ["陈", "初雪"])
         self.assertEqual(
@@ -2922,6 +2944,7 @@ class TestSchedulerDispatchDeviceFailure(unittest.TestCase):
 
     def make_solver(self):
         solver = object.__new__(BaseSchedulerSolver)
+        solver.op_data = SimpleNamespace(operators={})
         solver.find = MagicMock(return_value=True)
         solver.skip = MagicMock()
         solver.tasks = []
@@ -3039,6 +3062,63 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.get_order_remaining_time.assert_called_once_with()
         solver.sleep.assert_called_once_with(90.0)
         self.assertEqual(result, {room: ["旧干员"]})
+
+    def test_extra_room_target_stops_without_modifying_task(self):
+        for cached, extra in itertools.product(
+            (True, False), ("Current", "Free", "", "安哲拉")
+        ):
+            with self.subTest(cached=cached, extra=extra):
+                solver, room, _ = self.make_solver(target="乌尔比安")
+                solver.task.type = TaskTypes.SHIFT_ON
+                original = ["乌尔比安", "幽灵鲨", extra]
+                solver.task.plan = {room: original.copy()}
+                solver.op_data.run_order_rooms = {}
+                solver.tasks = []
+                solver._can_refresh_idle_dorm_search = MagicMock(return_value=False)
+                current = ["斑点", "夜烟"]
+                solver.op_data.get_current_room.side_effect = (
+                    lambda _room, bypass=False, current_index=None: (
+                        current if cached or bypass else None
+                    )
+                )
+                solver.refresh_current_room = (
+                    BaseSchedulerSolver.refresh_current_room.__get__(solver)
+                )
+                with (
+                    patch.object(base_schedule.config, "stop_mower") as stop,
+                    patch.object(base_schedule.logger, "error") as error,
+                ):
+                    with self.assertRaisesRegex(
+                        base_schedule.MowerExit, "排班超出当前设施的 2 个岗位"
+                    ):
+                        solver.agent_arrange_room({}, room, solver.task.plan)
+                    stop.set.assert_called_once_with()
+                    error.assert_called_once()
+                self.assertEqual(solver.task.plan, {room: original})
+                solver.enter_room.assert_called_once_with(room)
+                solver.choose_agent.assert_not_called()
+                solver.get_agent_from_room.assert_not_called()
+                solver.recog.update.assert_not_called()
+                solver.get_order_remaining_time.assert_not_called()
+
+    def test_two_slot_task_runs_after_extra_target_is_removed(self):
+        solver, room, _ = self.make_solver(target="乌尔比安")
+        solver.task.type = TaskTypes.SHIFT_ON
+        solver.task.plan = {room: ["乌尔比安", "幽灵鲨"]}
+        solver.op_data.run_order_rooms = {}
+        solver.op_data.get_current_room.return_value = ["斑点", "夜烟"]
+        solver.tasks = []
+        solver._can_refresh_idle_dorm_search = MagicMock(return_value=False)
+        solver.get_agent_from_room.side_effect = None
+        solver.get_agent_from_room.return_value = [
+            {"agent": name} for name in ["乌尔比安", "幽灵鲨"]
+        ]
+        result = solver.agent_arrange_room({}, room, solver.task.plan)
+        self.assertEqual(result, {})
+        self.assertEqual(solver.task.plan, {})
+        solver.enter_room.assert_called_once_with(room)
+        solver.choose_agent.assert_called_once()
+        self.assertEqual(solver.choose_agent.call_args.args[0], ["乌尔比安", "幽灵鲨"])
 
     def test_terminal_device_failure_stops_arrangement_without_retry(self):
         for failure in (

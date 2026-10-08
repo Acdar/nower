@@ -433,7 +433,7 @@ def simulate(saved):
     if validation_msg is not None:
         logger.error(validation_msg)
         return
-    validation_msg = base_scheduler.op_data.validate_backup_plans()
+    validation_msg = base_scheduler.op_data.validate_backup_plans(max_seconds=5)
     if validation_msg.get("status") == "incomplete":
         logger.warning(f"排班校验未完成: {validation_msg['message']}")
     elif not validation_msg["success"]:
@@ -448,6 +448,7 @@ def simulate(saved):
                 if k not in base_scheduler.op_data.operators:
                     base_scheduler.op_data.add(Operator(k, ""))
                     # 只复制心情数据
+                base_scheduler.op_data.select_group_binding(k, v.group)
                 base_scheduler.op_data.operators[k].mood = v.mood
                 base_scheduler.op_data.operators[k].time_stamp = v.time_stamp
                 base_scheduler.op_data.operators[k].depletion_rate = v.depletion_rate
@@ -481,6 +482,10 @@ def simulate(saved):
                 base_scheduler.op_data.operators[k].dorm_recovery_fixed = getattr(
                     v, "dorm_recovery_fixed", ()
                 )
+            base_scheduler.op_data.restore_group_shift_state(
+                saved.get("group_shift_state")
+            )
+            base_scheduler.waiting_group_shifts = saved.get("waiting_group_shifts", [])
             base_scheduler.op_data.restore_dorm_state(saved["dorm"])
             base_scheduler.op_data.facility_states = copy.deepcopy(
                 saved.get("facility_states", {})

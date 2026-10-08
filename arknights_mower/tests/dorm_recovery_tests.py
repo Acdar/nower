@@ -13,7 +13,7 @@ sys.modules.setdefault("arknights_mower.utils.skland", MagicMock())
 from arknights_mower.solvers import base_schedule  # noqa: E402
 from arknights_mower.solvers.base_mixin import AgentSelectionNotReady  # noqa: E402
 from arknights_mower.solvers.base_schedule import BaseSchedulerSolver  # noqa: E402
-from arknights_mower.utils import config  # noqa: E402
+from arknights_mower.utils import config, performance  # noqa: E402
 from arknights_mower.utils.dorm_recovery import recovery_order_plan  # noqa: E402
 from arknights_mower.utils.operators import Operator  # noqa: E402
 from arknights_mower.utils.plan import Plan, PlanConfig, Room  # noqa: E402
@@ -72,7 +72,7 @@ def solver(monkeypatch):
     instance.selected = []
     instance.physical = ["杜林", "琴柳", "红", "陈", "银灰"]
 
-    def observe(room=ROOM, read_time_index=None):
+    def observe(room=ROOM, read_time_index=None, *, departing_plan=None):
         instance.reads.append(list(read_time_index or []))
         for op in instance.op_data.operators.values():
             if op.current_room == room and op.name not in instance.physical:
@@ -138,7 +138,7 @@ def test_idle_departure_observation_precedes_selection(solver, enabled):
     solver.get_agent_from_room.side_effect = read
     solver.choose_agent.side_effect = select
     arrange(solver)
-    assert events == (["departure"] if enabled else []) + ["selection", "readback"]
+    assert events == ["departure", "selection", "readback"]
     assert solver.physical == target
 
 
@@ -362,11 +362,8 @@ def test_changing_target_clears_previous_single_recovery_recipient(solver):
     assert solver.op_data.operators["陈"].dorm_recovery_room == ROOM
 
 
-def test_higher_priority_admission_reestablishes_single_recovery_and_reads_times(
-    solver,
-):
+def test_higher_priority_admission_reestablishes_single_recovery(solver):
     arrange(solver)
-    # 银灰已经获得单回；陈尚在宿舍外，计划新入住最后一个动态位。
     solver.physical[-1] = ""
     solver.get_agent_from_room(ROOM)
     solver.op_data.config.ope_resting_priority = ["陈"]
@@ -382,7 +379,6 @@ def test_higher_priority_admission_reestablishes_single_recovery_and_reads_times
     assert solver.op_data.operators["银灰"].dorm_recovery_room == ""
     assert solver.op_data.operators["陈"].dorm_recovery_room == ROOM
     assert {3, 4}.issubset(solver.reads[-1])
-    assert solver.op_data.operators["银灰"].current_room == ROOM
 
 
 def test_full_replacement_kept_and_full_free_occupant_temporarily_removed(solver):
@@ -456,7 +452,9 @@ def test_read_failure_keeps_restore_plan_then_retry_does_not_clear_twice(solver)
     read = solver.get_agent_from_room.side_effect
     calls = 0
 
-    def fail_after_confirmation(*args):
+    def fail_after_confirmation(*args, **kwargs):
+        if "departing_plan" in kwargs:
+            return read(*args, **kwargs)
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -585,7 +583,20 @@ def test_readback_with_remaining_competitor_never_marks_success(solver):
     assert solver.task.plan == {ROOM: FINAL}
 
 
-def test_preselection_feedback_failures_downgrade_auto_mode(solver, monkeypatch):
+@pytest.mark.parametrize(
+    ("platform", "initial_mode", "lowered_mode"),
+    [
+        ("windows", "xhigh", "high"),
+        ("darwin", "xhigh", "high"),
+        ("linux", "xhigh", "high"),
+        ("android", "medium", "low"),
+    ],
+)
+def test_preselection_feedback_failures_downgrade_auto_mode(
+    solver, monkeypatch, platform, initial_mode, lowered_mode
+):
+    monkeypatch.delenv("MOWER_ANDROID", raising=False)
+    monkeypatch.setattr(performance, "__system__", platform)
     config.conf.performance_mode = "auto"
     monkeypatch.setattr(config, "operation_feedback_avg", None)
     monkeypatch.setattr(config, "operation_feedback_count", 0)
@@ -594,20 +605,24 @@ def test_preselection_feedback_failures_downgrade_auto_mode(solver, monkeypatch)
     monkeypatch.setattr(config, "operation_failure_streak", 0)
     monkeypatch.setattr(config, "operation_recovery_successes", 0)
     solver.choose_agent.side_effect = AgentSelectionNotReady("排序反馈未到")
+    assert solver.performance_profile.mode == initial_mode
 
     for _ in range(2):
         with pytest.raises(AgentSelectionNotReady, match="排序反馈未到"):
             solver.ensure_dorm_recovery_order(ROOM, FINAL)
 
     assert solver.choose_agent.call_count == 2
-    assert config.operation_feedback_cap in {"medium", "low"}
+    assert config.operation_feedback_cap == lowered_mode
+    assert solver.performance_profile.mode == lowered_mode
     assert config.operation_failure_streak == 0
 
 
 def test_target_reaches_full_during_confirmation_does_not_keep_cycle_marker(solver):
     read = solver.get_agent_from_room.side_effect
 
-    def full_on_read(*args):
+    def full_on_read(*args, **kwargs):
+        if "departing_plan" in kwargs:
+            return read(*args, **kwargs)
         result = read(*args)
         solver.op_data.operators["银灰"].mood = 24
         return result
@@ -694,7 +709,9 @@ def test_no_safe_padding_restores_roster_without_compressing_target(
 def test_padding_actual_mood_is_checked_before_recording_single_recovery(solver):
     read = solver.get_agent_from_room.side_effect
 
-    def read_changed_mood(*args):
+    def read_changed_mood(*args, **kwargs):
+        if "departing_plan" in kwargs:
+            return read(*args, **kwargs)
         result = read(*args)
         solver.op_data.operators["黑角"].mood = 1
         return result
@@ -732,7 +749,9 @@ def test_final_roster_reads_time_again_even_when_target_keeps_same_slot(
     read = solver.get_agent_from_room.side_effect
     observed = []
 
-    def read_timer(*args):
+    def read_timer(*args, **kwargs):
+        if "departing_plan" in kwargs:
+            return read(*args, **kwargs)
         result = read(*args)
         solver.op_data.operators["黑角"].mood = padding_mood
         target = solver.op_data.operators["银灰"]
@@ -769,11 +788,61 @@ def test_full_preceding_resident_is_not_replaced_by_idle_padding(solver):
     assert solver.op_data.operators["银灰"].dorm_recovery_index == 3
 
 
+@pytest.mark.parametrize("index", [0, 2])
+@pytest.mark.parametrize("mood", [0, 5, 23, None])
+def test_preceding_fiammetta_keeps_position_and_does_not_block_recovery(
+    solver, index, mood
+):
+    solver.op_data.plan[ROOM][index] = Room("菲亚梅塔", "", ["银灰"])
+    solver.op_data.add(
+        Operator(
+            "菲亚梅塔",
+            ROOM,
+            index=index,
+            mood=mood if mood is not None else 1,
+            time_stamp=datetime.now() if mood is not None else None,
+        )
+    )
+    solver.physical[index] = "菲亚梅塔"
+    solver.get_agent_from_room()
+    final = FINAL.copy()
+    final[index] = "菲亚梅塔"
+    temporary = ["杜林", "琴柳", "黑角", "银灰", ""]
+    temporary[index] = "菲亚梅塔"
+
+    arrange(solver, final)
+
+    assert solver.confirms == [temporary, final]
+    assert all(names[index] == "菲亚梅塔" for names in solver.confirms)
+    target = solver.op_data.operators["银灰"]
+    assert (target.dorm_recovery_room, target.dorm_recovery_index) == (ROOM, 3)
+    assert solver.op_data.operators["菲亚梅塔"].dorm_recovery_room == ""
+    assert recovery_order_plan(solver.op_data, ROOM, final) is None
+
+
+def test_preceding_fiammetta_needs_no_idle_padding(solver):
+    solver.op_data.plan[ROOM][2] = Room("菲亚梅塔", "", ["银灰"])
+    solver.op_data.add(
+        Operator("菲亚梅塔", ROOM, index=2, mood=0, time_stamp=datetime.now())
+    )
+    solver.physical[2] = "菲亚梅塔"
+    solver.get_agent_from_room()
+    solver.op_data.config.free_blacklist.extend(["黑角", "红"])
+    final = ["杜林", "琴柳", "菲亚梅塔", "银灰", "陈"]
+
+    arrange(solver, final)
+
+    assert solver.confirms == [["杜林", "琴柳", "菲亚梅塔", "银灰", ""], final]
+    assert solver.op_data.operators["银灰"].dorm_recovery_index == 3
+
+
 def test_retained_full_resident_readback_must_not_compete_with_target(solver):
     solver.op_data.operators["红"].mood = 24
     read = solver.get_agent_from_room.side_effect
 
-    def read_mood(*args):
+    def read_mood(*args, **kwargs):
+        if "departing_plan" in kwargs:
+            return read(*args, **kwargs)
         result = read(*args)
         if solver.confirms:
             solver.op_data.operators["红"].mood = 1

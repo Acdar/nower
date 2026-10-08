@@ -39,6 +39,7 @@ export const useConfigStore = defineStore('config', () => {
   const medicine_expire_days = ref(0)
   const maa_report_to_yituliu = ref(false)
   const maa_yituliu_id = ref('')
+  const maa_report_to_penguin = ref(false)
   const maa_penguin_id = ref('')
   const ap_fallback = ref(0)
   const maa_weekly_plan = ref([])
@@ -65,7 +66,7 @@ export const useConfigStore = defineStore('config', () => {
   const run_order_delay = ref(10)
   const low_frame_rate_mode = ref(false)
   const performance_mode = ref('auto')
-  const performance_effective_mode = ref('high')
+  const performance_effective_mode = ref('xhigh')
   const selection_poll_interval = ref(0.1)
   const selection_transition_timeout = ref(2.5)
   const start_automatically = ref(false)
@@ -93,7 +94,7 @@ export const useConfigStore = defineStore('config', () => {
   const defaultDeerFodder = () => [
     {
       item_names: ['碳素', '碳素组', '家具零件_碳素组'],
-      children_lower_limit: 0,
+      children_lower_limit: 20,
       self_upper_limit: 9999
     }
   ]
@@ -160,8 +161,10 @@ export const useConfigStore = defineStore('config', () => {
   const sf_target = ref('结局A')
   const touch_method = ref('scrcpy')
   const free_room = ref(false)
+  const dorm_isolation = ref([])
   const merge_interval = ref(10)
   const group_rest_in_full_on_mood_gap = ref(true)
+  const group_mood_gap_threshold_minutes = ref(60)
   const group_mood_gap_max_extra_wait_hours = ref(0)
   const fia_fool = ref(true)
   const assistant_follows_schedule = ref(false)
@@ -452,7 +455,7 @@ export const useConfigStore = defineStore('config', () => {
         (performance_mode.value === 'auto'
           ? runtime_platform.value === 'android'
             ? 'medium'
-            : 'high'
+            : 'xhigh'
           : performance_mode.value)
       const fallbackProfile = performanceProfile('auto', runtime_platform.value)
       low_frame_rate_mode.value =
@@ -493,6 +496,7 @@ export const useConfigStore = defineStore('config', () => {
       medicine_expire_days.value = response.data.medicine_expire_days
       maa_report_to_yituliu.value = response.data.maa_report_to_yituliu ?? false
       maa_yituliu_id.value = response.data.maa_yituliu_id ?? ''
+      maa_report_to_penguin.value = response.data.maa_report_to_penguin ?? false
       maa_penguin_id.value = response.data.maa_penguin_id ?? ''
       ap_fallback.value = Number(response.data.ap_fallback) || 0
       maa_weekly_plan.value = normalizeWeeklyPlan(response.data.maa_weekly_plan)
@@ -573,6 +577,7 @@ export const useConfigStore = defineStore('config', () => {
         ...(response.data.run_order_grandet_mode || {})
       }
       product_switching.value = {
+        enable: false,
         max_drones_per_switch: 0,
         grandet_mode: true,
         use_drones_when_leaving_orirock: true,
@@ -593,8 +598,10 @@ export const useConfigStore = defineStore('config', () => {
       sf_target.value = response.data.secret_front.target
       touch_method.value = response.data.touch_method
       free_room.value = response.data.free_room
+      dorm_isolation.value = response.data.dorm_isolation ?? []
       merge_interval.value = response.data.merge_interval
       group_rest_in_full_on_mood_gap.value = response.data.group_rest_in_full_on_mood_gap ?? true
+      group_mood_gap_threshold_minutes.value = response.data.group_mood_gap_threshold_minutes ?? 60
       group_mood_gap_max_extra_wait_hours.value =
         response.data.group_mood_gap_max_extra_wait_hours ?? 0
       fia_fool.value = response.data.fia_fool
@@ -667,6 +674,7 @@ export const useConfigStore = defineStore('config', () => {
       medicine_expire_days: medicine_expire_days.value,
       maa_report_to_yituliu: maa_report_to_yituliu.value,
       maa_yituliu_id: maa_yituliu_id.value,
+      maa_report_to_penguin: maa_report_to_penguin.value,
       maa_penguin_id: maa_penguin_id.value,
       // 新增：Server酱的配置
       server_push_enable: server_push_enable.value ? 1 : 0,
@@ -765,8 +773,10 @@ export const useConfigStore = defineStore('config', () => {
       },
       touch_method: touch_method.value,
       free_room: free_room.value,
+      dorm_isolation: dorm_isolation.value,
       merge_interval: merge_interval.value,
       group_rest_in_full_on_mood_gap: group_rest_in_full_on_mood_gap.value,
+      group_mood_gap_threshold_minutes: group_mood_gap_threshold_minutes.value,
       group_mood_gap_max_extra_wait_hours: group_mood_gap_max_extra_wait_hours.value,
       fia_fool: fia_fool.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
@@ -810,8 +820,10 @@ export const useConfigStore = defineStore('config', () => {
       version_update_resting_threshold: version_update_resting_threshold.value / 100,
       version_update_threshold_advance_hours: version_update_threshold_advance_hours.value,
       free_room: free_room.value,
+      dorm_isolation: dorm_isolation.value,
       merge_interval: merge_interval.value,
       group_rest_in_full_on_mood_gap: group_rest_in_full_on_mood_gap.value,
+      group_mood_gap_threshold_minutes: group_mood_gap_threshold_minutes.value,
       group_mood_gap_max_extra_wait_hours: group_mood_gap_max_extra_wait_hours.value,
       fia_fool: fia_fool.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
@@ -1000,6 +1012,7 @@ export const useConfigStore = defineStore('config', () => {
     medicine_expire_days,
     maa_report_to_yituliu,
     maa_yituliu_id,
+    maa_report_to_penguin,
     maa_penguin_id,
     ap_fallback,
     maa_weekly_plan,
@@ -1107,8 +1120,10 @@ export const useConfigStore = defineStore('config', () => {
     sf_target,
     touch_method,
     free_room,
+    dorm_isolation,
     merge_interval,
     group_rest_in_full_on_mood_gap,
+    group_mood_gap_threshold_minutes,
     group_mood_gap_max_extra_wait_hours,
     fia_fool,
     assistant_follows_schedule,

@@ -311,9 +311,10 @@ const idleOptions = computed(() => [
               "
             >
               <n-checkbox v-model:checked="fix_mumu12_adb_disconnect">
-                关闭MuMu模拟器12时结束adb进程
+                关闭MuMu模拟器12时断开该实例的adb连接
                 <help-text>
-                  <div>运行命令<code>taskkill /f /t /im adb.exe</code></div>
+                  <div>仅执行<code>adb disconnect</code>，断开当前实例的adb端点</div>
+                  <div>不结束adb进程，也不影响其他模拟器或工具共用的adb连接</div>
                   <div>使用MuMu模拟器12时，若遇到adb断连问题，可尝试开启此选项</div>
                 </help-text>
               </n-checkbox>
@@ -335,9 +336,10 @@ const idleOptions = computed(() => [
               </n-radio-group>
               <help-text>
                 自动档根据选人操作后的画面反馈和连续失败情况选择{{
-                  runtime_platform === 'android' ? '中、低' : '高、中、低'
-                }}档；所有平台默认自动。
-                极高性能连续点击重排；高性能逐次确认重排点击；中性能等待稳定画面；低性能多确认一帧。时间参数独立设置，切换档位不会修改。当前自动判定：{{
+                  runtime_platform === 'android' ? '中、低' : '极高、高、中、低'
+                }}档；桌面端从极高档开始，Android 从中档开始；所有平台默认自动。
+                极高性能连续点击重排；高性能缩短清空和翻页等待，以 0.1
+                秒间隔重排，完成后统一校验；中性能等待稳定画面；低性能多确认一帧。时间参数独立设置，切换档位不会修改。当前自动判定：{{
                   performance_effective_label
                 }}。
               </help-text>
@@ -513,6 +515,9 @@ const idleOptions = computed(() => [
       </div>
       <div>
         <SKLand />
+      </div>
+      <div>
+        <YituliuSyncSettings />
       </div>
       <div>
         <Depotswitch />

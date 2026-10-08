@@ -1,3 +1,5 @@
+import { planBindings, planReplacements } from '@/utils/plan_bindings'
+import { OPERATOR_CONF_FIELDS } from '@/utils/plan_edit'
 import { defineStore } from 'pinia'
 import { ref, watchEffect, computed, inject } from 'vue'
 import axios from 'axios'
@@ -89,20 +91,7 @@ const createPlanStore = (id, endpoint, rescue = false) =>
       return override ? normalized : []
     }
 
-    const backup_conf_convert_list = [
-      'exhaust_require',
-      'rest_in_full',
-      'resting_priority',
-      'resting_priority_replacement',
-      'free_room_exclusions',
-      'resting_standby',
-      'workaholic',
-      'free_blacklist',
-      'refresh_trading',
-      'refresh_drained',
-      'ope_resting_priority',
-      'dorm_order'
-    ]
+    const backup_conf_convert_list = [...OPERATOR_CONF_FIELDS, 'dorm_order']
 
     function fill_empty(full_plan) {
       for (const i in facility_operator_limit) {
@@ -225,6 +214,9 @@ const createPlanStore = (id, endpoint, rescue = false) =>
       for (let b of backup_plans.value) {
         b.conf.mood_limits ??= null
         b.conf.operator_mood_limits ??= {}
+        b.conf.removed_operators = Object.fromEntries(
+          OPERATOR_CONF_FIELDS.map((field) => [field, str2list(b.conf.removed_operators?.[field])])
+        )
         delete b.trigger_timing
         delete b.exit_trigger_timing
         for (const i of backup_conf_convert_list) {
@@ -248,7 +240,9 @@ const createPlanStore = (id, endpoint, rescue = false) =>
       for (const roster of [plan.value, ...backup_plans.value.map((backup) => backup.plan)]) {
         for (const [room, facility] of Object.entries(roster)) {
           for (const [index, slot] of facility.plans.entries()) {
+            const replacements = planReplacements(slot)
             slot.group = ''
+            delete slot.group_bindings
             const position = `${room}:${index}`
             if (slot.agent === '菲亚梅塔') fia_positions.add(position)
             if (
@@ -256,7 +250,7 @@ const createPlanStore = (id, endpoint, rescue = false) =>
               (slot.agent === 'Current' && fia_positions.has(position))
             )
               continue
-            slot.replacement = slot.replacement.filter((name) => runners.has(name))
+            slot.replacement = replacements.filter((name) => runners.has(name))
           }
         }
       }
@@ -299,6 +293,12 @@ const createPlanStore = (id, endpoint, rescue = false) =>
       }
       if (!rescue && advancedSettingsSource) result.advanced_settings = advancedSettingsSource()
       for (const b of result.backup_plans) {
+        b.conf.removed_operators = Object.fromEntries(
+          OPERATOR_CONF_FIELDS.map((field) => [
+            field,
+            list2str(b.conf.removed_operators?.[field] ?? [])
+          ]).filter(([, names]) => names)
+        )
         delete b.trigger_timing
         delete b.exit_trigger_timing
         for (const i of backup_conf_convert_list) {
@@ -330,14 +330,31 @@ const createPlanStore = (id, endpoint, rescue = false) =>
 
     const groups = computed(() => {
       const result = []
-      for (const facility in plan.value) {
-        for (const p of plan.value[facility].plans) {
-          if (p.group) {
-            result.push(p.group)
+      for (const facility in current_plan.value) {
+        for (const p of current_plan.value[facility].plans) {
+          for (const binding of planBindings(p)) {
+            if (binding.group) result.push(binding.group)
           }
         }
       }
       return [...new Set(result)]
+    })
+
+    const group_colors = computed(() => {
+      const names = new Set()
+      for (const table of [plan.value, ...backup_plans.value.map((backup) => backup.plan)]) {
+        for (const room of Object.values(table)) {
+          for (const slot of room.plans) {
+            for (const binding of planBindings(slot)) {
+              if (binding.group) names.add(binding.group)
+            }
+          }
+        }
+      }
+      return Object.fromEntries([
+        ['', 'transparent'],
+        ...[...names].map((name, index) => [name, `hsl(${(360 / names.size) * index}, 80%, 45%)`])
+      ])
     })
 
     const sub_plan = ref('main')
@@ -349,7 +366,13 @@ const createPlanStore = (id, endpoint, rescue = false) =>
       }
     })
 
+    function import_main_facility(facility) {
+      if (sub_plan.value === 'main' || !plan.value[facility]) return
+      current_plan.value[facility] = deepcopy(plan.value[facility])
+    }
+
     return {
+      import_main_facility,
       autosave_paused,
       wait_for_plan_save: () => planSaveRequest,
       save_plan,
@@ -379,6 +402,7 @@ const createPlanStore = (id, endpoint, rescue = false) =>
       left_side_facility,
       build_plan,
       groups,
+      group_colors,
       backup_plans,
       sub_plan,
       current_plan,

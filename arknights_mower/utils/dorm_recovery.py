@@ -35,6 +35,8 @@ def recovery_target(op_data, room, agents):
             i
             for i, name in enumerate(agents)
             if op_data.is_dynamic_dorm_position(room, i, name)
+            or (bed := op_data.get_group_dorm(room, i)) is not None
+            and op_data.is_recovery_dorm(bed, name)
         ),
         None,
     )
@@ -50,7 +52,7 @@ def recovery_order_plan(op_data, room, agents, reserved_names=()):
     """建立单回时就占住最终床位，补回其他人后目标仍在原位。
 
     保留前两位的单回宿管；其他 Free 位和未满心情（或心情未知）的
-    绑组宿舍替班暂时撤下。目标前方已满心情的入住者保留，其他中间空缺用最高心情的空闲者垫位，
+    绑组宿舍替班暂时撤下。目标前方保留菲亚梅塔与已满心情的入住者，其他中间空缺用最高心情的空闲者垫位，
     不能留空让游戏压缩名单。没有可用垫位者时不执行这次单回确认。
     """
     target = recovery_target(op_data, room, agents)
@@ -76,7 +78,7 @@ def recovery_order_plan(op_data, room, agents, reserved_names=()):
     retained = []
     manager_names = {name for name, _, _ in managers}
     for index, name in enumerate(agents):
-        if name == target.name or name in manager_names:
+        if name in (target.name, "菲亚梅塔") or name in manager_names:
             retained.append(name)
             continue
         op = op_data.operators.get(name)
