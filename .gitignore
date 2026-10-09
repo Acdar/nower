@@ -239,6 +239,9 @@ openspec/
 # Official macOS ADB, staged during packaging
 /platform-tools/
 
+# Local Codex workspace files
+/.codex/
+
 #vscode
 .vscode/*
 
