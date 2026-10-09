@@ -84,6 +84,7 @@ Checklist for evaluating pull requests and git diffs under the Standards axis of
 - [ ] **[INV-DEV-01] Native Back Dispatch**: With MuMu IPC selected, does Android BACK use the owned MuMu IPC worker, and does an uncertain result interrupt the operation without input replay or ADB fallback?
 
 ### 2.2 Base Infrastructure & Scheduling Domain
+- [ ] **[INV-SCHED-40] Confirmed Crafting Dispatch**: Do confirmed batches admit ready plans from local stock without another scan, preserve per-plan deduplication and training-room protections, and reject unknown stock, unconfirmed output and disabled automation? See the [registered guarantee](../../../../CODING_STANDARDS.md#2-subsystem-invariants).
 - [ ] **[INV-SCHED-38] Pending Exhaust Recovery**: Do exhausted-shift generation and dispatch recognize one complete pending concrete off-shift arrangement across the whole queue, require named dormitory assignments or retained actual rest positions for every recovery-requiring working member, preserve incomplete groups and independent recovery, ignore specialized staffing and reopen admission after task consumption or cancellation without changing occupancy or queued tasks?
 - [ ] **[INV-SCHED-37] Recycle Staffing Capacity**: Do tests cover two physical slots without primary staffing, shared residence-list selection and mood readback, confirmed dashboard return and rescue inclusion? See the [registered guarantee](../../../../CODING_STANDARDS.md#2-subsystem-invariants).
 - [ ] **[INV-SCHED-36] Single Scheduling Cursor**: Trade orders and enabled mastery handoffs share one admission cursor that counts each queued operation once, includes scheduled waiting and prior critical operations, preserves executable staffing prefixes, admits workshop batches in full or defers them after the next critical task, and defers dependent suffixes without losing tasks or mutating actual occupancy; only fully observed ordinary room components without shared operators, group bindings or task phase state split.
@@ -172,13 +173,18 @@ Checklist for evaluating pull requests and git diffs under the Standards axis of
 
 ### 2.7 Software Update
 
+- [ ] **[INV-UPD-06] Cross-Channel Upgrade Selection**: Do development and beta checks offer newer public releases, retain the selected channel and bind OTA and full-package fallback to one target? See the [software update contract](../../../../docs/subsystems/software-update.md#11-cross-channel-upgrades).
+
 - [ ] **[INV-UPD-04] MAA Resource Platform Parity**: Do installed Windows, macOS and Linux MAA installations expose independent resource checks and updates while preserving core and Python files, rejecting active MAA use and retaining resource rollback copies?
 
+- [ ] **[INV-UPD-05] Release Artifact Scope**: Future release builds exclude macOS x64; OTA publication targets only Windows x64 and Android ARM64, including Nightly, and rejects unsafe Android runtime paths without publishing a new channel index.
 - [ ] **[INV-UPD-03] Nightly Direction Evidence**: Do same-alpha Nightly updates use publication times or upstream commit ancestry when index history is missing, preserve genuine rollback confirmation, and retain confirmation when direction cannot be verified?
 - [ ] **[INV-UPD-01] Owned Command Completion**: Does each Windows update command own descendants before execution, verify completion within its budget, and preserve other instances when preparation is cancelled?
 - [ ] **[INV-UPD-02] Complete Registration Scan**: Do strict registration scans retry within one shared monotonic budget, preserve unverified registrations and raise `InstanceScanError` instead of returning an incomplete snapshot after budget exhaustion?
 
 ### 2.8 MAA Integration
+
+- [ ] **[INV-MAA-07] Normal Long-Task Termination**: Do completed and scheduler-interrupted Roguelike, SSSCopilot and Reclamation tasks avoid errors inferred solely from `running()` returning false, while core errors and invocation exceptions retain their reporting?
 
 - [ ] **[INV-MAA-04] Inventory Stage Priority**: Do backend dispatch and frontend preview put selected annihilation first, defer unbound stages while selected inventory-bound stages survive their limits, admit ordinary fallback stages after all bound stages are skipped even with annihilation present, and preserve saved selections?
 

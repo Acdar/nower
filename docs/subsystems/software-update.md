@@ -12,9 +12,12 @@
 
 ## 3. Subsystem Invariants
 
+- **[INV-UPD-06] Cross-Channel Upgrade Selection**: Installed development and beta channels admit newer installable releases from more stable channels, preserve the selected channel and use only a verified OTA from the exact installed version to the selected target.
+
 - **[INV-RES-01] Template Glyph Coverage**: Resource generation requires a real glyph for each rendered character and preserves the calibrated glyphs already present in its subsets. Missing source coverage stops generation before either subset file changes.
 
 - **[INV-UPD-04] MAA Resource Platform Parity**: Installed MAA on Windows, macOS and Linux exposes independent resource checks and updates; installation preserves core and Python files, rejects active MAA use, and retains resource rollback copies.
+- **[INV-UPD-05] Release Artifact Scope**: Future release builds exclude macOS x64; OTA publication targets only Windows x64 and Android ARM64, including Nightly, and rejects unsafe Android runtime paths without publishing a new channel index.
 - **[INV-UPD-03] Nightly Direction Evidence**: Same-alpha Nightly updates use valid publication times or verified upstream commit ancestry to determine direction; missing index history alone never establishes a downgrade, and unverified direction retains manual confirmation.
 - **[INV-UPD-01] Owned Command Completion**: Windows update commands own their descendants before execution and verify tree completion within a finite budget before releasing the temporary checkout; cancellation preserves other application instances.
 - **[INV-UPD-02] Complete Registration Scan**: Strict registration scans retry unreadable files within one shared monotonic budget, preserve unverified registrations and raise `InstanceScanError` when that budget expires instead of returning an incomplete snapshot.
@@ -59,3 +62,17 @@ Resource update checks accept a different compatible content hash on the same da
 The immutable resource installer records `builtin_version` in the shared `index.json` alongside the ordered accepted packages. Same-day revisions follow installation order only while that baseline matches the current builtin resource version. A software update that changes builtin resources clears this precedence implicitly through the version mismatch, so an older same-day cache cannot replace the new builtin set. Legacy indexes without a baseline retain conservative selection until another resource installation records one. Installation failures restore both the prior package list and baseline; running instances switch complete generations only at existing task boundaries.
 
 [Verified Resource OTA](../../.agents/notes/implemented/architecture/2026-10-09-resource-ota.md) records installer reuse and verification for full packages and same-day OTA revisions.
+
+## 10. Published Artifact Scope
+
+Release builds produce Windows x64, Linux x64/ARM64, macOS ARM64 and Android ARM64 full packages. MowerRelease generates OTA packages only for Windows x64 and Android ARM64, for public releases and Nightly. Linux and macOS updates use full packages. Runtime filenames use canonical relative POSIX paths; Debian multiarch colons remain valid, while traversal, drive prefixes, duplicate entries and host data files remain invalid. OTA validation errors prevent channel index publication.
+
+[OTA release target scope](../../.agents/notes/implemented/simplification/2026-10-09-ota-release-target-scope.md) records focused verification.
+
+## 11. Cross-Channel Upgrades
+
+Installed development checks compare the development, beta and stable indexes. Beta checks compare beta and stable; stable checks read only stable. A more stable channel replaces the selected target only when its semantic version is higher and its full package passes platform, official-URL and SHA-256 metadata validation. Missing, unavailable or incompatible optional indexes preserve the primary channel result. The selected channel remains unchanged after installation, so later eligible Nightly builds remain discoverable. Source development deployments continue following their selected Git branch.
+
+Channel indexes retain their schema and channel-specific targets. Full and OTA assets come from the selected target's same index. OTA requires the exact installed source version; absence or reconstruction failure falls back to that target's full package. MowerRelease reserves recent Nightly sources for beta targets, and recent beta and Nightly sources for stable targets, with independent bounded quotas and platform filtering. Same-alpha Nightly direction retains [publication and commit evidence](#6-nightly-version-direction).
+
+[Cross-channel OTA upgrades](../../.agents/notes/implemented/bug-fix/2026-10-09-cross-channel-ota-upgrades.md) records the decision and focused verification.

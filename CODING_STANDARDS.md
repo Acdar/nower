@@ -31,6 +31,7 @@
 - **[INV-REC-06] Selection Page Exit**: Known facility roster pages detected during anomalous selection readings abort selection inputs and page-local fallback; normal readings add no page-template lookup or capture.
 
 ### 2.1 Base Infrastructure & Scheduling
+- **[INV-SCHED-40] Confirmed Crafting Dispatch**: With automatic mastery enabled, confirmed crafting batches reevaluate idle plans against local stock and queue eligible starts once per plan without another depot scan; unconfirmed output, unknown stock and disabled automation never admit a start, and training-room protections remain binding.
 
 - **[INV-SCHED-38] Pending Exhaust Recovery**: Exhausted-shift generation and dispatch reuse a pending concrete off-shift arrangement only when it covers every recovery-requiring working group member through explicit dormitory assignments or preserved current rest positions; incomplete groups, unrelated tasks and specialized staffing retain their existing admission, and task consumption or cancellation reopens generation.
 - **[INV-SCHED-37] Recycle Staffing Capacity**: Recycling has two physical operator slots regardless of configured staffing; the recycling plan and task schemas reject more than two slots, explicit backup tasks allow two recycling targets even when primary staffing is absent or partial, selection and mood reading use the shared residence-information list, confirmation accepts the dashboard return, rescue evaluation and initial mood sampling retain configured recycling staff, and occupancy is committed only through existing room readback.
@@ -135,7 +136,9 @@
 - **[INV-CFG-01] Configuration Data Cohesion**: Configuration imports validate all archive members before writing, restore included persistent tmp data with configuration, preserve local access settings, clear saved scheduling state, and roll back file changes if any write or database restore fails.
 
 ### 2.7 Software Update
+- **[INV-UPD-06] Cross-Channel Upgrade Selection**: Installed development and beta channels admit newer installable releases from more stable channels, preserve the selected channel and use only a verified OTA from the exact installed version to the selected target.
 - **[INV-UPD-04] MAA Resource Platform Parity**: Installed MAA on Windows, macOS and Linux exposes independent resource checks and updates; installation preserves core and Python files, rejects active MAA use, and retains resource rollback copies.
+- **[INV-UPD-05] Release Artifact Scope**: Future release builds exclude macOS x64; OTA publication targets only Windows x64 and Android ARM64, including Nightly, and rejects unsafe Android runtime paths without publishing a new channel index.
 - **[INV-UPD-03] Nightly Direction Evidence**: Same-alpha Nightly updates use valid publication times or verified upstream commit ancestry to determine direction; missing index history alone never establishes a downgrade, and unverified direction retains manual confirmation.
 - **[INV-UPD-01] Owned Command Completion**: Windows update commands own their descendants before execution and verify tree completion within a finite budget before releasing the temporary checkout; cancellation preserves other application instances.
 - **[INV-UPD-02] Complete Registration Scan**: Strict registration scans retry unreadable files within one shared monotonic budget, preserve unverified registrations and raise `InstanceScanError` when that budget expires instead of returning an incomplete snapshot.
@@ -144,6 +147,7 @@
 ### 2.8 MAA Integration
 
 - **[INV-MAA-06] Expired Source Plan Cleanup**: Successful automatic activity fallback removes only expired activity selections from the source weekly plan, preserving the destination, ordinary and still-open stages, daily settings and inventory rules.
+- **[INV-MAA-07] Normal Long-Task Termination**: Roguelike, SSSCopilot and Reclamation completion or scheduler interruption never creates an error solely because `running()` returns false; core error callbacks and invocation exceptions retain their error reporting.
 - **[INV-MAA-05] Local Inventory Execution**: Workshop execution and inventory stage selection use persisted local stock without fetching Skland; accepted MAA cumulative drops update that stock once per task, and configured stage caps stop only the reached Fight task while preserving automatic series and subsequent tasks.
 - **[INV-MAA-04] Inventory Stage Priority**: Inventory selection keeps selected annihilation first and defers unbound stages while any selected inventory-bound stage survives its limits; when all bound stages are skipped, ordinary stages remain eligible even with annihilation present, and backend dispatch and frontend preview agree without changing saved selections.
 - **[INV-MAA-01] Total Callback Handling**: Every MAA callback is consumed without raising; a missing, empty, or unrecognized payload field yields at most one diagnostic line at the C callback boundary instead of an exception.
