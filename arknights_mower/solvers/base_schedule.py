@@ -112,6 +112,7 @@ from arknights_mower.utils.operators import (
     Operators,
 )
 from arknights_mower.utils.path import get_path, resolve_config_path
+from arknights_mower.utils.plan import RIGHT_SIDE_ROOM_CAPACITY
 from arknights_mower.utils.recognize import RecognizeError, Recognizer, Scene
 from arknights_mower.utils.resource_pkg import refresh_resource_at_boundary
 from arknights_mower.utils.resting_priority import (
@@ -192,9 +193,15 @@ def _merge_shift_transition(plan: dict, overlay: dict, op_data: Operators) -> No
 def _merge_plan_overlay(plan: dict, overlay: dict, op_data: Operators) -> None:
     """把内存演算的一层结果覆盖到最终任务，不产生中间任务。"""
     for room, names in overlay.items():
-        if room not in op_data.plan:
-            continue
-        target = plan.setdefault(room, ["Current"] * len(op_data.plan[room]))
+        if room in RIGHT_SIDE_ROOM_CAPACITY:
+            if not names:
+                continue
+            target = plan.setdefault(room, [])
+            target.extend(["Current"] * (len(names) - len(target)))
+        else:
+            if room not in op_data.plan:
+                continue
+            target = plan.setdefault(room, ["Current"] * len(op_data.plan[room]))
         for index, name in enumerate(names[: len(target)]):
             if name != "Current":
                 target[index] = name
@@ -385,6 +392,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
         self.last_clue = None
         self.sleeping = False
         self._simulator_closed_for_idle = False
+        self._idle_observation_pending = False
         self.operators = {}
         self.last_execution = {"maa": None, "recruit": None, "todo": None}
         self.order_reader = TradingOrder()
@@ -631,6 +639,9 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
         if resting_members and all(op.is_resting() for op in resting_members):
             logger.info(f"{self.task.meta_data} 已完成用尽下班，继续正常规划")
             return
+        if self._has_pending_exhausted_shift(candidates):
+            logger.debug("用尽下班已有完整待执行恢复安排：%s", candidates)
+            return
         # 在candidate 中，计算出需要的high free 和 Low free 数量
         # 只计算无法直接接管的主力床位。低优、替班和临时休息干员会让床，
         # 不能在这里阻止整个大组尝试下班。
@@ -669,6 +680,48 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                 logger.warning(msg)
                 send_message(msg, level="ERROR")
             self.skip()
+
+    def _has_pending_exhausted_shift(self, candidates):
+        """A concrete off-shift task covers every recovery-requiring member."""
+        members = [
+            self.op_data.operators[name]
+            for name in candidates
+            if not self.op_data.operators[name].room.startswith("dorm")
+            and not self.op_data.operators[name].workaholic
+            and not self.op_data.operators[name].multi_group
+        ]
+        if not members:
+            return False
+        for task in self.tasks:
+            if task.type != TaskTypes.SHIFT_OFF:
+                continue
+            resting = {
+                name
+                for room, names in task.plan.items()
+                if room.startswith("dorm")
+                for name in names
+                if name not in ("", "Current", "Free")
+            }
+            working = {
+                name
+                for room, names in task.plan.items()
+                if not room.startswith("dorm")
+                for name in names
+            }
+            for member in members:
+                if not member.is_resting():
+                    continue
+                target = task.plan.get(member.current_room)
+                if target is None or (
+                    member.current_index >= 0
+                    and target[member.current_index : member.current_index + 1]
+                    in (["Current"], [member.name])
+                ):
+                    resting.add(member.name)
+            resting.difference_update(working)
+            if all(member.name in resting for member in members):
+                return True
+        return False
 
     def _plan_exhaust_support(self, candidates):
         from arknights_mower.utils.exhaust_replacement import plan_exhaust_support
@@ -1663,6 +1716,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             "factory": lambda parts: "加工站",
             "meeting": lambda parts: "会客室",
             "train": lambda parts: "训练室",
+            "recycle": lambda parts: "回收站",
         }
 
         for keyword, translation_func in translations.items():
@@ -2936,6 +2990,9 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             ):
                 continue
             if op.current_mood() <= op.lower_limit + 2:
+                candidates = self.op_data.groups[op.group] if op.group else [name]
+                if self._has_pending_exhausted_shift(candidates):
+                    continue
                 if (
                     self.find_next_task(
                         task_type=TaskTypes.EXHAUST_OFF, meta_data=op.name
@@ -6969,6 +7026,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                             "arrange_check_in",
                             "arrange_check_in_small",
                             "arrange_check_in_on",
+                            "recycle/dashboard",
                         )
                         if destination != template
                     ):
@@ -7969,6 +8027,9 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             for retry_times in range(19):
                 if self.find("connecting"):
                     self.sleep()
+                elif room == "recycle" and self.find("recycle/dashboard"):
+                    # 材料转化页没有进驻信息按钮，先回到房间视图。
+                    self.back()
                 elif pos := self.find("room_detail"):
                     if all(self.get_color((1233, 1)) > [252] * 3):
                         return
@@ -8087,10 +8148,8 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                     dict.fromkeys([*read_time_index, *dorm_read_time_index])
                 )
         self.wait_product_complete()
-        if room == "train":
-            length = 2
-        elif room == "factory":
-            length = 1
+        if room in RIGHT_SIDE_ROOM_CAPACITY:
+            length = RIGHT_SIDE_ROOM_CAPACITY[room]
         else:
             length = len(self.op_data.plan[room])
         if length > 3:
@@ -10957,16 +11016,11 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             )
 
     def _idle_sleep(self, remaining_time, allow_wakeup=True):
-        """任务之间真正的休眠——全工程里唯一维护 `sleeping` 状态的地方。
+        """等待任务并统一维护 `sleeping` 与连续场景观测边界。
 
-        所有「等到下一个任务」的等待都必须经过这里，这样 /status 读到的
-        `sleeping` 永远和实际行为一致；以后新增休息路径也不可能再漏设标志。
-        用 try/finally 保证即使被 MowerExit（点停止）打断也能复位。
-        #141：web 一键专精派发 now 任务后设 `config.wake_scheduler` 事件打断休眠，
-        让调度器下一轮立即执行新任务（不依赖 csleep——csleep 全工程共用，不能全局
-        加唤醒检查）。轮询每 ~1s，保持 csleep 的停止检查粒度；结束时照常 recog.update
-        刷新场景缓存（原 self.sleep 结尾行为）。维护等待传 allow_wakeup=False，避免普通
-        配置唤醒导致维护期间提前执行任务；停止信号仍由 csleep 正常响应。
+        普通等待响应调度器唤醒；维护等待仅响应停止信号。
+        成功恢复时清理标准画面帧、场景和计时；设备恢复失败时保留待完成的识别复位。
+        主循环成功恢复设备后完成复位；取消与错误始终复位 `sleeping`。
         """
         self.sleeping = True
         try:
@@ -10979,6 +11033,7 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                 csleep(min(1, (end_time - datetime.now()).total_seconds()))
             if config.stop_mower.is_set():
                 raise MowerExit
+            self._idle_observation_pending = True
             refresh_resource_at_boundary()
             if (
                 config.conf.close_simulator_when_idle
@@ -10990,7 +11045,8 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
                 # 启动成功即结束本轮的主动启动，后续连接故障交由正常重连恢复。
                 self._simulator_closed_for_idle = False
                 self.device.reconnect()
-            self.recog.update()
+            self.recog.reset_after_external_control()
+            self._idle_observation_pending = False
         finally:
             self.sleeping = False
 
@@ -11003,8 +11059,13 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
         working 的根因。现在全部收口到这里，只有 `_idle_sleep` 一个状态写入点。
         """
         self._schedule_maintenance_backup_check()
-        if any(getattr(task, "strict_mood_limit", False) for task in self.tasks):
-            # 睡眠前就计算提前量，不能睡到原上限时刻才发现需要提前离宿。
+        if any(
+            getattr(task, "strict_mood_limit", False)
+            or config.conf.enable_mastery
+            and task.type == TaskTypes.SWAP_SUPPORT
+            for task in self.tasks
+        ):
+            # 睡眠前计算清退与专精换人的提前量，避免等到原任务时间才避让。
             protect_priority_tasks(self.tasks, op_data=getattr(self, "op_data", None))
         first = self.tasks[0]
         remaining_time = (first.time - datetime.now()).total_seconds()
@@ -11028,7 +11089,6 @@ class BaseSchedulerSolver(EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin):
             f"休息 {format_time(remaining_time)}，到{first.format(timezone_offset).time.strftime('%H:%M:%S')}开始工作",
         )
         if remaining_time > 0:
-            self.recog.last_scene = None
             self._idle_sleep(remaining_time)
             self.check_current_focus()
 
