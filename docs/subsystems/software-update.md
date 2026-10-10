@@ -29,6 +29,8 @@
 
 `update_runtime.instances` returns a complete live-registration snapshot in strict mode. Its default five-second retry budget covers the entire scan. A zero timeout performs one attempt and reports unreadable registrations immediately. `strict=False` explicitly permits best-effort results. Read failures never establish process termination or authorize deletion of an unverified registration.
 
+`RuntimeRegistration` publishes a snapshot of its in-memory record under a per-instance lock. Registration writes flush and sync the temporary file before atomic replacement; POSIX also syncs the containing directory. Failed heartbeat publication emits an error through the application logger and retries on the next heartbeat. Configured file and interface handlers receive the error even without console output. Atomic publication preserves a complete previous record when preparation or replacement fails. Closing marks the registration closed, waits up to six seconds for in-flight publication and removes the registration while further publication is excluded. A close timeout preserves the registration for another cleanup attempt. A closed registration never starts another publication.
+
 [Restart readiness scan budget](../../.agents/notes/implemented/testing/2026-10-06-restart-readiness-scan-budget.md) records the focused test correction.
 
 ## 5. Failure Boundary
@@ -88,6 +90,8 @@ Resource packages retain `ui/src/pages/basement_skill/skill.json` as their histo
 For content hashing, `package_file_paths` collects the shared source when the compatibility export is absent. `content_hash` uses the historical archive name for that catalog's ordering, path digest and text normalization. Clean checkouts and generated resource packages with identical data therefore share the same resource version on LF and CRLF checkouts, without writing a compatibility file during validation.
 
 [Shared building-skill data](../../.agents/notes/implemented/simplification/2026-10-09-shared-building-skill-data.md) records the boundary and verification.
+
+OTA starting-file reads follow the [bundled reconstruction contract](resource-update.md#1-resource-ota).
 
 ## 13. Temporary Update Progress Service
 

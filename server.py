@@ -40,6 +40,7 @@ from arknights_mower.utils.diagnostics import (
     archive_window,
     error_events,
     export_bundle,
+    screenshots_between,
     timeline,
 )
 from arknights_mower.utils.lifecycle import shutdown
@@ -766,7 +767,10 @@ def _authorize_websocket(ws, allow_local_log=False):
     origin = request.headers.get("Origin", "")
     if allow_local_log and _local_log_request_allowed(require_origin=True):
         return True
-    if not expected or not origin or not same_origin_allowed(origin):
+    if not expected or (
+        not allow_local_log
+        and (not origin or not same_origin_allowed(origin))
+    ):
         return reject()
     try:
         first = ws.receive(timeout=5)
@@ -1911,7 +1915,20 @@ def diagnostic_timeline():
         center = datetime.datetime.fromtimestamp(timestamp / 1000)
     except (OverflowError, OSError, ValueError):
         return {"error": "请选择有效的查看时间"}, 400
-    return {"logs": timeline(get_path("@app/log"), get_path("@app/screenshot"), center)}
+    screenshot_folder = get_path("@app/screenshot")
+    images = screenshots_between(
+        screenshot_folder,
+        center - datetime.timedelta(minutes=5),
+        center + datetime.timedelta(minutes=5),
+    )
+    rows = timeline(
+        get_path("@app/log"), screenshot_folder, center, limit=1001, images=images
+    )
+    return {
+        "logs": rows[-1000:],
+        "screenshots": [relative for _, relative in images],
+        "truncated": len(rows) > 1000,
+    }
 
 
 @app.route("/diagnostics/errors")

@@ -72,7 +72,7 @@ def agent_card_selected(img, scope, *, train=False):
 
     scope 是 operator_list/operator_list_train 返回的姓名框。普通列表卡片
     比训练室卡片更宽且略高；只取边缘，避开立绘和技能图标。
-    边框不完整时返回 None，让调用方停下重读而非盲点。
+    普通卡片右缘少量裁切时使用可见的三条边；证据不足时返回 None。
     """
     if not isinstance(img, np.ndarray) or img.ndim != 3 or scope is None:
         return None
@@ -87,6 +87,30 @@ def agent_card_selected(img, scope, *, train=False):
         left, right = name_left - 22, name_left + 203
         top, bottom = name_top - 375, name_bottom + 16
     if left < 0 or top < 0 or right > img.shape[1] or bottom > img.shape[0]:
+        # 普通卡片仅右缘缺失、至少 95% 宽度可见时仍可判断；其余越界保持未知。
+        if (
+            train
+            or left < 0
+            or top < 0
+            or bottom > img.shape[0]
+            or right <= img.shape[1]
+            or img.shape[1] - left < (right - left) * 0.95
+        ):
+            return None
+        frame = cv2.cvtColor(img[top:bottom, left : img.shape[1]], cv2.COLOR_RGB2HSV)
+        blue = cv2.inRange(frame, (96, 140, 140), (105, 255, 255)) > 0
+        upper = blue[:8, 8:-8].mean()
+        lower = blue[-8:, 8:-8].mean()
+        left_side = blue[8:-8, :8].mean()
+        # 屏幕右缘不是卡片竖边；必须同时看到上、下、左三条真实边框。
+        if upper > 0.45 and lower > 0.45 and left_side > 0.45:
+            return True
+        lower_inner = blue[-8:-5, 8:-8].mean()
+        if max(upper, lower) < 0.45 and lower_inner < 0.20 and left_side < 0.20:
+            return False
+        # 保留相邻蓝框仅擦到一条竖边时的未选中判定。
+        if min(upper, lower) < 0.20 and max(upper, lower) < 0.45:
+            return False
         return None
     frame = cv2.cvtColor(img[top:bottom, left:right], cv2.COLOR_RGB2HSV)
     blue = cv2.inRange(frame, (96, 140, 160), (105, 255, 255)) > 0
@@ -570,6 +594,24 @@ class BaseMixin:
             return True
         return False
 
+    @staticmethod
+    def agent_page_has_right_gap(img, page, *, train=False):
+        """名字横带右侧全为空白时，按住画面不能作为抬手后坐标。"""
+        if not isinstance(img, np.ndarray):
+            return False
+        if not page or any(scope is None for _, scope in page):
+            return True
+        left = max(scope[1][0] for _, scope in page) + 4
+        # 两种布局均排除职业栏；半张卡片也阻止空白判定。
+        right = 1790
+        if right - left < 20:
+            return False
+        rows = ((479, 506), (895, 922)) if train else ((488, 520), (909, 941))
+        return all(
+            np.mean(np.min(img[bottom - 8 : bottom, left:right], axis=2) > 85) >= 0.9
+            for _, bottom in rows
+        )
+
     def wait_for_agent_page(
         self,
         *,
@@ -631,6 +673,12 @@ class BaseMixin:
                 stable_matches = 0
                 continue
             self.check_agent_page(ret, train=train)
+            if previous == () and self.agent_page_has_right_gap(
+                self.recog.img, ret, train=train
+            ):
+                # 末页抬手后会回弹，按住帧不能计入两帧位置稳定证据。
+                previous = None
+                continue
             if (
                 before is not None
                 and ret
@@ -771,6 +819,10 @@ class BaseMixin:
                 else False
             )
             if selected is None:
+                logger.debug(
+                    f"选人卡片边框未确认：干员{name}，姓名范围{scope}，"
+                    f"画面尺寸{getattr(self.recog.img, 'shape', None)}，训练室{train}"
+                )
                 self.require_agent_selection_page()
                 raise AgentSelectionNotReady("干员选中边框不清晰，返回房间重试")
             if not selected:
@@ -831,6 +883,11 @@ class BaseMixin:
                 mood_estimates,
                 skip_full_mood,
             )
+        if held_page == () and self.agent_page_has_right_gap(
+            self.recog.img, ret, train=train
+        ):
+            logger.debug("选人末页右侧空白，抬手后重新确认卡片位置")
+            ret = self.wait_for_agent_page(full_scan=full_scan, train=train)
         eligible = self.observe_agent_moods(
             ret, agent, mood_estimates, skip_full_mood, train=train
         )
@@ -844,6 +901,10 @@ class BaseMixin:
                     else False
                 )
                 if is_selected is None:
+                    logger.debug(
+                        f"选人卡片边框未确认：干员{name}，姓名范围{scope}，"
+                        f"画面尺寸{getattr(self.recog.img, 'shape', None)}，训练室{train}"
+                    )
                     if not page_checked:
                         self.require_agent_selection_page()
                     raise AgentSelectionNotReady("干员选中边框不清晰，返回房间重试")
