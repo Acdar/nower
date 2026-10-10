@@ -22,7 +22,6 @@ from arknights_mower.utils.operation_timing import timed_step
 from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
     effective_performance_profile,
-    is_android_runtime,
     lower_performance_mode,
 )
 from arknights_mower.utils.resource_pkg import (
@@ -240,6 +239,14 @@ def _resolve_operator_room_prefix(
 
 
 class BaseMixin:
+    agent_selection_positions = (
+        (0.35, 0.35),
+        (0.35, 0.75),
+        (0.45, 0.35),
+        (0.45, 0.75),
+        (0.55, 0.35),
+    )
+
     @property
     def performance_profile(self):
         snapshot = getattr(self, "_selection_profile_snapshot", None)
@@ -257,8 +264,7 @@ class BaseMixin:
         # 未设置档位的旧调用方仍可通过布尔值控制策略；明确选择档位后
         # 布尔兼容字段不再覆盖所选策略，也不改变用户的时间参数。
         if (
-            not is_android_runtime()
-            and config.conf.performance_mode in PERFORMANCE_PRESETS
+            config.conf.performance_mode in PERFORMANCE_PRESETS
             and "performance_mode" not in config.conf.model_fields_set
         ):
             legacy_enabled = config.conf.low_frame_rate_mode
@@ -335,6 +341,20 @@ class BaseMixin:
             else max(profile.stable_page_matches + 1, profile.transition_attempts)
         )
         return profile.poll_interval, attempts
+
+    def reorder_selected_agents(self, agents, actual):
+        """Reapply selection order using the current mode's production timing."""
+        click_order = [actual.index(name) for name in agents]
+        mode = self.performance_profile.mode
+        interval = {"xhigh": 0, "high": 0.1}.get(mode, 0.2)
+        logger.debug(f"选人重排清空：性能档位{mode}，页面已选{actual}，目标{agents}")
+        self.tap(
+            (self.recog.w * 0.38, self.recog.h * 0.95),
+            interval=0.3 if mode == "high" else 0.5,
+        )
+        for index in click_order:
+            x, y = self.agent_selection_positions[index]
+            self.tap((self.recog.w * x, self.recog.h * y), interval=interval)
 
     profession_labels = [
         "ALL",
@@ -574,7 +594,7 @@ class BaseMixin:
             full_scan=full_scan,
             train=train,
             seed_image=seed_image,
-            seed_page=previous,
+            seed_page=previous or None,
         )
         stable = False
         stable_matches = 0
@@ -585,7 +605,7 @@ class BaseMixin:
         for attempt in range(max_attempts):
             if attempt:
                 self.wait_for_next_observation(capture_time, poll_interval)
-            else:
+            elif previous != ():
                 self.recog.update()
             started = perf_counter()
             connecting = self.find("connecting")
@@ -655,6 +675,7 @@ class BaseMixin:
                 start,
                 (end[0] - start[0], 0),
                 interval=0.1 if self.performance_profile.mode == "high" else 0.2,
+                capture=True,
             )
             # 指尖离开后列表仍会滑行；翻到最后几页、列表被边界夹住时还会
             # 回弹到边界。此时把画面里的坐标直接交给调用方，点击就会落在
@@ -664,8 +685,10 @@ class BaseMixin:
                 full_scan=full_scan, train=train, attempts=3
             )
             if return_page:
-                return 1, self.observe_agent_page(
-                    actual, full_scan=full_scan, train=train
+                return (
+                    (1, self.observe_agent_page((), full_scan=full_scan, train=train))
+                    if return_page
+                    else 1
                 )
             return 1
         columns = sorted({scope[0][0] for _, scope in page})
@@ -677,11 +700,18 @@ class BaseMixin:
             # 第二次只移动一列，防止第一次延迟完成时又跨过一整页。
             distance = columns[0] - (start_x if attempt == 0 else columns[1])
             if attempt:
-                self.swipe_noinertia((start_x, y), (distance, 0), retry=True)
+                self.swipe_noinertia(
+                    (start_x, y), (distance, 0), retry=True, capture=True
+                )
             else:
-                self.swipe_noinertia((start_x, y), (distance, 0))
+                self.swipe_noinertia((start_x, y), (distance, 0), capture=True)
             actual = self.wait_for_agent_page(
-                full_scan=full_scan, train=train, before=page
+                full_scan=full_scan,
+                train=train,
+                before=page,
+                observation=self.observe_agent_page(
+                    (), full_scan=full_scan, train=train
+                ),
             )
             if not self.same_agent_page(actual, page, allow_unknown=True):
                 if return_page:
@@ -717,6 +747,7 @@ class BaseMixin:
                 respect_train_selection,
                 mood_estimates,
                 skip_full_mood,
+                observation=observation,
             )
         # 无目标时仍返回已复核的页面供调用方判断，但不进行点击。
         ret = self.wait_for_agent_page(
@@ -765,10 +796,17 @@ class BaseMixin:
         respect_train_selection=False,
         mood_estimates=None,
         skip_full_mood=False,
+        observation=None,
     ):
         """普通设备沿用单帧批量选人及缩小扫描区域的识别重试。"""
         try:
-            self.recog.update()
+            held_page = (
+                observation.consume(self.recog, full_scan=full_scan, train=train)
+                if observation is not None
+                else None
+            )
+            if held_page is None:
+                self.recog.update()
             while self.find("connecting"):
                 self.sleep()
             ret = (

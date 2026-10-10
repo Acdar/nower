@@ -1,6 +1,6 @@
 """两种选人模式的兼容性、等待预算与平台默认值。"""
 
-from importlib import import_module
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,8 +15,6 @@ from arknights_mower.utils.config.conf import Conf, RIICPart
 from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.solver import BaseSolver
 
-conf_module = import_module("arknights_mower.utils.config.conf")
-
 pytestmark = pytest.mark.usefixtures("legacy_selection_conf")
 
 
@@ -29,35 +27,33 @@ def instant_mock_capture(monkeypatch):
 @pytest.mark.parametrize("platform", ["android", "linux", "windows", "darwin"])
 def test_platform_default_only_applies_to_missing_setting(monkeypatch, platform):
     monkeypatch.delenv("MOWER_ANDROID", raising=False)
-    monkeypatch.setattr(conf_module, "__system__", platform)
     monkeypatch.setattr(performance, "__system__", platform)
     conf = Conf()
-    assert conf.low_frame_rate_mode is (platform == "android")
+    assert not conf.low_frame_rate_mode
     assert "low_frame_rate_mode" not in conf.model_dump(exclude_unset=True)
     for enabled in (False, True):
         explicit = Conf(low_frame_rate_mode=enabled)
         restored = Conf(**explicit.model_dump(exclude_unset=True))
-        assert restored.low_frame_rate_mode is (enabled or platform == "android")
+        assert restored.low_frame_rate_mode is enabled
 
 
-def test_android_embedded_runtime_defaults_on_even_when_python_reports_linux(
+def test_android_embedded_runtime_uses_shared_defaults(
     monkeypatch,
 ):
-    monkeypatch.setattr(conf_module, "__system__", "linux")
     monkeypatch.setenv("MOWER_ANDROID", "1")
-    assert RIICPart().low_frame_rate_mode
-    assert RIICPart(low_frame_rate_mode=False).low_frame_rate_mode
+    assert not RIICPart().low_frame_rate_mode
+    assert not RIICPart(low_frame_rate_mode=False).low_frame_rate_mode
 
 
-def test_android_selection_ignores_legacy_fast_override(monkeypatch):
+def test_android_selection_uses_auto_without_platform_cap(monkeypatch):
     monkeypatch.setattr(config, "conf", Conf())
     monkeypatch.setenv("MOWER_ANDROID", "1")
     monkeypatch.setattr(config, "screenshot_avg", 100)
     monkeypatch.setattr(config, "screenshot_count", 8)
     config.conf.low_frame_rate_mode = False
     solver = BaseMixin()
-    assert solver.performance_profile.mode == "medium"
-    assert solver.low_frame_rate_mode
+    assert solver.performance_profile.mode == "xhigh"
+    assert not solver.low_frame_rate_mode
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -270,7 +266,15 @@ def test_fast_training_search_stops_at_unchanged_end_page(monkeypatch):
     solver.scan_agent = MagicMock(
         return_value=([], page(("杜林", "芬", "苍苔", "炎熔")))
     )
-    solver.swipe_noinertia = MagicMock()
+    solver.recog = SimpleNamespace(_img=None)
+    held_images = [object() for _ in range(3)]
+    frames = iter(held_images)
+
+    def swipe(*args, **kwargs):
+        assert kwargs["capture"] is True
+        solver.recog._img = next(frames)
+
+    solver.swipe_noinertia = MagicMock(side_effect=swipe)
     solver.verify_agent = MagicMock()
     # 翻页后必然先确认整页停稳（见 test_fast_swipe_settles_page_before_clicking），
     # 本用例只关心调用方在整页未变化时的滑动预算。
@@ -280,6 +284,13 @@ def test_fast_training_search_stops_at_unchanged_end_page(monkeypatch):
     with pytest.raises(AgentSelectionNotReady, match="末尾"):
         solver.choose_train_ope("砾")
     assert solver.swipe_noinertia.call_count == 3
+    assert solver.scan_agent.call_count == 4
+    assert solver.scan_agent.call_args_list[0].kwargs["observation"] is None
+    for call, image in zip(solver.scan_agent.call_args_list[1:], held_images):
+        observation = call.kwargs["observation"]
+        assert observation.recognizer is solver.recog
+        assert observation.image is image
+        assert observation.train
     solver.verify_agent.assert_not_called()
 
 
@@ -312,16 +323,19 @@ def test_delayed_filter_inputs_are_acknowledged_without_repeated_toggles(monkeyp
     assert len(panel_taps) == 2  # 一次打开、一次关闭；迟到帧不能触发重复开关。
 
 
-def test_android_saved_fast_mode_is_normalized_after_restart(monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_android_preserves_saved_legacy_boolean_without_limiting_auto(
+    monkeypatch, tmp_path, legacy
+):
     monkeypatch.delenv("MOWER_ANDROID", raising=False)
-    monkeypatch.setattr(conf_module, "__system__", "android")
     monkeypatch.setattr(performance, "__system__", "android")
     monkeypatch.setattr(config, "conf_path", tmp_path / "conf.yml")
-    monkeypatch.setattr(config, "conf", Conf(low_frame_rate_mode=False))
+    monkeypatch.setattr(config, "conf", Conf(low_frame_rate_mode=legacy))
     config.save_conf()
-    assert "low_frame_rate_mode: true" in config.conf_path.read_text()
+    assert f"low_frame_rate_mode: {str(legacy).lower()}" in config.conf_path.read_text()
     config.conf = Conf()  # 模拟重启前重新构造默认配置。
-    assert config.conf.low_frame_rate_mode
+    assert not config.conf.low_frame_rate_mode
     config.load_conf()
-    assert config.conf.low_frame_rate_mode
+    assert config.conf.low_frame_rate_mode is legacy
     assert config.conf.performance_mode == "auto"
+    assert performance.effective_performance_profile(config.conf).mode == "xhigh"

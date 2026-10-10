@@ -459,7 +459,8 @@ def test_resource_reload_updates_roster_skills(solver, monkeypatch, tmp_path):
 
     empty = tmp_path / "skill.json"
     empty.write_text("[]")
-    monkeypatch.setattr(dorm_skills, "resource_ui_path", lambda *args, **kwargs: empty)
+    lookup = MagicMock(return_value=empty)
+    monkeypatch.setattr(dorm_skills, "resource_pkg_path", lookup)
     dorm_skills.clear_dorm_skill_cache()
     try:
         assert recovery_order_plan(solver.op_data, ROOM, FINAL) is None
@@ -467,6 +468,7 @@ def test_resource_reload_updates_roster_skills(solver, monkeypatch, tmp_path):
         assert dorm_skills.is_single_recovery_manager.cache_info().misses == 5
         assert recovery_order_plan(solver.op_data, ROOM, FINAL) is None
         assert dorm_skills.is_single_recovery_manager.cache_info().misses == 5
+        lookup.assert_called_once_with(dorm_skills.BUILDING_SKILL_DATA)
     finally:
         dorm_skills.clear_dorm_skill_cache()
 
@@ -717,7 +719,7 @@ def test_readback_with_remaining_competitor_never_marks_success(solver):
         ("windows", "xhigh", "high"),
         ("darwin", "xhigh", "high"),
         ("linux", "xhigh", "high"),
-        ("android", "medium", "low"),
+        ("android", "xhigh", "high"),
     ],
 )
 def test_preselection_feedback_failures_downgrade_auto_mode(

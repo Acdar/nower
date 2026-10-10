@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from arknights_mower import __rootdir__, __system__
+from arknights_mower import __rootdir__
 from arknights_mower.utils.config.device_profile import (
     LEGACY_NAMES,
     DeviceProfile,
@@ -19,7 +19,6 @@ from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
     default_performance_mode,
     default_performance_profile,
-    is_android_runtime,
 )
 
 DEFAULT_LAUNCH_COMMAND = (
@@ -502,11 +501,7 @@ class RIICPart(ConfModel):
     "选人界面稳定帧采样间隔（秒）"
     selection_transition_timeout: float = Field(default=2.5, ge=1, le=20)
     "选人界面操作反馈超时（秒）"
-    low_frame_rate_mode: bool = Field(
-        default_factory=lambda: (
-            os.environ.get("MOWER_ANDROID") == "1" or __system__ == "android"
-        )
-    )
+    low_frame_rate_mode: bool = False
     "旧版低帧率适配兼容字段；档位决定实际选人策略"
     drone_count_limit: int = 100
     "无人机使用阈值"
@@ -547,13 +542,8 @@ class RIICPart(ConfModel):
             else:
                 data["performance_mode"] = default_performance_mode()
         mode = data.get("performance_mode")
-        if mode in ("xhigh", "high") and is_android_runtime():
-            mode = data["performance_mode"] = "medium"
         if mode in PERFORMANCE_PRESETS:
             data["low_frame_rate_mode"] = PERFORMANCE_PRESETS[mode].low_frame_rate
-        elif is_android_runtime() and "low_frame_rate_mode" in data:
-            # 自动档在 Android 从中档开始；旧布尔值不能覆盖这一平台基线。
-            data["low_frame_rate_mode"] = True
         return data
 
     product_switching: ProductSwitchingConf = Field(
@@ -770,6 +760,26 @@ class AIAgentPart(ConfModel):
     "自定义 OpenAI 兼容接口地址"
     ai_model: str = ""
     "自定义模型名称"
+    ai_deepseek_model: str = "deepseek-flash"
+    "DeepSeek 模型 ID"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_deepseek_selection(cls, data):
+        if isinstance(data, dict) and data.get("ai_type") in (
+            "deepseek-v4-flash",
+            "deepseek-flash",
+            "deepseek-v4-pro",
+        ):
+            model = data["ai_type"]
+            data = {
+                **data,
+                "ai_type": "deepseek",
+                "ai_deepseek_model": (
+                    "deepseek-flash" if model == "deepseek-v4-flash" else model
+                ),
+            }
+        return data
 
     @property
     def resolved_ai_key(self) -> str:
