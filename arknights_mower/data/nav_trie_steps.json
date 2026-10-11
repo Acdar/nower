@@ -486,6 +486,71 @@
           }
         }
       ]
+    },
+    "YW-7": {
+      "updated_at": "2026-10-10T21:53:59",
+      "stage_type": "ACTIVITY",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              290,
+              826
+            ],
+            "text": "<昨日海>活动已开放"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1355,
+              881
+            ],
+            "text": "雷亚-伊比利亚",
+            "success": true
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1131,
+              537
+            ],
+            "text": "YW-7",
+            "success": true
+          }
+        }
+      ]
     }
   },
   "patterns": {
@@ -926,6 +991,72 @@
               146
             ],
             "text": "1-7",
+            "success": true
+          }
+        }
+      ]
+    },
+    "YW-*": {
+      "updated_at": "2026-10-10T21:53:59",
+      "stage_type": "ACTIVITY",
+      "source_stage": "YW-7",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              290,
+              826
+            ],
+            "text": "<昨日海>活动已开放"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1355,
+              881
+            ],
+            "text": "雷亚-伊比利亚",
+            "success": true
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              1131,
+              537
+            ],
+            "text": "YW-7",
             "success": true
           }
         }
