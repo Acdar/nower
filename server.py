@@ -2279,9 +2279,6 @@ def validate_backup_plans_route():
     try:
         global_plan = build_global_plan()
         op = Operators(global_plan)
-        validation_msg = op.init_and_validate()
-        if validation_msg is not None:
-            return {"success": False, "status": "failed", "message": validation_msg}
         result = op.validate_backup_plans()
         return result
     except Exception as e:
@@ -2788,11 +2785,6 @@ def check_maa_resource_update():
     ).strip()
     if source not in {"github", "mirrorchyan"}:
         return {"ok": False, "message": "未知的 MAA 资源更新源"}
-    if os.environ.get("MOWER_ANDROID") == "1" and source == "mirrorchyan":
-        return {
-            "ok": False,
-            "message": "Android 暂不支持 Mirror酱，请使用 GitHub 官方源",
-        }
     if source == "mirrorchyan" and not mirror_token:
         return {"ok": False, "message": "请填写 Mirror酱 CDK"}
 
@@ -2855,11 +2847,6 @@ def start_maa_resource_update():
         return {"ok": False, "message": "请先下载并设置有效的 MAA 目录"}
     if source not in {"github", "mirrorchyan"}:
         return {"ok": False, "message": "未知的 MAA 资源更新源"}
-    if os.environ.get("MOWER_ANDROID") == "1" and source == "mirrorchyan":
-        return {
-            "ok": False,
-            "message": "Android 暂不支持 Mirror酱，请使用 GitHub 官方源",
-        }
     if source == "mirrorchyan" and not mirror_token:
         return {"ok": False, "message": "请填写 Mirror酱 CDK"}
     if source == "mirrorchyan" and mirror_token != config.conf.maa_mirrorchyan_token:
