@@ -30,7 +30,7 @@ from arknights_mower.utils.device.session import (  # noqa: E402
 )
 from arknights_mower.utils.device.touch_backend import TouchFailure  # noqa: E402
 from arknights_mower.utils.logic_expression import LogicExpression  # noqa: E402
-from arknights_mower.utils.operators import Operator  # noqa: E402
+from arknights_mower.utils.operators import Operator, Operators  # noqa: E402
 from arknights_mower.utils.plan import Plan, PlanConfig, Room  # noqa: E402
 from arknights_mower.utils.recognize import (  # noqa: E402
     RecognizeError,
@@ -239,6 +239,9 @@ class TestMoodInitialization(unittest.TestCase):
         scheduler.rest_until_next_task.side_effect = base_schedule.MowerExit
         self.initialize.return_value = scheduler
         with (
+            patch(
+                "arknights_mower.solvers.trust_rotation.run_trust_rotation"
+            ) as trust_rotation,
             patch.object(self.main.NewsChecker, "get_maintenance", return_value=None),
             patch.object(self.main, "refresh_resource_at_boundary"),
             patch.object(
@@ -262,6 +265,9 @@ class TestMoodInitialization(unittest.TestCase):
         scheduler.recruit_plan_solver.assert_called_once()
         scheduler.mower_plan_solver.assert_called_once()
         scheduler.maa_plan_solver.assert_called_once()
+        trust_rotation.assert_called_once_with(
+            scheduler.device, scheduler.recog, scheduler.tasks[0].time
+        )
 
     def test_fresh_start_defers_backup_plan_until_mood_read(self):
         scheduler = MagicMock()
@@ -2837,6 +2843,9 @@ class TestDroneAccelerate(unittest.TestCase):
         solver.op_data = SimpleNamespace(
             dorm=[], operators={}, plan={}, all_dorms=lambda: []
         )
+        solver.op_data.arrangement_group_transitions = (
+            Operators.arrangement_group_transitions.__get__(solver.op_data)
+        )
         arrangements = []
 
         def fake_arrange_room(new_plan, room, plan, get_time=False):
@@ -3407,11 +3416,21 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.scene = MagicMock(return_value=Scene.INFRA_DETAILS)
         solver.find = MagicMock(return_value=None)
 
-        solver.agent_arrange(task.plan)
+        with patch(
+            "arknights_mower.solvers.mastery_support_runtime.refresh_after_central_change",
+            side_effect=lambda *_: events.append("refresh"),
+        ):
+            solver.agent_arrange(task.plan)
 
         self.assertEqual(
             events,
-            ["arranged_and_verified", "countdown", "accept_order", "restore"],
+            [
+                "arranged_and_verified",
+                "countdown",
+                "accept_order",
+                "restore",
+                "refresh",
+            ],
         )
         solver.get_order_remaining_time.assert_called_once_with()
 

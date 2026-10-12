@@ -784,6 +784,7 @@ class BaseMixin:
         respect_train_selection=False,
         mood_estimates=None,
         skip_full_mood=False,
+        require_full_mood=False,
     ):
         if not self.low_frame_rate_mode:
             return self._scan_agent_fast(
@@ -796,6 +797,7 @@ class BaseMixin:
                 mood_estimates,
                 skip_full_mood,
                 observation=observation,
+                require_full_mood=require_full_mood,
             )
         # 无目标时仍返回已复核的页面供调用方判断，但不进行点击。
         ret = self.wait_for_agent_page(
@@ -804,7 +806,12 @@ class BaseMixin:
         select_name = []
         while True:
             eligible = self.observe_agent_moods(
-                ret, agent, mood_estimates, skip_full_mood, train=train
+                ret,
+                agent,
+                mood_estimates,
+                skip_full_mood,
+                train=train,
+                require_full=require_full_mood,
             )
             target = next(
                 ((name, scope) for name, scope in ret if name in eligible), None
@@ -849,6 +856,7 @@ class BaseMixin:
         mood_estimates=None,
         skip_full_mood=False,
         observation=None,
+        require_full_mood=False,
     ):
         """普通设备沿用单帧批量选人及缩小扫描区域的识别重试。"""
         try:
@@ -882,6 +890,7 @@ class BaseMixin:
                 respect_train_selection,
                 mood_estimates,
                 skip_full_mood,
+                require_full_mood=require_full_mood,
             )
         if held_page == () and self.agent_page_has_right_gap(
             self.recog.img, ret, train=train
@@ -889,7 +898,12 @@ class BaseMixin:
             logger.debug("选人末页右侧空白，抬手后重新确认卡片位置")
             ret = self.wait_for_agent_page(full_scan=full_scan, train=train)
         eligible = self.observe_agent_moods(
-            ret, agent, mood_estimates, skip_full_mood, train=train
+            ret,
+            agent,
+            mood_estimates,
+            skip_full_mood,
+            train=train,
+            require_full=require_full_mood,
         )
         selected = []
         for name, scope in ret:
@@ -919,7 +933,7 @@ class BaseMixin:
         return selected, ret
 
     def observe_agent_moods(
-        self, page, candidates, estimates, skip_full, *, train=False
+        self, page, candidates, estimates, skip_full, *, train=False, require_full=False
     ):
         """复用识别帧记录候选预估，不刷新截图或修改干员实读数据。"""
         eligible = set(candidates)
@@ -950,7 +964,9 @@ class BaseMixin:
                         f"自动救急候选 {name} {reason}，取消本次选人"
                     )
         if estimates is None:
-            return eligible
+            if not require_full:
+                return eligible
+            estimates = {}
         now = datetime.now()
         for name, scope in page:
             if name not in eligible:
@@ -958,9 +974,13 @@ class BaseMixin:
             mood = estimate_agent_mood(self.recog.img, scope)
             if mood is None:
                 estimates.pop(name, None)
+                if require_full:
+                    eligible.discard(name)
                 continue
             estimates[name] = (mood, now)
             if skip_full and mood >= 24:
+                eligible.discard(name)
+            if require_full and mood != 24:
                 eligible.discard(name)
         return eligible
 
@@ -1276,8 +1296,35 @@ class BaseMixin:
         return None
 
     def detect_room(self) -> str:
-        colored_room = self.detect_room_type()
         img = cropimg(self.recog.img, ((568, 18), (957, 95)))
+        # 标题优先于颜色；进入动画中透出的背景不能覆盖已确认的设施标题。
+        title_rooms = ["central", "dormitory", "meeting", "contact", "recycle"]
+        score = []
+        for room in title_rooms:
+            tpl = loadres(f"room/{room}")
+            result = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
+            score.append(cv2.minMaxLoc(result)[1])
+        if max(score) >= 0.78:
+            room = title_rooms[score.index(max(score))]
+            if room == "central":
+                logger.debug("控制中枢")
+            elif room == "dormitory":
+                digit = cropimg(img, ((174, 24), (195, 54)))
+                digit = self.detect_room_number(digit)
+                if digit == 4:
+                    logger.debug("宿舍B401")
+                else:
+                    logger.debug(f"宿舍B{digit}04")
+                return f"dormitory_{digit}"
+            elif room == "meeting":
+                logger.debug("会客室1F02")
+            elif room == "recycle":
+                logger.debug("回收站")
+            else:
+                logger.debug("办公室")
+            return room
+
+        colored_room = self.detect_room_type()
         if colored_room in ["制造站", "贸易站", "发电站"]:
             digit_1 = cropimg(img, ((211, 24), (232, 54)))
             digit_2 = cropimg(img, ((253, 24), (274, 54)))
@@ -1291,33 +1338,7 @@ class BaseMixin:
         elif colored_room == "加工站":
             logger.debug("加工站B105")
             return "factory"
-        white_room = ["central", "dormitory", "meeting", "contact", "recycle"]
-        score = []
-        for room in white_room:
-            tpl = loadres(f"room/{room}")
-            result = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-            score.append(max_val)
-        if max(score) < 0.78:
-            return ""
-        room = white_room[score.index(max(score))]
-        if room == "central":
-            logger.debug("控制中枢")
-        elif room == "dormitory":
-            digit = cropimg(img, ((174, 24), (195, 54)))
-            digit = self.detect_room_number(digit)
-            if digit == 4:
-                logger.debug("宿舍B401")
-            else:
-                logger.debug(f"宿舍B{digit}04")
-            return f"dormitory_{digit}"
-        elif room == "meeting":
-            logger.debug("会客室1F02")
-        elif room == "recycle":
-            logger.debug("回收站")
-        else:
-            logger.debug("办公室")
-        return room
+        return ""
 
     def adjust_room(self, _room):
         """只返回当前画面可点击的矩形；拖动后交由下一次尝试重新定位。"""

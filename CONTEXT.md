@@ -53,11 +53,15 @@ Authoritative domain terminology, code mappings, and invariants for Arknights Mo
 ## 2. Facility & Scheduling Domain
 
 ### Scheduling Plan
+- Different mastery skills of the same operator run consecutively when at least one has reached mastery one, starting only when shared stock and permitted crafting cover their joint remaining costs, while preparing materials for the current skill only; subsequent training above mastery one inherits halving. Halving handoffs default to a ten-minute margin; only relevant operators actually entering or leaving the Control Center refresh the observed training countdown, and moves between other facilities do not trigger a refresh.
 - Backup operator lists add entries to the effective Scheduling Plan; per-field removal lists remove entries after additions, in backup order. Deactivation rebuilds the effective lists from the main plan and remaining active backups.
 - **Definition**: The declarative configuration specifying assigned primary operators, operator groups, replacements, facility products, and rest/shift rules. Contains baseline master plan (`plan1`) and condition-triggered backup plans (`backup_plans`).
 - Maintenance backups activate at a configured lead time before announced major downtime. When their effective primary slots contain trade order agents, entry skips pre-maintenance Drone Acceleration tasks and pauses all trade order runs; otherwise entry completes the existing pre-maintenance Drone Acceleration tasks before Dynamic Shift Transition.
 - **Code Mapping**: [`PlanModel`](arknights_mower/utils/config/plan.py), [`Plan1`](arknights_mower/utils/config/plan.py), [`BackupPlan`](arknights_mower/utils/config/plan.py)
 - **_Avoid_**: `Task script`, `Macro`, `Work plan`
+
+### Trust Rotation
+- **Definition**: Periodic inspection of base assistants and built activity-room occupants during daily tasks. Incumbents remain until 200% by default. With the threshold enabled, an incumbent at or above X% yields to an eligible same-kind candidate below X%; otherwise it remains until 200%. Assistant and activity-room rosters each exclude their own incumbents, permit cross-kind overlap and preserve ordinary working or resting state. Replacements prefer operators below the enabled threshold, then the lowest trust below 200%. When an ascending-trust roster confirms that all operators have 200% trust, current assignments remain and the remaining facilities are skipped for that inspection.
 
 ### Operator Mood
 - **Definition**: The numerical stamina metric (0 to 24) tracking operator working and resting states. Consumed in facilities and restored in dormitories. Active skills deactivate upon reaching morale depletion at 0 mood.
@@ -65,6 +69,7 @@ Authoritative domain terminology, code mappings, and invariants for Arknights Mo
 - **_Avoid_**: `Physical energy`, `Fatigue level`
 
 ### Base Facility
+- Recycling collection statistics preserve the collection time, observed recycling-facility occupants and recognized material quantities. Sanity-value comparisons use the supplied calculator’s probability snapshot and the active saved material-valuation snapshot at equal material counts; unknown observations remain unknown.
 - **Definition**: Distinct functional rooms with assignable slots in the Rhode Island infrastructure. Classified into working facilities (Control Center, Manufacturing, Trading, Power, Office, Reception, Training, Workshop, Recycling) and resting facilities (Dormitories 1-4).
 - **Code Mapping**: [`Facility`](arknights_mower/utils/config/plan.py), [`base_room_list`](arknights_mower/data/__init__.py)
 - **_Avoid_**: `Building slot`, `Isolated room`
@@ -135,7 +140,7 @@ Authoritative domain terminology, code mappings, and invariants for Arknights Mo
 - **Code Mapping**: [`BaseSchedulerSolver.resting`](arknights_mower/solvers/base_schedule.py)
 
 ### Single-Target Recovery Manager and Target
-- **Definition**: Recovery setup checks all five dormitory slots and selects only the first operator with a single-target recovery skill as its manager; without one, extra recovery setup is skipped. The target occupies its final slot throughout setup. Earlier non-manager slots retain confirmed full residents or use the highest-mood eligible idle operators as padding; the remaining roster is then restored. Preserve the assignment while relevant managers and target keep their positions. The game may transfer the buff after the target becomes full. Fiammetta never becomes a single-target recovery recipient; recovery setup preserves her existing position before the target regardless of mood.
+- **Definition**: Recovery setup checks all five dormitory slots and selects only the first operator with a single-target recovery skill as its manager; without one, extra recovery setup is skipped. The target occupies its final slot throughout setup. Before the target, operators with single-target recovery skills and Fiammetta retain their positions regardless of mood. Other preceding slots retain full-mood residents or use eligible full-mood idle operators without single-target recovery skills as padding; a green smiley on a selection card counts as full mood without an additional numeric reading. Roster readback precedes recovery confirmation and restoration of the remaining roster; insufficient eligible padding prevents confirmation. Preserve the assignment while relevant managers and target keep their positions. The game may transfer the buff after the target becomes full. Fiammetta never becomes a single-target recovery recipient; recovery setup preserves her existing position before the target regardless of mood.
 - Existing single-target recovery residents do not proactively reorder among themselves. A new arrival may preempt a lower-priority target; the displaced resident continues competing for subsequent lower-priority targets until reaching a vacancy or finding no eligible target. Equal tiers do not preempt. Ordinary departures still fill vacated targets from eligible non-target residents across dormitories and current arrivals, preferring local residents within a tier. Reserved and protected positions do not participate; mood changes without admission or departure do not relocate residents.
 - When filling a vacant single-target slot, candidates in the same priority tier prefer residents of that dormitory before comparing mood deficits; higher-priority candidates from other dormitories still take precedence.
 - **Code Mapping**: [`recovery_order_plan`](arknights_mower/utils/dorm_recovery.py)
@@ -170,3 +175,10 @@ Authoritative domain terminology, code mappings, and invariants for Arknights Mo
 - **Code Mapping**: [`BaseSchedulerSolver.plan_fia`](arknights_mower/solvers/base_schedule.py)
 
 - During automatic rescue, when all configured Fiammetta charging targets have full mood, eligible normal primary operators without special mood caps or reservation conflicts may be selected in ascending mood order under existing charging rules.
+
+### Medicine Expiry Threshold
+- **Definition**: `medicine_expire_days` controls expiring sanity potion use independently of weekday. MAA Fight receives the configured remaining-day threshold; local operation enables its existing expiring-potion recognition when the threshold is positive. Zero disables expiring-potion use. Retired weekend-only settings have no effect.
+
+### MAA Update Policy
+- **Definition**: MAA core and resource updates have independent automatic-check and automatic-install switches. Automatic installation requires a matching update check and an idle MAA engine.
+- **Code Mapping**: [`MaaPart`](arknights_mower/utils/config/conf.py)

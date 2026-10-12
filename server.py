@@ -785,6 +785,50 @@ def _authorize_websocket(ws, allow_local_log=False):
     return True
 
 
+def _load_frontend_pages():
+    # routes.test.js keeps this manifest aligned with Vue, including older dist.
+    manifest = Path(app.static_folder) / "frontend-routes.json"
+    if not manifest.is_file():
+        manifest = get_path("@internal/ui/public/frontend-routes.json")
+    try:
+        return frozenset(
+            p.rstrip("/").lower() or "/"
+            for p in json.loads(manifest.read_text("utf-8"))
+        )
+    except (OSError, ValueError):
+        return frozenset()
+
+
+frontend_pages = _load_frontend_pages()
+
+
+def _is_frontend_page(path):
+    return (path.rstrip("/").lower() or "/") in frontend_pages
+
+
+def _is_html_navigation():
+    return any(
+        mime == "text/html" and quality > 0
+        for mime, quality in request.accept_mimetypes
+    ) and request.headers.get("Sec-Fetch-Dest", "") in {"", "document", "iframe"}
+
+
+@app.before_request
+def serve_frontend_page():
+    if request.method not in {"GET", "HEAD"} or not _is_frontend_page(request.path):
+        return None
+    g.frontend_page = True
+    if _is_html_navigation():
+        return send_from_directory(app.static_folder, "index.html")
+
+
+@app.after_request
+def vary_frontend_response(response):
+    if g.get("frontend_page"):
+        response.vary.update(("Accept", "Sec-Fetch-Dest"))
+    return response
+
+
 @app.before_request
 def serialize_configuration_requests():
     # Export/restore must not interleave with form saves, plan edits or startup.
@@ -876,6 +920,15 @@ def serve_basement_skill(filename):
 
 
 @app.after_request
+def forbid_caching_sensitive_responses(response):
+    # /conf carries the sign-in password value, so no HTTP cache may retain it. The
+    # static assets below stay cacheable; only this endpoint is marked no-store.
+    if request.path == "/conf":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.after_request
 def gzip_static(response):
     # ui/dist 里的文本类静态资源由 Flask 静态路由直接服务，
     # 通过 after_request 统一对支持 gzip 的客户端返回预压缩 .gz 文件。
@@ -929,18 +982,7 @@ def not_found(e):
         except NotFound:
             return "<h1>404 Not Found</h1>", 404
 
-    # 与 Vue 路由表保持一致（routes.test.js 校验）；源码部署兼容尚未重建的 dist。
-    manifest = Path(app.static_folder) / "frontend-routes.json"
-    if not manifest.is_file():
-        manifest = get_path("@internal/ui/public/frontend-routes.json")
-    try:
-        pages = {
-            p.rstrip("/").lower() or "/"
-            for p in json.loads(manifest.read_text("utf-8"))
-        }
-    except (OSError, ValueError):
-        pages = set()
-    if (path.rstrip("/").lower() or "/") in pages:
+    if _is_frontend_page(path):
         return send_from_directory(app.static_folder, "index.html")
 
     # 未知 API 和缺失资源必须保留 404，不能用首页掩盖错误。
@@ -958,11 +1000,11 @@ def not_found(e):
         "basement_skill",
         "screenshots",
     }
-    navigation = any(
-        mime == "text/html" and quality > 0
-        for mime, quality in request.accept_mimetypes
-    ) and request.headers.get("Sec-Fetch-Dest", "") in {"", "document", "iframe"}
-    if navigation and root not in api_roots | resource_roots and not Path(path).suffix:
+    if (
+        _is_html_navigation()
+        and root not in api_roots | resource_roots
+        and not Path(path).suffix
+    ):
         # 保留 Vue 的未知页面提示；接口客户端和静态资源请求不进入该兜底。
         return send_from_directory(app.static_folder, "index.html")
     return {"error": "Not Found"}, 404
@@ -1628,7 +1670,11 @@ def get_status():
     with scheduled_start_lock:
         start_at = scheduled_start_at.isoformat() if scheduled_start_at else None
     response = {
-        "auto_start_handled": bool(os.environ.get("MOWER_RESTART_JOB")),
+        "desktop_startup_handled": bool(app.config.get("DESKTOP_STARTUP_HANDLED")),
+        "auto_start_handled": bool(
+            app.config.get("DESKTOP_STARTUP_HANDLED")
+            or os.environ.get("MOWER_RESTART_JOB")
+        ),
         "plan_condition": [],
         "status": "stopped",
         "scheduled_start_at": start_at,
@@ -2210,7 +2256,7 @@ def upload_sss_copilot():
         else:
             return {"exists": False}
     else:
-        print(request.files)
+        logger.debug("上传保全派驻作业：%s", request.files)
         data = request.files["copilot"]
         data.save(copilot)
         data.seek(0)
@@ -2871,7 +2917,8 @@ def start_maa_resource_update():
                 check_id,
             )
             try:
-                newer = parse_resource_version(checked_latest) > parse_resource_version(
+                published = parse_resource_version(checked_latest)
+                newer = not current_version or published > parse_resource_version(
                     current_version
                 )
             except MaaUpdateError:
@@ -2925,12 +2972,23 @@ def get_maa_conn_presets():
     config_path = os.path.join(
         resolve_config_path(config.conf.maa_path), "resource", "config.json"
     )
-    if not os.path.exists(config_path):
-        logger.warning(f"MAA 配置文件不存在，返回空预设: {config_path}")
-        return []
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             presets = [item["configName"] for item in json.load(f)["connection"]]
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "message": f"MAA 连接配置文件不存在：{config_path}。请更新 MAA 资源或重新安装完整的 MAA。",
+        }
+    except PermissionError:
+        message = f"无法读取 MAA 连接配置 {config_path}：访问被拒绝。请关闭外部 MAA 后重试，并检查当前用户的文件读取权限。"
+        logger.warning(message)
+        return {"ok": False, "message": message}
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
+        return {
+            "ok": False,
+            "message": f"MAA 连接配置文件格式无效：{config_path}。请更新 MAA 资源或重新安装完整的 MAA。",
+        }
     except Exception as e:
         logger.exception(e)
         presets = []
@@ -2982,6 +3040,94 @@ def getTradingHistory():
     from arknights_mower.solvers import record
 
     return record.get_trading_history(start_date, end_date)
+
+
+@app.route("/report/recycling_history")
+@require_token
+def get_recycling_history():
+    from arknights_mower.solvers import record
+
+    today = datetime.datetime.now().date()
+    try:
+        return record.get_recycling_history(
+            request.args.get("startDate", str(today - datetime.timedelta(days=29))),
+            request.args.get("endDate", str(today)),
+            int(request.args.get("page", 1)),
+            int(request.args.get("pageSize", 50)),
+        )
+    except (ValueError, OverflowError) as exc:
+        return {"error": str(exc)}, 400
+
+
+@app.route("/report/recycling_settings", methods=["GET", "PUT", "DELETE"])
+@require_token
+def recycling_settings():
+    from arknights_mower.solvers import record
+
+    try:
+        if request.method == "DELETE":
+            return record.update_recycling_valuation(reset=True)
+        if request.method == "PUT":
+            from arknights_mower.utils.recycling_valuation import validate_ratios
+
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict) or "ratios" not in payload:
+                raise ValueError("请提供产物价值比例")
+            return record.update_recycling_valuation(
+                ratios=validate_ratios(payload["ratios"]),
+                base_algorithm=payload.get("base_algorithm"),
+            )
+        return record.get_recycling_valuation()
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+
+@app.route("/report/recycling_settings/import", methods=["POST"])
+@require_token
+def import_recycling_values():
+    from arknights_mower.solvers import record
+    from arknights_mower.utils.recycling_valuation import (
+        MAX_IMPORT_BYTES,
+        import_yituliu_values,
+    )
+
+    if request.content_length and request.content_length > MAX_IMPORT_BYTES + 65536:
+        return {"error": "请导入不超过 2 MiB 的一图流物品价值表 Excel"}, 400
+    upload = request.files.get("file")
+    if upload is None or not (upload.filename or "").lower().endswith(".xlsx"):
+        return {"error": "请选择一图流导出的 .xlsx 物品价值表"}, 400
+    try:
+        imported = import_yituliu_values(upload.stream.read(MAX_IMPORT_BYTES + 1))
+        return record.update_recycling_valuation(imported=imported)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+
+@app.route("/report/recycling_history/export")
+@require_token
+def export_recycling_history():
+    from arknights_mower.solvers import record
+
+    today = datetime.datetime.now().date()
+    start = request.args.get("startDate", str(today - datetime.timedelta(days=29)))
+    end = request.args.get("endDate", str(today))
+    try:
+        workbook = record.export_recycling_history(start, end)
+    except (ValueError, OverflowError) as exc:
+        return {"error": str(exc)}, 400
+    try:
+        response = send_file(
+            workbook,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"回收站材料统计-{start}-{end}.xlsx",
+            max_age=0,
+        )
+        response.call_on_close(workbook.close)
+        return response
+    except BaseException:
+        workbook.close()
+        raise
 
 
 @app.route("/record/clear-data", methods=["DELETE"])
@@ -3428,13 +3574,13 @@ def growth_sync_token():
 @app.route("/growth-sync", methods=["POST"])
 @require_token
 def growth_sync():
-    from arknights_mower.utils.yituliu_sync import sync_cached_operators
+    from arknights_mower.utils.yituliu_sync import refresh_and_sync_operators
 
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict) or payload.get("confirmed") is not True:
         return {"message": "请在设置中明确选择立即同步"}, 400
     try:
-        return sync_cached_operators()
+        return refresh_and_sync_operators()
     except ValueError as exc:
         return {"success": False, "message": str(exc)}, 400
     except OSError:

@@ -297,7 +297,36 @@ class MaaPart(ConfModel):
     maa_update_channel: str = "stable"
     "MAA 版本通道：stable 正式版，beta 公测版"
     maa_auto_check_update: bool = False
-    "进入 MAA 设置页后自动检查 MAA 本体及资源更新"
+    "进入 MAA 设置页后自动检查 MAA 本体更新"
+    maa_auto_update: bool = False
+    "检查发现 MAA 本体新版本时自动更新"
+    maa_resource_auto_check_update: bool = False
+    "进入 MAA 设置页后自动检查 MAA 资源更新"
+    maa_resource_auto_update: bool = False
+    "检查发现 MAA 资源新版本时自动更新"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_maa_update_policy(cls, values):
+        if (
+            isinstance(values, dict)
+            and "maa_auto_check_update" in values
+            and "maa_resource_auto_check_update" not in values
+        ):
+            values = dict(values)
+            values["maa_resource_auto_check_update"] = values.get(
+                "maa_auto_check_update", False
+            )
+        return values
+
+    @model_validator(mode="after")
+    def maa_install_requires_check(self):
+        if self.maa_auto_update:
+            self.maa_auto_check_update = True
+        if self.maa_resource_auto_update:
+            self.maa_resource_auto_check_update = True
+        return self
+
     maa_conn_preset: str = Field(
         default_factory=lambda: "CompatMac" if sys.platform == "darwin" else "General"
     )
@@ -368,8 +397,6 @@ class RegularTaskPart(ConfModel):
     "日常任务间隔"
     medicine_expire_days: int = 0
     "自动使用将要过期的理智药（剩余天数，0 表示不使用）"
-    expiring_medicine_on_weekend: bool = False
-    "仅在周末使用将要过期的理智药"
     ap_fallback: int = 0
     "关卡体力消耗默认值（数据中找不到关卡时的兜底，0 表示不启用）"
     maa_eat_stone: bool = False
@@ -410,6 +437,14 @@ class RegularTaskPart(ConfModel):
     "访问好友处理方式：mower 原生 / maa 交 MAA"
     report_enable: bool = True
     "读取基报"
+    trust_rotation_enable: bool = False
+    "日常窗口检查基建副手与活动室信赖"
+    trust_rotation_prefer_low: bool = False
+    "优先选择低于信赖阈值的干员"
+    trust_rotation_threshold: int = Field(default=100, ge=1, le=200)
+    "优先信赖阈值（百分比）"
+    trust_rotation_interval: float = Field(default=24, ge=1, le=168)
+    "信赖检查间隔（小时）"
 
 
 class WorkShopItem(ConfModel):
@@ -807,11 +842,8 @@ class MaaRewardPart(ConfModel):
     "领取五周年赠送月卡奖励"
 
 
-# 已退役的旧字段名 → 现在的字段名。旧键名拼写有误（exipring），已换名；旧配置文件或旧前端
-# 提交时仍会用旧键名，须在构造 Conf 时统一把它搬到新键名下——只在旧键名确实出现时搬运
-# （没配过就不写新键、不注入默认值），新旧并存时以新键为准（不覆盖）。
+# 旧配置文件及旧前端提交的字段在校验层统一迁移；新旧并存时以新键为准。
 _LEGACY_KEY_MIGRATIONS = {
-    "exipring_medicine_on_weekend": "expiring_medicine_on_weekend",
     "hot_update": "resource_update",
 }
 

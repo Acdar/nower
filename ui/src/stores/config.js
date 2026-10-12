@@ -42,6 +42,9 @@ export const useConfigStore = defineStore('config', () => {
   const maa_mirrorchyan_token = ref('')
   const maa_update_channel = ref('stable')
   const maa_auto_check_update = ref(false)
+  const maa_auto_update = ref(false)
+  const maa_resource_auto_check_update = ref(false)
+  const maa_resource_auto_update = ref(false)
   const automatic_rescue_enable = ref(false)
   const maa_restore_theme_enable = ref(false)
   const maa_restore_theme = ref('')
@@ -160,6 +163,10 @@ export const useConfigStore = defineStore('config', () => {
   const product_switching = ref({})
   const check_mail_enable = ref(true)
   const report_enable = ref(true)
+  const trust_rotation_enable = ref(false)
+  const trust_rotation_prefer_low = ref(false)
+  const trust_rotation_threshold = ref(100)
+  const trust_rotation_interval = ref(24)
   const recruit_gap = ref(false)
   const recruit_auto_5 = ref('hand')
   const webview = ref({ scale: 1.0 })
@@ -190,7 +197,6 @@ export const useConfigStore = defineStore('config', () => {
   const resource_update_auto_update = ref(false)
   const notification_level = ref('INFO')
   const waiting_scene = ref({})
-  const expiring_medicine_on_weekend = ref(false)
   const maa_mail = ref(false)
   const maa_recruit = ref(false)
   const maa_orundum = ref(false)
@@ -498,6 +504,10 @@ export const useConfigStore = defineStore('config', () => {
       maa_mirrorchyan_token.value = response.data.maa_mirrorchyan_token || ''
       maa_update_channel.value = response.data.maa_update_channel === 'beta' ? 'beta' : 'stable'
       maa_auto_check_update.value = response.data.maa_auto_check_update ?? false
+      maa_auto_update.value = response.data.maa_auto_update ?? false
+      maa_resource_auto_check_update.value =
+        response.data.maa_resource_auto_check_update ?? response.data.maa_auto_check_update ?? false
+      maa_resource_auto_update.value = response.data.maa_resource_auto_update ?? false
       automatic_rescue_enable.value = response.data.automatic_rescue_enable ?? false
       maa_restore_theme_enable.value = response.data.maa_restore_theme_enable ?? false
       maa_restore_theme.value = response.data.maa_restore_theme ?? ''
@@ -599,6 +609,10 @@ export const useConfigStore = defineStore('config', () => {
       }
       check_mail_enable.value = response.data.check_mail_enable
       report_enable.value = response.data.report_enable
+      trust_rotation_enable.value = response.data.trust_rotation_enable ?? false
+      trust_rotation_prefer_low.value = response.data.trust_rotation_prefer_low ?? false
+      trust_rotation_threshold.value = response.data.trust_rotation_threshold ?? 100
+      trust_rotation_interval.value = response.data.trust_rotation_interval ?? 24
       recruit_gap.value = response.data.recruit_gap
       recruit_auto_5.value = response.data.recruit_auto_5
       webview.value = response.data.webview
@@ -641,7 +655,6 @@ export const useConfigStore = defineStore('config', () => {
       resource_update_auto_update.value = response.data.resource_update?.auto_update ?? false
       notification_level.value = response.data.notification_level
       waiting_scene.value = response.data.waiting_scene
-      expiring_medicine_on_weekend.value = response.data.expiring_medicine_on_weekend
       maa_mail.value = response.data.maa_mail
       maa_recruit.value = response.data.maa_recruit
       maa_orundum.value = response.data.maa_orundum
@@ -681,6 +694,9 @@ export const useConfigStore = defineStore('config', () => {
       maa_mirrorchyan_token: maa_mirrorchyan_token.value,
       maa_update_channel: maa_update_channel.value,
       maa_auto_check_update: maa_auto_check_update.value,
+      maa_auto_update: maa_auto_update.value,
+      maa_resource_auto_check_update: maa_resource_auto_check_update.value,
+      maa_resource_auto_update: maa_resource_auto_update.value,
       automatic_rescue_enable: automatic_rescue_enable.value,
       maa_restore_theme_enable: maa_restore_theme_enable.value,
       maa_restore_theme: maa_restore_theme.value,
@@ -774,6 +790,10 @@ export const useConfigStore = defineStore('config', () => {
       product_switching: product_switching.value,
       check_mail_enable: check_mail_enable.value,
       report_enable: report_enable.value,
+      trust_rotation_enable: trust_rotation_enable.value,
+      trust_rotation_prefer_low: trust_rotation_prefer_low.value,
+      trust_rotation_threshold: trust_rotation_threshold.value,
+      trust_rotation_interval: trust_rotation_interval.value,
       recruit_gap: recruit_gap.value,
       recruit_auto_5: recruit_auto_5.value,
       webview: webview.value,
@@ -817,7 +837,6 @@ export const useConfigStore = defineStore('config', () => {
       },
       notification_level: notification_level.value,
       waiting_scene: waiting_scene.value,
-      expiring_medicine_on_weekend: expiring_medicine_on_weekend.value,
       maa_mail: maa_mail.value,
       maa_recruit: maa_recruit.value,
       maa_orundum: maa_orundum.value,
@@ -1020,6 +1039,9 @@ export const useConfigStore = defineStore('config', () => {
     maa_mirrorchyan_token,
     maa_update_channel,
     maa_auto_check_update,
+    maa_auto_update,
+    maa_resource_auto_check_update,
+    maa_resource_auto_update,
     automatic_rescue_enable,
     maa_restore_theme_enable,
     maa_restore_theme,
@@ -1126,6 +1148,10 @@ export const useConfigStore = defineStore('config', () => {
     product_switching,
     check_mail_enable,
     report_enable,
+    trust_rotation_enable,
+    trust_rotation_prefer_low,
+    trust_rotation_threshold,
+    trust_rotation_interval,
     recruit_gap,
     recruit_auto_5,
     webview,
@@ -1156,7 +1182,6 @@ export const useConfigStore = defineStore('config', () => {
     resource_update_auto_update,
     notification_level,
     waiting_scene,
-    expiring_medicine_on_weekend,
     maa_mail,
     maa_recruit,
     maa_orundum,

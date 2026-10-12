@@ -72,12 +72,23 @@ Android resource updates use either GitHub or the existing MirrorChyan `MaaResou
 
 Android core updates continue to require the official Android component package. MAA-Meow's MirrorChyan application resource distributes its own APK and is not a Mower core update source. The integration follows MAA-Meow's [resource download resolver](https://github.com/Aliothmoon/MAA-Meow/blob/4e6a4d910d8b5f0b34c9cce2e5cc08a9da4f4f1b/app/src/main/java/com/aliothmoon/maameow/data/datasource/update/MirrorChyanResourceDownloadUrlResolver.kt).
 
+### 2.9 Independent Update Policies
+
+MAA core and resource updates each expose automatic-check and automatic-install switches in their own settings section. Entering the settings page or changing relevant configuration checks only enabled components. Automatic installation also enables its own check and uses the existing update endpoint after a current successful result. Disabling a policy or changing the target, source or core channel invalidates pending automatic installation. The legacy combined check initializes both check policies without enabling installation; explicit resource preferences remain independent.
+
+A missing or invalid local resource timestamp is unknown. A valid published timestamp can update unknown resources after a matching check; known versions require a strictly newer published timestamp. Check receipts remain bound to the target, source and observed local version, are consumed once, and retain the MAA idle-engine and update-job gates. Read-denied resource metadata exposes the file path and remediation guidance. Connection-preset reads and failed resource-loading diagnostics distinguish missing, malformed and read-denied `resource/config.json` files. Merging alters write permissions only on staged replacement files; failures preserve the current installation and rollback copies.
+
+The [independent update decision](../../.agents/notes/implemented/simplification/2026-10-11-maa-independent-updates.md) records the simplification audit and offline coverage.
+
 ## 3. Subsystem Invariants
+
+- **[INV-MAA-10] Independent Update Admission**: MAA core and resource automatic checks and installations use independent policies, installations consume a matching check only while MAA is idle, and an unknown local resource version accepts a valid published version without accepting mismatched or reused checks.
 
 - **[INV-MAA-08] Verified MAA Admission**: Resource loading, task submission and task startup require positive MAA results; rejected calls identify their phase and target, clear the pending run without recording successful execution, and preserve rollback backups.
 
 - **[INV-MAA-07] Normal Long-Task Termination**: Roguelike, SSSCopilot and Reclamation completion or scheduler interruption never creates an error solely because `running()` returns false; core error callbacks and invocation exceptions retain their error reporting.
 - Long-task polling returns to the existing idle path after completion or scheduler interruption. Callback lines describe completion and stop; polling adds no generic interruption error or ERROR notification. The [normal termination decision](../../.agents/notes/implemented/simplification/2026-10-09-maa-normal-termination.md) records the removed crash inference.
+- **[INV-MAA-09] Weekday-Independent Medicine**: MAA Fight passes the configured expiry threshold independently of weekday, local potion use retains positive-threshold and expiring-potion checks, and retired weekend-only keys never alter either rule or persist on save. The [expiry threshold decision](../../.agents/notes/implemented/simplification/2026-10-11-medicine-expiry-threshold.md) records the removed setting and native recognition boundary.
 
 - **[INV-MAA-05] Local Inventory Execution**: Workshop execution and inventory stage selection use persisted local stock without fetching Skland; accepted MAA cumulative drops update that stock once per task, and configured stage caps stop only the reached Fight task while preserving automatic series and subsequent tasks.
 
