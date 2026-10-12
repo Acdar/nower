@@ -84,6 +84,91 @@ def shift_off(solver, group):
     return admitted, plan
 
 
+@pytest.fixture(params=[False, True], ids=["cross-room", "same-room"])
+def working_shared_covers(solver, request):
+    solver.global_plan["default_plan"].config.resting_standby = ["清道夫"]
+    plans = solver.global_plan["default_plan"].plan
+    plans["central"] = [Room(A, "甲", [SHARED]), Room("陈", "甲", ["清道夫"])]
+    plans["meeting"] = [Room(B, "乙", ["初雪"])]
+    plans["dormitory_2"] = [
+        Room("杜林", "", []),
+        Room("夜莺", "", []),
+        *[Room("Free", "", []) for _ in range(3)],
+    ]
+    plans["contact"][0].group = "乙"
+    plans["contact"][0].group_bindings = [{"group": "甲", "replacement": ["红"]}]
+    follower = Room(
+        "清道夫",
+        "乙",
+        ["黑角"],
+        group_bindings=[{"group": "甲", "replacement": ["黑角"]}],
+    )
+    if request.param:
+        plans["central"].extend([plans.pop("contact")[0], follower])
+    else:
+        plans["recycle"] = [follower]
+    assert solver.initialize_operators() is None
+    Operators.current_room_changed_callback = None
+    solver._refresh_deferred_product_reservations = lambda: None
+    solver.check_fia = lambda: (None, None)
+    for op in solver.op_data.operators.values():
+        op._current_room, op.current_index = op.room, op.index
+        op.mood, op.time_stamp = 5, datetime.now()
+    return solver
+
+
+@pytest.mark.parametrize("observed", [False, True], ids=["same-round", "observed"])
+def test_other_group_waits_for_working_shared_covers(working_shared_covers, observed):
+    s = working_shared_covers
+    first, covers = {}, []
+    assert s.get_resting_plan(s.op_data.groups["甲"].copy(), covers, first, 0)
+    assert first["central"][:2] == [SHARED, "清道夫"]
+    if observed:
+        apply(s, first)
+        first, covers = {}, []
+    data = s.op_data
+    before_plan, before_covers = deepcopy(first), covers.copy()
+    before_beds, before_groups = deepcopy(data.dorm), deepcopy(data.group_shift_state)
+    before_positions = {
+        n: (op.current_room, op.current_index) for n, op in data.operators.items()
+    }
+    assert not s.get_resting_plan(data.groups["乙"].copy(), covers, first, 0)
+    assert first == before_plan and covers == before_covers
+    assert [(b.name, b.time) for b in data.dorm] == [
+        (b.name, b.time) for b in before_beds
+    ]
+    assert data.group_shift_state == before_groups
+    assert {
+        n: (op.current_room, op.current_index) for n, op in data.operators.items()
+    } == before_positions
+    if not observed:
+        apply(s, first)
+    apply(
+        s,
+        {
+            "central": [
+                A,
+                "陈",
+                *([SHARED, "清道夫"] if len(data.plan["central"]) == 4 else []),
+            ]
+        },
+    )
+    assert shift_off(s, "乙")[0]
+
+
+def test_ordinary_resting_preserves_other_groups_working_covers(working_shared_covers):
+    s = working_shared_covers
+    assert shift_off(s, "甲")[0]
+    s.total_agent = list(s.op_data.operators.values())
+    s.op_data.operators[B].mood = 0
+    before_beds = [(bed.name, bed.time) for bed in s.op_data.dorm]
+    assert s.resting() == {}
+    assert not s.tasks
+    assert [(bed.name, bed.time) for bed in s.op_data.dorm] == before_beds
+    assert s.op_data.operators[SHARED].current_room == "central"
+    assert s.op_data.operators["清道夫"].current_room == "central"
+
+
 @pytest.mark.parametrize("compatible", [False, True])
 def test_exhausted_only_shared_cover_retains_binding_compatibility(solver, compatible):
     data = solver.op_data
@@ -224,7 +309,7 @@ def test_follower_recovery_time_does_not_delay_group_return(solver):
         ([{"group": "", "replacement": ["黑角"]}], "不能为空"),
         ([{"group": "乙", "replacement": []}], "需要替班"),
         ([{"group": "无主组", "replacement": ["黑角"]}], "缺少决定上下班的工作主班"),
-        ([{"group": "乙", "replacement": [B]}], "不可用高效组"),
+        ([{"group": "乙", "replacement": [A]}], "不可用高效组"),
     ],
 )
 def test_invalid_binding_reports_actionable_error(solver, bindings, error):
@@ -519,7 +604,7 @@ def test_dorm_accepts_working_primary_secondary_binding(solver, reciprocal):
     assert solver.initialize_operators() is None
     data = solver.op_data
     assert data.operators[SHARED].group == "甲"
-    assert data.is_same_group_dorm_replacement(data.operators["塑心"], SHARED)
+    assert data.is_same_group_primary_replacement(data.operators["塑心"], SHARED)
     apply(solver, {room: [op.agent for op in row] for room, row in plan.items()})
     admitted, off = shift_off(solver, "乙")
     assert admitted
@@ -551,15 +636,25 @@ def test_worker_accepts_dorm_primary_secondary_binding(solver):
     assert solver.op_data.get_dorm_by_name(B)[1].position == ("dormitory_1", 0)
 
 
-@pytest.mark.parametrize("relationship", ["cross_group", "work_work"])
-def test_secondary_binding_retains_primary_replacement_restrictions(
-    solver, relationship
-):
+@pytest.mark.parametrize("reciprocal", [False, True])
+def test_working_primaries_accept_secondary_binding_replacements(solver, reciprocal):
     plan = solver.global_plan["default_plan"].plan
-    if relationship == "cross_group":
-        plan["dormitory_1"][0] = Room("塑心", "丙", [SHARED])
-    else:
-        plan["meeting"][1].replacement = [SHARED]
+    plan["meeting"][1].replacement = [SHARED]
+    if reciprocal:
+        plan["contact"][0].group_bindings[0]["replacement"] = [B]
+    assert solver.initialize_operators() is None
+    data = solver.op_data
+    assert data.operators[SHARED].group == "甲"
+    assert data.is_same_group_primary_replacement(data.operators[B], SHARED)
+    assert (
+        data.is_same_group_primary_replacement(data.operators[SHARED], B, "乙")
+        is reciprocal
+    )
+
+
+def test_secondary_binding_rejects_cross_group_primary_replacement(solver):
+    plan = solver.global_plan["default_plan"].plan
+    plan["dormitory_1"][0] = Room("塑心", "丙", [SHARED])
     assert "替换组不可用高效组干员" in solver.initialize_operators()
 
 
