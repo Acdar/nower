@@ -5,8 +5,8 @@
 import ctypes
 import json
 import os
+import re
 import subprocess
-import sys
 import time
 from typing import Any, Callable, Optional
 
@@ -107,12 +107,11 @@ class MuMu12IPC:
 
     def __init__(self, device):
         self.device = device
-        # Normalize emulator folder from config (compatible with your project layout)
-        sim_folder_from_config = os.path.normpath(
-            config.conf.simulator.simulator_folder
+        profile = getattr(config.conf, "device", None)
+        self._emu_root, manager_path = resolve_mumu_paths(
+            config.conf.simulator.simulator_folder,
+            getattr(profile, "manager_path", ""),
         )
-        self.manager_path = os.path.join(sim_folder_from_config, "MuMuManager.exe")
-        self._emu_root = os.path.dirname(sim_folder_from_config)
 
         self._index: int = int(config.conf.simulator.index)
         self._conn: int = 0
@@ -261,64 +260,19 @@ class MuMu12IPC:
         self._dll.nemu_input_event_key_up.restype = ctypes.c_int
 
     def _manager_json(self, subcmd: str) -> dict:
-        """封装执行 MuMuManager.exe 命令的通用逻辑"""
+        """
+        Call MuMuManager.exe to get JSON for 'setting' or 'info' and decode.
+        """
         cmd = [self._manager, subcmd, "-v", str(self._index), "-a"]
-
-        # 为 Windows 设置 creationflags 以隐藏窗口
-        creation_flags = 0
-        if sys.platform == "win32":
-            creation_flags = subprocess.CREATE_NO_WINDOW
-
         try:
-            result = subprocess.run(
+            out = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 check=True,
-                encoding="utf-8",  # 明确指定编码
-                creationflags=creation_flags,
-            )
-
-            # 优先使用 stdout，如果为空则尝试 stderr
-            output = result.stdout.strip()
-            if not output and result.stderr:
-                logger.debug("Command output was found in stderr.")
-                output = result.stderr.strip()
-
-            if not output:
-                # 命令成功执行但没有输出
-                logger.warning(f"命令 {' '.join(cmd)} 成功执行，但没有输出。")
-                return {}  # 返回一个空字典以避免后续错误
-
-            return json.loads(output)
-
-        except subprocess.CalledProcessError as e:
-            # 安全地获取错误信息，处理 stdout/stderr 可能为 None 的情况
-            error_output = e.stderr if e.stderr else e.stdout
-            error_message = (
-                error_output.strip()
-                if error_output
-                else "[命令执行失败，且没有任何输出]"
-            )
-
-            logger.error(
-                f"执行 MuMuManager 命令失败，返回码: {e.returncode}，错误: {error_message}"
-            )
-            raise
-        except json.JSONDecodeError as e:
-            # 输出不是有效的 JSON
-            raw_output = (
-                result.stdout.strip()
-                if "result" in locals() and result.stdout
-                else "N/A"
-            )
-            logger.error(
-                f"解析 MuMuManager 的 JSON 输出失败: {e}。原始输出: {raw_output}"
-            )
-            raise
-        except FileNotFoundError:
-            logger.error(f"无法找到 MuMuManager.exe，请检查路径: {self._manager}")
-            raise
+                **hidden_console_options(),
+            ).stdout.strip()
+            return json.loads(out)
         except Exception as e:
             raise Exception(f"MuMuManager `{subcmd}` failed: {e}")
 
@@ -353,8 +307,8 @@ class MuMu12IPC:
         """
         Returns (major, minor, patch) for decision-making. Caches coord mapping rule.
         """
-        data = self._manager_json("setting")
-        version = str(data.get("core_version", "0.0.0"))
+        # data = self._manager_json("setting")
+        version = self.get_setting_core_version()
         parts = tuple(int(x) for x in version.split(".")[:3])
         if self._is_new_coord is None:
             # MuMu 12 changed coordinate arguments since 4.1.21
@@ -395,13 +349,21 @@ class MuMu12IPC:
         """
         'running' | 'launching' | 'stopped'
         """
-        info = self._manager_json("info")
-        if (
-            info.get("is_android_started")
-            or info.get("player_state") == "start_finished"
-        ):
+        # info = self._manager_json("info")
+        # if (
+        #     info.get("is_android_started")
+        #     or info.get("player_state") == "start_finished"
+        # ):
+        #     return "running"
+        # if info.get("is_process_started"):
+        #     return "launching"
+        # return "stopped"
+        data = self.get_emulator_info()
+        if data == "start_finished":
             return "running"
-        if info.get("is_process_started"):
+        if data == "starting_vm":
+            return "launching"
+        if data == "starting_rom":
             return "launching"
         return "stopped"
 
@@ -434,41 +396,10 @@ class MuMu12IPC:
 
     def get_display_id(self):
         """
-        获取指定应用的 Display ID，并增加等待和重试机制。
-        应用启动需要时间，因此需要轮询。
+        Bind the instance display; the configured package stays a fallback.
         """
-        # 第一次探测连接时先打开游戏
-        try:
-            self.device.launch()
-        except Exception as e:
-            logger.warning(f"尝试打开游戏失败: {e}")
-
-        pkg_name = config.conf.APPNAME.encode("utf-8")
-        timeout_seconds = 20  # 等待应用启动的总超时时间，可以根据需要调整
-        start_time = time.time()
-
-        logger.info(f"正在等待应用 '{config.conf.APPNAME}' 启动并获取其 Display ID...")
-
-        while time.time() - start_time < timeout_seconds:
-            self._display_id = self._dll.nemu_get_display_id(
-                self._conn, pkg_name, self._app_index
-            )
-
-            if self._display_id >= 0:
-                logger.info(f"成功获取 Display ID: {self._display_id}")
-                return  # 成功获取，退出函数
-
-            # 如果获取失败，记录返回码并等待后重试
-            logger.debug(
-                f"获取 Display ID 失败 (返回码: {self._display_id})，将在 1 秒后重试..."
-            )
-            time.sleep(1)
-
-        # 如果循环结束（超时），仍未获取成功，则抛出最终的异常
-        logger.error(
-            f"在 {timeout_seconds} 秒内未能获取到 Display ID，应用可能未能正常启动或置于前台。"
-        )
-        raise RuntimeError("获取Display ID失败")
+        self._display_id = bind_display(self._dll, self._conn, config.conf.APPNAME)
+        logger.debug(f"Display bound: id={self._display_id}")
 
     def _ensure_ready(self):
         """
@@ -487,64 +418,11 @@ class MuMu12IPC:
         """
         Capture RGBA frame into reusable buffer, return HxWx3 (RGB) numpy array flipped to upright.
         """
-        # Try a few times before giving up. Many IPC errors are transient (simulator focus,
-        # display not ready, temporary renderer loss, etc.). On failure we attempt soft
-        # reconnects; only after exhausting retries we exit the device.
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                self._ensure_ready()
-                self._ensure_buffer()
-
-                w = ctypes.c_int(self._W)
-                h = ctypes.c_int(self._H)
-                ret = self._dll.nemu_capture_display(
-                    self._conn,
-                    self._display_id,
-                    self._BYTES,
-                    ctypes.byref(w),
-                    ctypes.byref(h),
-                    self._buffer,
-                )
-
-                if ret == 0:
-                    # Interpret buffer: RGBA -> RGB, flip vertically
-                    frame = np.frombuffer(self._buffer, dtype=np.uint8).reshape(
-                        (self._H, self._W, 4)
-                    )[:, :, :3]
-                    return np.flipud(frame)
-
-                # Non-zero return: log and try to recover. Treat some return codes as transient.
-                logger.warning(
-                    f"nemu_capture_display returned {ret} (attempt {attempt}/{attempts})"
-                )
-
-                # soft reset state so next attempt will re-establish connection/display id
-                self._conn = 0
-                self._display_id = -1
-
-                # Try to reconnect immediately for next attempt (best-effort)
-                try:
-                    self.connect()
-                    self.get_display_id()
-                except Exception as inner:
-                    logger.debug(f"reconnect attempt failed: {inner}")
-
-                # short backoff before retrying
-                time.sleep(0.2)
-
-            except MowerExit:
-                raise
-            except Exception as e:
-                logger.error(f"capture_display error on attempt {attempt}: {e}")
-                # prepare for next loop iteration
-                self._conn = 0
-                self._display_id = -1
-                time.sleep(0.2)
-
-        # All attempts exhausted. Perform final cleanup and signal device exit.
-        logger.error("capture_display failed after retries, exiting device")
-        return np.zeros((self._H, self._W, 3), dtype=np.uint8)
+        self._ensure_ready()
+        self._ensure_buffer()
+        return capture_native_frame(
+            self._dll, self._conn, self._display_id, self._buffer
+        )
 
     def _map_xy(self, x: int, y: int) -> tuple[int, int]:
         """

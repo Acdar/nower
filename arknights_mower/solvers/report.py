@@ -286,13 +286,6 @@ class ReportSolver(SceneGraphSolver):
             score = []
             for i in range(10):
                 matched = match_digit(digit, noto_sans[i])
-                # 确保模板不大于待匹配图像，否则 matchTemplate 会断言失败
-                if im.shape[0] > digit.shape[0] or im.shape[1] > digit.shape[1]:
-                    im = cv2.resize(
-                        im,
-                        (digit.shape[1], digit.shape[0]),
-                        interpolation=cv2.INTER_AREA,
-                    )
                 if matched is not None:
                     score.append((matched, i))
             if not score:
