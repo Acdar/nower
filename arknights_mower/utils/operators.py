@@ -316,6 +316,7 @@ class Operators:
         self.current_room_changed_callback = None
         self.party_time = None
         self.facility_states = {}
+        self.room_observations = {}
         self.reserved_product_beds = {}
         self.reserved_product_replacements = set()
         self.profession_filter = set(agent_arrange_order["职介选择开关"])
@@ -422,6 +423,13 @@ class Operators:
         return default_plan, ext_config.merge_config(plan.config)
 
     def init_and_validate(self, update=False):
+        from arknights_mower.utils.backup_validation import validate_trade_order_targets
+
+        primary = self.global_plan["default_plan"]
+        if error := validate_trade_order_targets(
+            primary.plan, primary.products, label="主表"
+        ):
+            return error
         for name in self.config.operator_mood_limits:
             if name not in agent_list:
                 return f"心情上下限中的干员名无效：{name}"
@@ -1158,7 +1166,13 @@ class Operators:
         return groups
 
     def normalize_shared_arrangement(
-        self, plan, transitions=None, *, reserved_replacements=None, explicit_slots=()
+        self,
+        plan,
+        transitions=None,
+        *,
+        reserved_replacements=None,
+        explicit_slots=(),
+        excluded_names=(),
     ):
         """Keep shared covers until all dependent groups return; reject conflicts.
 
@@ -1166,6 +1180,7 @@ class Operators:
         """
         from arknights_mower.utils.exhaust_replacement import match_replacements
 
+        excluded_names = set(excluded_names)
         transitions = (
             self.arrangement_group_transitions(plan)
             if transitions is None
@@ -1176,6 +1191,7 @@ class Operators:
             for group, resting in transitions.items()
             if resting
             for name in self.shift_group_members(group)
+            if name not in excluded_names
         }
         if self.working_replacement_blockers(shifting, plan):
             return False
@@ -1183,6 +1199,11 @@ class Operators:
             op
             for op in self.operators.values()
             if op.multi_group
+            and op.name not in excluded_names
+            and not (
+                (actual := self.get_current_operator(op.room, op.index)) is not None
+                and actual.name in excluded_names
+            )
             and (op.room, op.index) not in explicit_slots
             and (
                 op.index < len(plan.get(op.room, []))
@@ -1199,15 +1220,19 @@ class Operators:
         }
         changes, options = {}, {}
         managed = {(op.room, op.index) for op in followers}
-        reserved = {
-            name
-            for room, names in plan.items()
-            for index, name in enumerate(names)
-            if (room, index) not in managed and name not in ("Free", "Current", "")
-        } | set(
-            self.reserved_product_replacements
-            if reserved_replacements is None
-            else reserved_replacements
+        reserved = (
+            {
+                name
+                for room, names in plan.items()
+                for index, name in enumerate(names)
+                if (room, index) not in managed and name not in ("Free", "Current", "")
+            }
+            | set(
+                self.reserved_product_replacements
+                if reserved_replacements is None
+                else reserved_replacements
+            )
+            | excluded_names
         )
         for op in followers:
             target = plan.get(op.room, [])[op.index : op.index + 1]
@@ -1651,6 +1676,12 @@ class Operators:
         ):
             return current_index
 
+    def invalidate_dorm_time(self, room):
+        """实际宿舍阵容变化后，整房恢复时间等待最终阵容实读。"""
+        for bed in self.all_dorms():
+            if bed.position[0] == room:
+                bed.time = None
+
     def refresh_dorm_time(self, room, index, agent, *, group_transitions=None):
         _name = agent["agent"]
         # 此方法也会作为无界函数绑定到轻量读房测试对象，避免依赖对象上存在
@@ -2044,7 +2075,7 @@ class Operators:
     def project_arrangements(self, plans):
         """按执行顺序推演排班后的驻员和恢复床位，不产生实际换人副作用。
 
-        位置未变保留恢复时间；换床位或换宿舍后，由正常读房重新采样。
+        阵容未变的宿舍保留恢复时间；受影响宿舍等待最终阵容实读。
         产物切换和回班规划共用这一份位置语义，不能只改工位而留下旧床位。
         """
         projected = copy.copy(self)
@@ -2061,10 +2092,26 @@ class Operators:
                 for index, name in enumerate(names)
                 if name != "Current"
                 and (
-                    (occupant := projected.get_current_operator(room, index)) is None
-                    or occupant.name != name
+                    (
+                        occupant.name
+                        if (occupant := projected.get_current_operator(room, index))
+                        is not None
+                        else ""
+                    )
+                    != ("" if name == "Free" else name)
                 )
             }
+            changed_dorms = {
+                room for room, _ in changed_slots if room.startswith("dorm")
+            }
+            changed_dorms.update(
+                op.current_room
+                for room, names in plan.items()
+                for index, name in enumerate(names)
+                if (op := projected.operators.get(name)) is not None
+                and op.current_room.startswith("dorm")
+                and (op.current_room, op.current_index) != (room, index)
+            )
             recovery_times = {
                 bed.name: (bed.position, bed.time)
                 for bed in projected.all_dorms()
@@ -2098,7 +2145,12 @@ class Operators:
                     old_position, old_time = recovery_times.get(
                         occupant.name, (None, None)
                     )
-                    bed.time = old_time if (old_position == bed.position) else None
+                    bed.time = (
+                        old_time
+                        if old_position == bed.position
+                        and bed.position[0] not in changed_dorms
+                        else None
+                    )
                 else:
                     bed.reset()
         return projected
@@ -2524,7 +2576,7 @@ class Operators:
         return names
 
     def dorm_isolation_cost(self, name, room, index=None, *, plan=None):
-        """同等分床条件下优先减少同组同住人数，不改变恢复层级。"""
+        """统计入住后的同组室友人数，供分床和入住前交换使用。"""
         if not config.conf.dorm_isolation:
             return 0
         roommates = set(self.dorm_roommates(room, index, plan=plan))
@@ -2579,9 +2631,6 @@ class Operators:
             for bed in self.ordered_dorms(active_groups=active_groups)
         ]
         explicit_order = any(item.endswith("_low") for item in self.config.dorm_order)
-        if explicit_order:
-            # 先按显式顺序选床，再在选定床位内协调同排名新入住者的隔离。
-            isolation = False
         if not is_high and not explicit_order:
             order = order[max_count:] + order[:max_count]
         candidates = [
@@ -2609,14 +2658,14 @@ class Operators:
                     else 0,
                 )
             tier, recovery_order = resting_key(self, bed.name, now)
-            # 先使用空位，再接管层级最低、同级距回满最近的占位者。
+            # 先使用空位，再接管最低层级；同层级先比较隔离，再比较恢复缺口。
             return (
                 1,
                 -tier,
-                -recovery_order,
                 self.dorm_isolation_cost(name, *bed.position, plan=plan)
                 if isolation
                 else 0,
+                -recovery_order,
             )
 
         return min(candidates, key=takeover_cost, default=None)
@@ -2657,11 +2706,17 @@ class Operators:
             )
         }
 
-    def assign_dorm_group(self, names, active_groups=None, plan=None):
+    def assign_dorm_group(
+        self, names, active_groups=None, plan=None, *, reserved_slots=()
+    ):
         """先保障必需床位；候补有床则休息，无床则随组离岗待命。"""
         # 达到个人上限后随组离岗即可，不再占床恢复。
         names = [name for name in names if not self.rest_mood_complete(name)]
-        used = set()
+        used = {
+            index
+            for index, bed in enumerate(self.dorm)
+            if bed.position in reserved_slots
+        }
         assignments = []
         optional = self.standby_candidates(names)
         ordered_names = sorted(

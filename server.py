@@ -492,10 +492,6 @@ def _run_maa_update(
             system=system,
             channel=channel,
         )
-        clear_loaded_maa_cache(result["target"])
-        result["installed_version"] = read_installed_version(
-            result["target"], fresh=True
-        )
     except Exception as e:
         logger.exception(f"MAA {operation}失败：{e}")
         with maa_update_lock:
@@ -512,9 +508,30 @@ def _run_maa_update(
             )
         return
 
+    # Installation has committed. Runtime activation cannot undo that result.
+    result.setdefault("restart_required", False)
+    if result.get("updated") is not False:
+        try:
+            clear_loaded_maa_cache(result["target"])
+        except Exception as error:
+            result["restart_required"] = True
+            logger.warning(
+                "MAA 已安装，核心清理未完成，请重启 Mower：%s", error, exc_info=True
+            )
+        try:
+            result["installed_version"] = read_installed_version(
+                result["target"], fresh=True
+            )
+        except Exception as error:
+            result["installed_version"] = ""
+            logger.warning("MAA 已安装，读取新核心版本失败：%s", error, exc_info=True)
     operation = "更新" if result["operation"] == "update" else "下载"
     channel_label = "公测版" if result["channel"] == "beta" else "正式版"
-    if result["platform"] == "android":
+    if result.get("updated") is False:
+        success_message = (
+            f"当前 MAA {result['installed_version']} 无需更新（{channel_label}）"
+        )
+    elif result["platform"] == "android":
         success_message = result.get(
             "message", "Android MAA 组件已更新，重启服务后生效"
         )
@@ -541,6 +558,11 @@ def _run_maa_update(
             f"{result['python_downloaded']} 字节（完整 Windows 包 "
             f"{result['python_full_size']} 字节）"
         )
+    if result["platform"] != "android":
+        if result["restart_required"]:
+            success_message += "；请重启 Mower 后再运行 MAA"
+        if not result["installed_version"]:
+            success_message += "；无法读取已安装核心版本，请检查 MAA 安装"
     with maa_update_lock:
         maa_update_job.update(
             {
@@ -570,7 +592,6 @@ def _run_maa_resource_update(
         install_maa_resource_update,
         read_maa_resource_info,
     )
-    from arknights_mower.utils.maa_update import clear_loaded_maa_cache
 
     try:
         result = install_maa_resource_update(
@@ -580,13 +601,11 @@ def _run_maa_resource_update(
             system=system,
             callback=_set_maa_resource_update_progress,
         )
-        if result["updated"]:
-            if os.environ.get("MOWER_ANDROID") == "1":
-                from mower_android.managed import pack_component
+        if result["updated"] and os.environ.get("MOWER_ANDROID") == "1":
+            from mower_android.managed import pack_component
 
-                pack_component(result["target"])
-                result["restart_required"] = True
-            clear_loaded_maa_cache(result["target"])
+            pack_component(result["target"])
+            result["restart_required"] = True
         result["installed"] = read_maa_resource_info(result["target"])
     except Exception as e:
         logger.exception(f"MAA 资源更新失败：{e}")
@@ -1436,18 +1455,22 @@ def _save_rescue_plan(plan):
 @app.route("/rescue-plan/validate", methods=["POST"])
 @require_token
 def validate_rescue_plan_route():
-    from arknights_mower.utils.emergency_plan import effective_rescue_plan
+    from arknights_mower.utils.emergency_plan import (
+        effective_rescue_plan,
+        validate_rescue_schedule,
+    )
 
     try:
         data = Operators(build_global_plan())
         error = data.init_and_validate()
         if error:
             return {"success": False, "message": str(error)}
+        validate_rescue_schedule(data, config.conf.automatic_rescue_plan)
         if data.backup_plans or config.conf.automatic_rescue_plan.backup_plans:
             return {
                 "success": True,
                 "status": "incomplete",
-                "message": "排班含副表条件，设施类型、等级及产物需在初始化实测后，按双方生效排班核验；当前静态验证不能确认是否可进入救急。",
+                "message": "救急表自身校验通过；排班含副表条件，设施类型、等级及产物仍需在初始化实测后按双方生效排班核验。",
             }
         effective_rescue_plan(data, config.conf.automatic_rescue_plan)
     except (ValueError, TypeError) as exc:
@@ -3540,7 +3563,10 @@ def mastery_recommendation_debug():
 def mastery_recommendation():
     from arknights_mower.utils.mastery_recommendation import get_mastery_recommendations
 
-    return get_mastery_recommendations()
+    return get_mastery_recommendations(
+        include_materials=request.args.get("materials") != "0",
+        char_id=request.args.get("char_id"),
+    )
 
 
 @app.route("/growth-survey", methods=["GET"])
@@ -3650,6 +3676,20 @@ def growth_crafting_order():
         return {"error": str(exc)}, 400
 
 
+def current_workshop_status():
+    from arknights_mower.__main__ import base_scheduler
+    from arknights_mower.utils.workshop_status import workshop_status
+
+    running = bool(mower_thread and mower_thread.is_alive())
+    return workshop_status(base_scheduler if running else None, running=running)
+
+
+@app.route("/workshop-status", methods=["GET"])
+@require_token
+def get_workshop_status():
+    return current_workshop_status()
+
+
 @app.route("/workshop-auto-config", methods=["POST"])
 def workshop_auto_config():
     import traceback
@@ -3661,12 +3701,13 @@ def workshop_auto_config():
         fodder_ops = req.get("fodder_operators", config.conf.fodder_operators)
         t5_ops = req.get("t5_operators", config.conf.t5_operators)
         book_ops = req.get("book_operators", config.conf.book_operators)
-        return update_workshop_config(
+        result = update_workshop_config(
             explicit=True,
             fodder_operators=fodder_ops,
             t5_operators=t5_ops,
             book_operators=book_ops,
         )
+        return {**result, "crafting_status": current_workshop_status()}
     except Exception as e:
         return {"error": str(e), "traceback": traceback.format_exc()}, 500
 
@@ -3780,7 +3821,7 @@ def cultivate_fetch():
 
     try:
         syncer = cultivate()
-        if not syncer.start():
+        if not syncer.start(force_inventory=True):
             return {
                 "success": False,
                 "message": "未同步到干员数据，请检查森空岛账号及官服/B服选择",

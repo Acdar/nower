@@ -12,6 +12,7 @@ from arknights_mower.solvers import mastery_support_runtime as runtime
 from arknights_mower.solvers import mastery_support_state as state
 from arknights_mower.tests.mastery_support_fixtures import database as database
 from arknights_mower.tests.mastery_support_fixtures import stat
+from arknights_mower.tests.workshop_plan_fixtures import next_skill as next_skill
 from arknights_mower.utils import config
 from arknights_mower.utils import mastery_db as db
 from arknights_mower.utils import mastery_recommendation as rec
@@ -225,7 +226,7 @@ def test_removed_basic_successor_restores_reducer_protection(
 
 @pytest.mark.parametrize("supplied_inventory", [False, True])
 def test_joint_craftability_and_single_skill_preparation(
-    database, tmp_path, monkeypatch, supplied_inventory
+    database, income_db, tmp_path, monkeypatch, supplied_inventory
 ):
     a = db.insert_plan("a", 0, 3, "测试", "学员", priority=0)
     b = db.insert_plan("b", 0, 3, "测试", "乙", priority=1)
@@ -272,10 +273,16 @@ def test_joint_craftability_and_single_skill_preparation(
     )
 
     def schedule():
-        if not supplied_inventory:
-            return rec.auto_schedule_mastery_tasks()
         items = json.loads(cultivate.read_text())["data"]["items"]
         names = {"book": "书", "raw": "原料"}
+        if not supplied_inventory:
+            from arknights_mower.solvers.record import _conn, save_inventory_counts
+
+            with _conn() as conn:
+                conn.execute("DELETE FROM inventory")
+                conn.commit()
+            save_inventory_counts({names[item["id"]]: item["count"] for item in items})
+            return rec.auto_schedule_mastery_tasks()
         return rec.auto_schedule_mastery_tasks(
             inventory={names[item["id"]]: item["count"] for item in items}
         )
@@ -551,59 +558,37 @@ def test_record_transfer_failure_does_not_interrupt_completed_collection(
 
 
 def test_only_one_skill_chain_is_prepared_even_when_joint_crafting_is_possible(
-    tmp_path, monkeypatch
+    next_skill, monkeypatch
 ):
     from arknights_mower.tests.workshop_plan_fixtures import book_limit
+    from arknights_mower.utils import growth
+    from arknights_mower.utils.workshop_automation import calculate_workshop_plan
 
-    cultivate = tmp_path / "cultivate.json"
-    cultivate.write_text(
-        json.dumps({"data": {"items": [{"id": "3302", "count": 300}]}})
+    monkeypatch.setattr(growth, "load_goals", lambda: [])
+    box = json.loads(next_skill.cultivate.read_text())
+    box["data"]["characters"][0]["skills"] = [{"level": 1}, {"level": 2}]
+    next_skill.cultivate.write_text(json.dumps(box))
+    skills = rec.get_skill_data()
+    skills["characters"]["char_a"]["skills"] = [
+        {"levels": [{"materials": [{"id": "3303", "count": count}]} for count in costs]}
+        for costs in ((1, 2, 3), (1, 2, 7))
+    ]
+    next_skill.plans[:] = [
+        plan(1, "char_a", skill=0, priority=0),
+        plan(2, "char_a", skill=1, priority=1),
+    ]
+    result = calculate_workshop_plan(
+        config.conf, local_stock={"技巧概要·卷2": 300, "技巧概要·卷3": 0}
     )
-    skills = tmp_path / "skills.json"
-    skills.write_text(
-        json.dumps(
-            {
-                "items": {
-                    "3302": {"name": "技巧概要·卷2", "rarity": 4},
-                    "3303": {"name": "技巧概要·卷3", "rarity": 5},
-                }
-            }
-        )
+    assert result.focus["key"] == "skill:char_a:0"
+    assert book_limit(result.settings) == 5
+
+    # The first chain keeps its five books; the next quota adds seven more.
+    result = calculate_workshop_plan(
+        config.conf, local_stock={"技巧概要·卷2": 285, "技巧概要·卷3": 5}
     )
-    monkeypatch.setattr(rec, "get_path", lambda _: cultivate)
-    monkeypatch.setattr(rec, "_find_skill_data", lambda: skills)
-    monkeypatch.setattr(
-        "arknights_mower.utils.workshop_recommendation.available_operators", lambda: {}
-    )
-    plans = [plan(1, skill=0), plan(2, skill=1)]
-    recommendations = {
-        "has_data": True,
-        "operators": [
-            {
-                "char_id": "a",
-                "recommendations": [
-                    {
-                        "skill_index": 0,
-                        "current_level": 1,
-                        "chain_needed_materials": [
-                            {"name": "技巧概要·卷3", "count": 5}
-                        ],
-                    },
-                    {
-                        "skill_index": 1,
-                        "current_level": 2,
-                        "chain_needed_materials": [
-                            {"name": "技巧概要·卷3", "count": 7}
-                        ],
-                    },
-                ],
-            }
-        ],
-    }
-    result = rec.compute_workshop_config(
-        [], [], ["赫拉格"], plans=plans, recommendations=recommendations
-    )
-    assert book_limit(result) == 5
+    assert result.focus["key"] == "skill:char_a:1"
+    assert book_limit(result.settings) == 12
 
 
 @pytest.mark.parametrize("cancel", [False, True])

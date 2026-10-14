@@ -3,7 +3,8 @@
 import copy
 import pickle
 import sys
-from datetime import datetime
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -125,6 +126,113 @@ def arrange(solver, agents=None):
     solver.agent_arrange_room({}, ROOM, solver.task.plan)
 
 
+def test_admission_uses_full_recovery_budget_then_remaining_arrangement(
+    solver, monkeypatch
+):
+    from arknights_mower.utils import operation_timing
+    from arknights_mower.utils.scheduler_task import estimate_task_duration
+
+    monkeypatch.setattr(
+        operation_timing, "_dorm_durations", defaultdict(lambda: deque(maxlen=8))
+    )
+    ticks = iter([0, 50])
+    monkeypatch.setattr(operation_timing, "perf_counter", lambda: next(ticks))
+    before = pickle.dumps(solver.op_data)
+    assert (
+        estimate_task_duration(solver.task, op_data=solver.op_data).total_seconds()
+        == 85
+    )
+    assert pickle.dumps(solver.op_data) == before
+    solver.task.dorm_recovery_restore = [ROOM]
+    assert (
+        estimate_task_duration(solver.task, op_data=solver.op_data).total_seconds()
+        == 70
+    )
+    del solver.task.dorm_recovery_restore
+    arrange(solver)
+    assert list(operation_timing._dorm_durations[(ROOM, True)]) == [50]
+    assert (ROOM, False) not in operation_timing._dorm_durations
+    solver.task.plan = {ROOM: FINAL.copy()}
+    assert (
+        estimate_task_duration(solver.task, op_data=solver.op_data).total_seconds()
+        == 70
+    )
+
+
+def test_remaining_recovery_records_only_ordinary_arrangement(solver, monkeypatch):
+    from arknights_mower.utils import operation_timing
+    from arknights_mower.utils.scheduler_task import estimate_task_duration
+
+    monkeypatch.setattr(
+        operation_timing, "_dorm_durations", defaultdict(lambda: deque(maxlen=8))
+    )
+    assert solver.ensure_dorm_recovery_order(ROOM, FINAL.copy())
+    assert solver.task.dorm_recovery_restore == [ROOM]
+    assert (
+        estimate_task_duration(solver.task, op_data=solver.op_data).total_seconds()
+        == 70
+    )
+    ticks = iter([0, 30])
+    monkeypatch.setattr(operation_timing, "perf_counter", lambda: next(ticks))
+    arrange(solver)
+    assert solver.physical == FINAL
+    assert len(solver.confirms) == 2
+    assert list(operation_timing._dorm_durations[(ROOM, False)]) == [30]
+    assert (ROOM, True) not in operation_timing._dorm_durations
+
+
+def test_admission_resolves_current_managers_without_changing_task_or_occupancy(
+    solver, monkeypatch
+):
+    from arknights_mower.utils import operation_timing
+    from arknights_mower.utils.scheduler_task import (
+        defer_dorm_before_priority_task,
+        estimate_task_duration,
+    )
+
+    monkeypatch.setattr(operation_timing, "_dorm_durations", {})
+    solver.task.type = TaskTypes.RE_ORDER
+    solver.task.plan = {ROOM: ["Current", "Current", "Current", "银灰", "陈"]}
+    plan = copy.deepcopy(solver.task.plan)
+    before = pickle.dumps(solver.op_data)
+    assert (
+        estimate_task_duration(solver.task, op_data=solver.op_data).total_seconds()
+        == 85
+    )
+    now = solver.task.time
+    order = SchedulerTask(
+        time=now + timedelta(seconds=134), task_type=TaskTypes.RUN_ORDER
+    )
+    assert defer_dorm_before_priority_task(
+        solver.task, [solver.task, order], ROOM, now, solver.op_data
+    )
+    assert solver.task.plan == plan
+    assert pickle.dumps(solver.op_data) == before
+
+
+@pytest.mark.parametrize("simple_fill, deferred", [(False, True), (True, False)])
+def test_runtime_guard_uses_the_required_recovery_phase(
+    solver, monkeypatch, simple_fill, deferred
+):
+    from arknights_mower.utils import operation_timing
+    from arknights_mower.utils.scheduler_task import defer_dorm_before_priority_task
+
+    monkeypatch.setattr(operation_timing, "_dorm_durations", {})
+    solver.task.type = TaskTypes.RE_ORDER
+    solver.task.simple_dorm_fill = simple_fill
+    now = solver.task.time
+    order = SchedulerTask(
+        time=now + timedelta(seconds=134), task_type=TaskTypes.RUN_ORDER
+    )
+    tasks = [solver.task, order]
+    before = pickle.dumps(solver.op_data)
+    assert (
+        defer_dorm_before_priority_task(solver.task, tasks, ROOM, now, solver.op_data)
+        == deferred
+    )
+    assert pickle.dumps(solver.op_data) == before
+
+
 @pytest.mark.parametrize("cover_mood", [1, 24, None])
 def test_pending_fixed_cover_behind_target_uses_same_context(solver, cover_mood):
     plans = solver.global_plan["default_plan"].plan
@@ -238,6 +346,54 @@ def test_only_once_while_target_stays_in_room(solver):
     target = solver.op_data.operators["银灰"]
     target.current_index = 4
     assert recovery_order_plan(solver.op_data, ROOM, FINAL) is not None
+
+
+def test_ordinary_replacement_refreshes_room_timing_without_repeating_single_target(
+    solver,
+):
+    arrange(solver)
+    confirmations = len(solver.confirms)
+    due = datetime.now() + timedelta(hours=3)
+    for bed in solver.op_data.all_dorms():
+        bed.time = due
+    target = solver.op_data.operators["银灰"]
+    marker = (
+        target.dorm_recovery_room,
+        target.dorm_recovery_index,
+        target.dorm_recovery_fixed,
+    )
+    read = solver.get_agent_from_room.side_effect
+    observed = []
+
+    def observe(room, read_time_index=None, *, departing_plan=None):
+        if departing_plan is None:
+            observed.append(
+                ([bed.time for bed in solver.op_data.all_dorms()], read_time_index)
+            )
+        return read(room, read_time_index)
+
+    solver.get_agent_from_room.side_effect = observe
+    arrange(solver, ["杜林", "琴柳", "红", "银灰", "黑角"])
+    assert len(solver.confirms) == confirmations + 1
+    assert observed[-1] == ([None, None], [3, 4])
+    assert (
+        target.dorm_recovery_room,
+        target.dorm_recovery_index,
+        target.dorm_recovery_fixed,
+    ) == marker
+
+
+def test_already_matching_roster_refreshes_timing_after_cross_room_arrangement(solver):
+    arrange(solver)
+    due = datetime.now() + timedelta(hours=3)
+    for bed in solver.op_data.all_dorms():
+        bed.time = due
+    confirmations = len(solver.confirms)
+    solver.task.plan = {ROOM: FINAL.copy()}
+    solver.agent_arrange_room({}, ROOM, solver.task.plan, get_time=True)
+    assert len(solver.confirms) == confirmations
+    assert all(bed.time is None for bed in solver.op_data.all_dorms())
+    assert solver.reads[-1] == [3, 4]
 
 
 def test_backup_plan_ordinary_manager_change_keeps_same_target(solver):

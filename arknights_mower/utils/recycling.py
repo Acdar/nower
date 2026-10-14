@@ -22,7 +22,11 @@ def _ocr(image):
 
 @lru_cache(maxsize=128)
 def _material_icon(directory, name):
-    icon = cv2.imread(str(Path(directory) / f"{name}.webp"), cv2.IMREAD_UNCHANGED)
+    path = Path(directory) / f"{name}.webp"
+    try:
+        icon = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    except (OSError, cv2.error):
+        return None
     if icon is None or icon.ndim != 3 or icon.shape[2] != 4:
         return None
     icon = cv2.resize(icon, (220, 220))[:132]
@@ -67,7 +71,7 @@ def read_recycling_materials(image):
         entry = key_mapping.get(name)
         if (
             not np.isfinite(confidence)
-            or confidence < 0.95
+            or confidence < 0.90
             or entry is None
             or entry[3] != "MATERIAL"
         ):
@@ -90,7 +94,7 @@ def read_recycling_materials(image):
         )
         scores = cv2.matchTemplate(region, template, cv2.TM_CCORR_NORMED, mask=mask)
         score = cv2.minMaxLoc(scores)[1]
-        if not np.isfinite(score) or score < 0.97:
+        if not np.isfinite(score) or score < 0.90:
             return None
         counts = _ocr(image[570:625, center + 10 : center + 90])
         if len(counts) != 1:
@@ -98,7 +102,7 @@ def read_recycling_materials(image):
         _, count, confidence = counts[0]
         if (
             not np.isfinite(confidence)
-            or confidence < 0.95
+            or confidence < 0.90
             or re.fullmatch(r"[1-9][0-9]{0,4}", count.strip()) is None
         ):
             return None
@@ -162,6 +166,13 @@ def recycling_expectation(materials, unknown_collections=0, valuation=None):
         / ratios["experience"]
         / 8000
     )
+    calculator = {
+        "daily_sanity": daily,
+        "configured_daily_sanity": daily * ratios["efficiency"],
+        "manufacturing_equivalent": manufacture * ratios["efficiency"],
+        "elite0_equivalent": manufacture * 0.2,
+        "elite2_equivalent": manufacture * 0.3,
+    }
     return {
         "actual_sanity": actual if complete else None,
         "known_sanity": actual,
@@ -185,10 +196,9 @@ def recycling_expectation(materials, unknown_collections=0, valuation=None):
         "source": {key: model[key] for key in ("source", "sheet", "ranges")},
         "valuation": valuation,
         "calculator": {
-            "daily_sanity": daily,
-            "configured_daily_sanity": daily * ratios["efficiency"],
-            "manufacturing_equivalent": manufacture * ratios["efficiency"],
-            "elite0_equivalent": manufacture * 0.2,
-            "elite2_equivalent": manufacture * 0.3,
+            **calculator,
+            "replacement": {
+                key: value / (1 + extra_rate) for key, value in calculator.items()
+            },
         },
     }
