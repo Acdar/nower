@@ -31,7 +31,7 @@ The log schedule page opens in time browsing with adjacent ten-minute windows an
 - <a id="managed-instance-admission"></a>**Managed Instance Admission**: Individual and bulk manager launches use the same stopped-process, selected-directory, update and port checks. Startup reservations prevent another launch before runtime registration appears.
 - <a id="stopped-instance-configuration"></a>**Stopped Instance Configuration**: Manager edits require the instance process to have exited, not merely stopped automation. Name, directory, deletion and connection settings share the backend guard; future instance settings reuse it.
 
-The [local log access decision](../../.agents/notes/implemented/bug-fix/2026-09-29-local-log-access.md) records the regression and verification. The [trusted proxy origin decision](../../.agents/notes/implemented/bug-fix/2026-10-02-trusted-proxy-origin.md) records the front proxy reconstruction.
+The [local log access decision](../../.agents/notes/implemented/bug-fix/2026-09-29-local-log-access.md) records the regression and verification.
 
 The [credentialed log forwarding decision](../../.agents/notes/implemented/bug-fix/2026-10-10-https-log-forwarding.md) records the proxy compatibility boundary and verification.
 
@@ -42,6 +42,10 @@ The [credentialed log forwarding decision](../../.agents/notes/implemented/bug-f
 The startup worker waits for the active software update operation to finish. When resource checking and automatic installation are enabled, it checks and completes installation before admitting automatic tasks. Resource installation uses a credentialed POST context; ordinary task startup uses a separate credentialed GET context for `/start/<mode>`, without requesting temporary device preparation. Resource check or installation failure preserves the existing resource fallback and still permits task startup. Stop or application shutdown cancels pending automatic admission, including during the resource step. Resource automation also runs when task autostart is disabled. The frontend observes tracked resource jobs and retains manual resource installation.
 
 Update and process-operation restarts preserve their explicit policy: `MOWER_RESUME_MODE` values `0` and `1` select that task mode; otherwise `MOWER_RESTART_JOB` requires `MOWER_RESUME_RUN=1` and resumes mode `2`. The persisted autostart option does not override an explicit stopped restart. Other hosts that do not claim desktop startup ownership retain their existing frontend fallback; this change does not alter the separate Android launcher.
+
+A window process that fails to open or exits abnormally does not end the desktop process. The instance keeps running — its tray stays available, and the next tray request opens the window again — and the failure is written to the runtime log. Only a normal window exit, meaning the user closed the window, ends the instance when the system tray is disabled. That distinction travels as the window process exit code: a failed window exits non-zero, and a window that cannot be created, or is lost while no tray holds the instance, leaves the panel to the browser, which is then the only interface and the only way to end the instance.
+
+An aborted startup — a busy port, an unfinished software or process operation, a WebView backend that cannot initialize — writes its reason to the runtime log and displays it on the startup splash while that splash is still present, then exits. The splash keeps listening for those messages until it is dismissed or replaced by the window.
 
 The [desktop startup decision](../../.agents/notes/implemented/bug-fix/2026-10-11-desktop-process-autostart.md) records the cause and verification.
 

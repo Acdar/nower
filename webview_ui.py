@@ -117,6 +117,26 @@ def resolve_window_size(width, height, min_size=MIN_WINDOW_SIZE):
     return sanitize_window_size(width, height, min_size) or DEFAULT_WINDOW_SIZE
 
 
+def splash_message(queue):
+    """读取一条启动画面消息，返回 (类型, 内容)。
+
+    类型为 "text" 或 "dialog"，内容为对应文本；队列暂时为空返回 (None, None)，
+    通道已关闭返回 ("closed", None)。空队列必须继续轮询：启动失败的原因可能比
+    启动画面晚到。
+    """
+    from queue import Empty
+
+    try:
+        msg = queue.get(False)
+    except Empty:
+        return None, None
+    except Exception:
+        return "closed", None
+    if not isinstance(msg, dict) or msg.get("type") not in ("text", "dialog"):
+        return None, None
+    return msg["type"], msg.get("data")
+
+
 def splash_screen(queue):
     import tkinter as tk
     from tkinter.font import Font
@@ -158,19 +178,22 @@ def splash_screen(queue):
     root.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
     def recv_msg():
-        try:
-            msg = queue.get(False)
-            if msg["type"] == "text":
-                loading_label.config(text=msg["data"] + "……")
-                root.after(100, recv_msg)
-            elif msg["type"] == "dialog":
-                from tkinter import messagebox
+        kind, data = splash_message(queue)
+        if kind is None:
+            # 队列暂时为空不是结束：启动失败的原因可能比启动画面晚到。
+            root.after(100, recv_msg)
+            return
+        if kind == "closed":
+            return
+        if kind == "text":
+            loading_label.config(text=data + "……")
+            root.after(100, recv_msg)
+            return
+        from tkinter import messagebox
 
-                root.withdraw()
-                messagebox.showerror("arknights-mower", msg["data"])
-                root.destroy()
-        except Exception:
-            pass
+        root.withdraw()
+        messagebox.showerror("arknights-mower", data)
+        root.destroy()
 
     root.after(100, recv_msg)
     root.mainloop()
@@ -481,6 +504,31 @@ def webview_window(
         import webbrowser
 
         webbrowser.open(url)
+        # 非零退出码让主进程区分「窗口没起来」与「用户关掉了窗口」。
+        sys.exit(1)
+
+
+def handle_finished_window(process, keep_running: bool, url: str) -> bool:
+    """处理已结束的窗口进程，返回实例是否要随之退出。
+
+    退出码 0 表示用户关闭了窗口，或主进程要求窗口退出；窗口没能打开、或在运行中
+    崩溃时退出码非零。没有托盘时用户关窗即结束实例，但窗口故障不是退出请求：实例
+    继续运行，并把面板交给浏览器，避免留下一个没有任何界面的实例。
+    """
+    if getattr(process, "exitcode", None) in (0, None):
+        return not keep_running
+    from arknights_mower.utils.log import logger
+
+    logger.error(
+        "窗口进程异常结束（退出码 %s），实例继续运行；可从托盘再次打开窗口",
+        process.exitcode,
+    )
+    if not keep_running:
+        # 没有托盘时浏览器面板是唯一界面，也是结束这个实例的唯一入口。
+        import webbrowser
+
+        webbrowser.open(url)
+    return False
 
 
 def close_child(process, connection=None):
@@ -608,6 +656,36 @@ def desktop_port(webview_conf, managed, restart_port="", manager_port=None):
     )
 
 
+# 启动失败的原因要等用户点掉启动画面上的提示；超时后照常退出，避免无人值守时挂住。
+STARTUP_FAILURE_DIALOG_TIMEOUT = 300
+
+# 启动画面存活期间的 (进程, 通道)：启动失败时用它把原因显示给用户。
+_splash = None
+
+
+def report_startup_failure(error) -> None:
+    """把启动失败的原因写进运行日志，并显示在启动画面上。
+
+    打包版本没有控制台，启动中止（端口被占用、更新未完成、窗口进程起不来）时窗口
+    不会出现，只剩启动画面一闪而过，用户看不到任何原因。
+    """
+    message = str(error).strip() or error.__class__.__name__
+    from arknights_mower.utils.log import logger
+
+    logger.error("Mower 启动失败：%s", message)
+    splash = _splash
+    if splash is None:
+        return
+    process, queue = splash
+    try:
+        if not process.is_alive():
+            return
+        queue.put({"type": "dialog", "data": f"mower 启动失败：{message}"})
+        process.join(STARTUP_FAILURE_DIALOG_TIMEOUT)
+    except Exception:
+        logger.exception("启动失败原因未能显示")
+
+
 def run_desktop():
     from arknights_mower.utils.lifecycle import shutdown
 
@@ -616,8 +694,9 @@ def run_desktop():
         _run_desktop()
     except KeyboardInterrupt:
         reason = "ctrl_c"
-    except BaseException:
+    except BaseException as error:
         reason = "startup_failure"
+        report_startup_failure(error)
         raise
     finally:
         shutdown.close(reason)
@@ -697,7 +776,9 @@ def _run_desktop():
     )
     shutdown.own("runtime registration", registration.close, Phase.REGISTRATION)
     if not background:
+        global _splash
         splash_process, splash_queue = start_desktop_child("splash")
+        _splash = (splash_process, splash_queue)
         splash_queue.put({"type": "text", "data": "加载配置文件"})
     from arknights_mower.utils import config
     from arknights_mower.utils.network import is_port_in_use
@@ -794,25 +875,45 @@ def _run_desktop():
     if tray and not managed:
         ensure_tray()
 
-    def open_window():
+    def open_window() -> bool:
         close_child(config.webview_process)
         close_channel(config.parent_conn)
-        config.webview_process, config.parent_conn = start_desktop_child(
-            "window",
-            path.global_space,
-            instance_name,
-            host,
-            port,
-            url,
-            keep_running,
-            log_queue=mp_log_queue,
-        )
+        config.webview_process = None
+        config.parent_conn = None
+        try:
+            config.webview_process, config.parent_conn = start_desktop_child(
+                "window",
+                path.global_space,
+                instance_name,
+                host,
+                port,
+                url,
+                keep_running,
+                log_queue=mp_log_queue,
+            )
+        except Exception:
+            from arknights_mower.utils.log import logger
+
+            logger.exception(
+                "窗口进程启动失败，实例继续运行；可从托盘再次打开窗口，或在浏览器中打开面板"
+            )
+            return False
+        return True
+
+    def open_window_or_browser() -> None:
+        """窗口起不来时把面板交给浏览器，而不是让用户什么也看不到。"""
+        if open_window():
+            return
+        import webbrowser
+
+        webbrowser.open(url)
 
     config.webview_process = None
     config.parent_conn = None
     if not background:
-        open_window()
+        open_window_or_browser()
     close_child(splash_process)
+    _splash = None
 
     from arknights_mower.utils.software_update import request_auto_check
 
@@ -881,12 +982,13 @@ def _run_desktop():
                     shutdown.request("runtime_request")
                     break
             if config.webview_process and not config.webview_process.is_alive():
-                close_child(config.webview_process)
+                finished = config.webview_process
+                close_child(finished)
                 config.webview_process = None
                 if config.parent_conn is not None:
                     close_channel(config.parent_conn)
                     config.parent_conn = None
-                if not keep_running:
+                if handle_finished_window(finished, keep_running, url):
                     break
             if manager_owned:
                 if runtime.unified_managers():
@@ -921,7 +1023,7 @@ def _run_desktop():
                         close_channel(config.parent_conn)
                         config.parent_conn = None
                     else:
-                        open_window()
+                        open_window_or_browser()
                 elif msg == "browser":
                     import webbrowser
 

@@ -211,6 +211,7 @@ class WindowShellBridge:
         self._tray_enabled = tray_enabled
         self._platform = normalize_platform(system)
         self._lock = Lock()
+        self._page_loaded = False
         self._state = {
             "state": "normal",
             "maximized": False,
@@ -363,7 +364,38 @@ class WindowShellBridge:
             self._state.update(width=int(width), height=int(height))
         self._publish_state()
 
+    def _page_ready(self) -> bool:
+        """Whether the page can run the state script yet.
+
+        pywebview gates ``evaluate_js`` on the window's ``loaded`` event and
+        gives up after 20 seconds, so calling it while the first page load is
+        still in flight parks the event thread for that whole wait and then
+        drops the event anyway.
+        """
+        if self._page_loaded:
+            return True
+        try:
+            return bool(self._window.events.loaded.is_set())
+        except Exception:
+            # A window object without the event keeps plain best-effort delivery.
+            return True
+
+    def _on_page_loaded(self) -> None:
+        """Deliver the state that was withheld while the page was loading.
+
+        pywebview raises the ``loaded`` event before it marks that event as set,
+        so this callback records the readiness it represents instead of asking
+        the event again.
+        """
+        self._page_loaded = True
+        self._publish_state()
+
     def _publish_state(self) -> None:
+        if not self._page_ready():
+            # Skipping the call loses nothing: the cached native state stays
+            # authoritative for get_window_state(), and _on_page_loaded delivers
+            # the event once the page is there to receive it.
+            return
         payload = json.dumps(self.get_window_state(), ensure_ascii=False)
         event_name = json.dumps(WINDOW_SHELL_EVENT)
         script = (
@@ -373,8 +405,8 @@ class WindowShellBridge:
         try:
             self._window.evaluate_js(script)
         except Exception:
-            # Native state remains authoritative even if the page is still
-            # loading or has already gone away.
+            # Native state remains authoritative even if the page has already
+            # gone away.
             logger.debug("Window state event could not be delivered", exc_info=True)
 
 
@@ -403,6 +435,7 @@ def attach_window_shell(
         bridge.set_window_launch_mode,
     )
 
+    window.events.loaded += bridge._on_page_loaded
     window.events.maximized += bridge._on_maximized
     window.events.minimized += bridge._on_minimized
     window.events.restored += bridge._on_restored

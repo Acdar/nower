@@ -74,3 +74,53 @@ class TestWindowsLiveState(unittest.TestCase):
             windows_frameless, "_winforms_hwnd", side_effect=RuntimeError("gone")
         ):
             self.assertTrue(bridge.get_window_state()["maximized"])
+
+
+class TestPageLoadReadiness(unittest.TestCase):
+    """Native window events can arrive before the page they are meant for."""
+
+    def test_state_is_cached_while_the_page_is_still_loading(self):
+        win = mock.Mock()
+        win.events.loaded.is_set.return_value = False
+        bridge = window_shell.WindowShellBridge(win, system="linux")
+        bridge._on_maximized()
+        bridge._on_resized(1200, 700)
+        win.evaluate_js.assert_not_called()
+        state = bridge.get_window_state()
+        self.assertTrue(state["maximized"])
+        self.assertEqual((state["width"], state["height"]), (1200, 700))
+
+    def test_loaded_page_receives_the_withheld_state(self):
+        win = mock.Mock()
+        win.events.loaded.is_set.return_value = False
+        bridge = window_shell.WindowShellBridge(win, system="linux")
+        bridge._on_resized(1200, 700)
+        # pywebview runs the loaded callbacks before it marks that event as set,
+        # so this callback must not re-ask the event it represents.
+        bridge._on_page_loaded()
+        win.evaluate_js.assert_called_once()
+        script = win.evaluate_js.call_args.args[0]
+        self.assertIn(window_shell.WINDOW_SHELL_EVENT, script)
+        self.assertIn('"width": 1200', script)
+        bridge._on_restored()
+        self.assertEqual(win.evaluate_js.call_count, 2)
+
+    def test_attach_asks_for_a_delivery_once_the_page_loads(self):
+        # pywebview Event objects add handlers through __iadd__, which only
+        # MagicMock reproduces.
+        win = mock.MagicMock()
+        loaded = win.events.loaded
+        bridge = window_shell.attach_window_shell(win, system="linux")
+        loaded.__iadd__.assert_called_once_with(bridge._on_page_loaded)
+
+    def test_window_without_the_event_keeps_the_best_effort_delivery(self):
+        class Window:
+            script = None
+
+            def evaluate_js(self, script):
+                self.script = script
+
+        win = Window()
+        bridge = window_shell.WindowShellBridge(win, system="linux")
+        bridge._on_restored()
+        self.assertIn(window_shell.WINDOW_SHELL_EVENT, win.script)
