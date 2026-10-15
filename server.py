@@ -6,6 +6,7 @@ import ipaddress
 import json
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -88,9 +89,7 @@ def apply_trusted_proxy(flask_app, environ=None):
     """
     source = os.environ if environ is None else environ
     if source.get("MOWER_TRUSTED_PROXY", "") == "1":
-        flask_app.wsgi_app = ProxyFix(
-            flask_app.wsgi_app, x_proto=1, x_host=1, x_port=1
-        )
+        flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_proto=1, x_host=1, x_port=1)
     return flask_app
 
 
@@ -787,8 +786,7 @@ def _authorize_websocket(ws, allow_local_log=False):
     if allow_local_log and _local_log_request_allowed(require_origin=True):
         return True
     if not expected or (
-        not allow_local_log
-        and (not origin or not same_origin_allowed(origin))
+        not allow_local_log and (not origin or not same_origin_allowed(origin))
     ):
         return reject()
     try:
@@ -1664,28 +1662,106 @@ def stage_inventory_rules():
     }
 
 
-def _describe_task(task) -> str:
-    """把队首任务压成一行可读名称，供 /status 的倒计时类客户端显示。
+_ROOM_LABELS = {
+    "central": "控制中枢",
+    "meeting": "会客室",
+    "factory": "加工站",
+    "contact": "办公室",
+    "train": "训练室",
+    "recycle": "回收站",
+}
 
-    plan 非空时展开成「房间:干员,干员」，多个房间用「 | 」连接；否则退回
-    任务类型名（format() 已把空任务换成 meta_data），与调度器日志口径一致。
+_ROOM_PREFIXES = {"dormitory": "宿舍", "gaming": "活动室"}
+
+# 排班占位名：Current 表示保持当前干员，Free 是清退标记（任务类型名已说明）
+_OPERATOR_MARKS = {"Current": "保持当前"}
+_OPERATOR_SKIPPED = {"Free"}
+
+
+def _room_label(room: str, facility: str = "") -> str:
+    """把排班键换成界面名：有设施类型时用「贸易站1_1」，否则退回「房间1_1」。"""
+    numbered = re.fullmatch(r"room_(\d+)_(\d+)", room)
+    if numbered:
+        suffix = f"{numbered.group(1)}_{numbered.group(2)}"
+        return f"{facility}{suffix}" if facility else f"房间{suffix}"
+    label = _ROOM_LABELS.get(room)
+    if label:
+        return label
+    match = re.fullmatch(r"([a-z]+)_(\d+)", room)
+    if match:
+        prefix = _ROOM_PREFIXES.get(match.group(1))
+        if prefix:
+            return f"{prefix}{match.group(2)}"
+    return room
+
+
+def _roster(operators) -> str:
+    """干员名单：有真实干员时就只显示姓名（保持当前/清退标记不再刷屏）。"""
+    if not isinstance(operators, (list, tuple)):
+        return str(operators)
+    kept = [
+        str(name) for name in operators if name and str(name) not in _OPERATOR_SKIPPED
+    ]
+    real = [name for name in kept if name not in _OPERATOR_MARKS]
+    if real:
+        return " ".join(real)
+    marks = []
+    for name in kept:
+        label = _OPERATOR_MARKS.get(name)
+        if label and label not in marks:
+            marks.append(label)
+    return " ".join(marks)
+
+
+def _facility_names(op_data) -> dict:
+    """房间键 → 设施中文名（贸易站/制造站/发电站）。
+
+    先取排班表里配置的设施类型（每个房间都有），再用运行期实测结果补漏，
+    这样「产物切换」关闭或尚未扫描时也不会退回「房间1_1」。
+    """
+    from arknights_mower.solvers.base_mixin import ROOM_TITLE_TYPES
+
+    names: dict[str, str] = {}
+    for room, rooms in (getattr(op_data, "plan", None) or {}).items():
+        if not isinstance(room, str) or not room.startswith("room_"):
+            continue
+        for item in rooms or ():
+            facility = getattr(item, "facility", "")
+            if facility:
+                names[room] = str(facility)
+                break
+    for room, state in (getattr(op_data, "facility_states", None) or {}).items():
+        if room not in names:
+            label = ROOM_TITLE_TYPES.get((state or {}).get("facility"))
+            if label:
+                names[room] = label
+    return names
+
+
+def _describe_task(task, facilities: dict | None = None) -> str:
+    """把任务压成一行可读名称，供 /status 的倒计时类客户端显示。
+
+    先给要做的事（跑单、上班…），再给「房间 干员…」，多个房间用「 + 」连接；
+    plan 为空时只给类型名（format() 已把空任务换成 meta_data），与调度器日志
+    口径一致。
     """
     try:
         formatted = task.format()
     except Exception:  # 任务对象异常不应拖垮状态接口
         logger.exception("生成任务名称失败")
         return ""
+    type_name = str(getattr(formatted, "type", "") or "")
     plan = getattr(formatted, "plan", None) or {}
-    if plan:
-        parts = []
-        for room, operators in plan.items():
-            if isinstance(operators, (list, tuple)):
-                names = ", ".join(str(name) for name in operators if name)
-            else:
-                names = str(operators)
-            parts.append(f"{room}:{names}" if names else str(room))
-        return " | ".join(parts)
-    return str(getattr(formatted, "type", "") or "")
+    if not plan:
+        return type_name
+    known = facilities or {}
+    parts = []
+    for room, operators in plan.items():
+        label = _room_label(str(room), known.get(str(room), ""))
+        roster = _roster(operators)
+        parts.append(f"{label} {roster}" if roster else label)
+    body = " + ".join(parts)
+    return f"{type_name} {body}" if type_name else body
 
 
 @app.route("/status")
@@ -1703,6 +1779,9 @@ def get_status():
         "scheduled_start_at": start_at,
         "next_task_time": None,
         "next_task_name": None,
+        "next_next_task_time": None,
+        "next_next_task_name": None,
+        "task_count": 0,
         "remaining_seconds": None,
     }
     if mower_thread and mower_thread.is_alive():
@@ -1733,6 +1812,8 @@ def get_status():
                     "sleeping" if base_scheduler.sleeping else "working"
                 )
             if base_scheduler.tasks and len(base_scheduler.tasks) > 0:
+                facilities = _facility_names(op_data) if op_data is not None else {}
+                response["task_count"] = len(base_scheduler.tasks)
                 response["next_task_time"] = base_scheduler.tasks[0].time.strftime(
                     "%Y-%m-%d %H:%M:%S"
                 )
@@ -1741,7 +1822,16 @@ def get_status():
                         base_scheduler.tasks[0].time - datetime.datetime.now()
                     ).total_seconds()
                 )
-                response["next_task_name"] = _describe_task(base_scheduler.tasks[0])
+                response["next_task_name"] = _describe_task(
+                    base_scheduler.tasks[0], facilities
+                )
+                if len(base_scheduler.tasks) > 1:
+                    response["next_next_task_time"] = base_scheduler.tasks[
+                        1
+                    ].time.strftime("%Y-%m-%d %H:%M:%S")
+                    response["next_next_task_name"] = _describe_task(
+                        base_scheduler.tasks[1], facilities
+                    )
     return response
 
 
@@ -1826,7 +1916,7 @@ def _start_mower(start_type, preparation_serial=None):
             saved_state["tasks"] = []
         # 测试宿舍在首次扫描后直接收敛副表；旧宿舍保留可选重载流程。
         try:
-            from arknights_mower.__main__ import main
+            pass
         except Exception:
             # 导入链很长（__main__ → solvers → utils → ...），任何一个包缺失都会抛在
             # 这里。不先落日志的话，界面上只会表现为「点了开始执行没反应、日志空白」，

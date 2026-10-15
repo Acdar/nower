@@ -27,6 +27,7 @@ import argparse
 import base64
 import colorsys
 import ctypes
+import datetime
 import http.client
 import json
 import math
@@ -53,7 +54,7 @@ LOG_PATH = Path.home() / ".mower-countdown.log"
 APP_ID = "Mower.Countdown"
 DEFAULT_THRESHOLDS = (60, 30, 10)
 RAINBOW_SECONDS = 60  # 最后一分钟内倒计时数字循环变色
-TASK_NAME_WIDTH = 26  # 任务名单行显示宽度（中文按 2 计），完整名称悬停可看
+TASK_NAME_WIDTH = 30  # 队列行显示宽度（中文按 2 计），完整内容悬停可看
 RAINBOW_SPEED = 0.35  # 彩虹色循环速度（圈/秒）
 
 # --- 主题（深色 / 浅色 / 跟随系统） ---
@@ -231,6 +232,35 @@ def shorten(text: str, width: int) -> str:
         if total > width:
             return text[:index] + "…"
     return text
+
+
+def clock_text(stamp: str) -> str:
+    """把 /status 的时间戳压成 HH:MM；跨天时加「+N天」前缀。"""
+    day, _, clock = stamp.partition(" ")
+    clock = clock[:5]
+    if not clock:
+        return ""
+    try:
+        target = datetime.date.fromisoformat(day)
+    except ValueError:
+        return clock
+    ahead = (target - datetime.date.today()).days
+    return clock if ahead <= 0 else f"+{ahead}天 {clock}"
+
+
+def queue_line(when: str, name: str, width: int) -> str:
+    """队列行的显示文本：后续任务行把时间放最前（下次任务的时间在状态行）。"""
+    return shorten(f"{when} {name}".strip() if when else name, width)
+
+
+def queue_detail(when: str, name: str, when2: str, name2: str) -> str:
+    """悬停提示与右键复制的完整队列说明（窗口内只显示截断后的一行）。"""
+    lines = []
+    for stamp, text in ((when, name), (when2, name2)):
+        if not text and not stamp:
+            continue
+        lines.append(f"{stamp} {text}".strip())
+    return "\n".join(lines)
 
 
 def rainbow_color(phase: float) -> str:
@@ -478,6 +508,9 @@ class StatusPoller(threading.Thread):
             "remaining": data.get("remaining_seconds"),
             "next_task": data.get("next_task_time"),
             "next_task_name": data.get("next_task_name"),
+            "next_next_task": data.get("next_next_task_time"),
+            "next_next_task_name": data.get("next_next_task_name"),
+            "task_count": data.get("task_count"),
             "plan_condition": data.get("plan_condition") or [],
             "received": time.monotonic(),
         }
@@ -568,7 +601,7 @@ class CountdownWidget:
         self._cycle = ""
         self._drag = None
         self._toast_error = False
-        self._full_task_name = ""
+        self._detail_text = ""
         self._tip = None
         self._tip_job = None
 
@@ -595,11 +628,8 @@ class CountdownWidget:
                 pass
 
         self._build_ui()
-        # 顺序很重要：Tk 的 geometry/resizable 会重设窗口样式，样式调整必须放最后
         self._restore_position()
         self._style_window()
-        # 等布局稳定后按真实内容尺寸再校正一次，避免 Tk 与系统尺寸不一致
-        self.root.after(80, self._resize_to_content)
         self.root.after(self.REFRESH_MS, self._tick)
 
     # -- 构建 --
@@ -645,6 +675,16 @@ class CountdownWidget:
         )
         self.task.pack(anchor="w", pady=(1, 0))
 
+        self.task2 = tk.Label(
+            self.frame,
+            text="　",
+            font=("Microsoft YaHei UI", 10),
+            fg=SUB,
+            bg=BG,
+            anchor="w",
+        )
+        self.task2.pack(anchor="w")
+
         self.link = tk.Label(
             self.frame,
             text="○ 未连接（自动重试）",
@@ -687,7 +727,14 @@ class CountdownWidget:
             "<Leave>", lambda _event: self.close_button.configure(fg=SUB)
         )
 
-        for widget in (self.frame, self.countdown, self.info, self.task, self.link):
+        for widget in (
+            self.frame,
+            self.countdown,
+            self.info,
+            self.task,
+            self.task2,
+            self.link,
+        ):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag_move)
             widget.bind("<ButtonRelease-1>", self._end_drag)
@@ -714,7 +761,7 @@ class CountdownWidget:
             )
         self.menu.add_cascade(label="主题", menu=theme_menu)
         self.menu.add_command(label="发送测试通知", command=self._test_toast)
-        self.menu.add_command(label="查看完整任务名", command=self._copy_task_name)
+        self.menu.add_command(label="查看完整任务队列", command=self._copy_task_name)
         self.menu.add_command(label="重新连接", command=self.poller.reset)
         self.menu.add_command(label="设置服务器…", command=self._configure_server)
         self.menu.add_checkbutton(
@@ -767,11 +814,10 @@ class CountdownWidget:
         self._save_position()
 
     def _restore_position(self):
-        """恢复窗口位置；尺寸交给 Tk 按内容决定（任务名已截断，宽度不会失控）。
+        """只恢复窗口位置：尺寸完全交给 Tk 按内容决定（不做任何像素计算）。
 
-        这里刻意不用 geometry 指定宽高：手动改过窗口样式后，Tk 对
-        「客户区尺寸 + 装饰补偿」的换算会和窗口实际值对不上，Tk 记录的尺寸
-        与实际窗口不一致时，拖动会出现尺寸跳变甚至崩溃。
+        overrideredirect 窗口没有系统边框，Tk 的「客户区 = 窗口」成立，内容多宽
+        窗口就多宽；自己算尺寸反而会在不同缩放设置的机器上留白或裁掉内容。
         """
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
@@ -786,44 +832,28 @@ class CountdownWidget:
         x = min(max(0, x), max(0, screen_w - width))
         y = min(max(0, y), max(0, screen_h - height))
         self.root.geometry(f"+{x}+{y}")
-        self.root.resizable(False, False)
 
     def _style_window(self):
-        """去掉系统标题栏（改用窗口内自绘按钮），并加上圆角与深色边框。
+        """把窗口做成无系统边框的挂件（自绘最小化/关闭按钮）。
 
-        只移除 WS_CAPTION，保留最小化能力，所以窗口仍可最小化到任务栏
-        （见 _minimize：直接调 ShowWindow(SW_MINIMIZE)）。
+        用 Tk 的 overrideredirect 而不是手动摘 WS_CAPTION：Tk 自己知道窗口没有
+        边框，尺寸就完全按内容自适应（手动改样式时 Tk 还会多算一圈装饰，在不同
+        缩放设置的机器上会留白或把内容裁掉）。代价是无边框窗口默认没有任务栏
+        按钮，所以额外加上 WS_EX_APPWINDOW，最小化后也能从任务栏找回。
         """
+        try:
+            self.root.overrideredirect(True)
+        except tk.TclError:
+            pass
         if not IS_WINDOWS:
             return
         try:
-            self.root.update_idletasks()
             hwnd = int(self.root.wm_frame(), 16)
             user32 = ctypes.windll.user32
-            gwl_style = -16
-            ws_caption = 0x00C00000
-            ws_thickframe = 0x00040000
-            ws_maximizebox = 0x00010000
-            style = user32.GetWindowLongW(hwnd, gwl_style)
-            # 去掉标题栏与可最大化/拉伸样式：系统拖动时才不会触发贴靠/最大化
-            # （那会把固定尺寸的窗口突然改大，布局跟不上就崩了）
-            style &= ~(ws_caption | ws_thickframe | ws_maximizebox)
-            user32.SetWindowLongW(hwnd, gwl_style, style)
-            swp_nosize, swp_nomove, swp_nozorder, swp_framechanged = (
-                0x0001,
-                0x0002,
-                0x0004,
-                0x0020,
-            )
-            user32.SetWindowPos(
-                hwnd,
-                0,
-                0,
-                0,
-                0,
-                0,
-                swp_nosize | swp_nomove | swp_nozorder | swp_framechanged,
-            )
+            gwl_exstyle = -20
+            ws_ex_appwindow = 0x00040000
+            ex_style = user32.GetWindowLongW(hwnd, gwl_exstyle)
+            user32.SetWindowLongW(hwnd, gwl_exstyle, ex_style | ws_ex_appwindow)
             try:
                 # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
                 corner = ctypes.c_int(2)
@@ -835,16 +865,6 @@ class CountdownWidget:
         except Exception:
             pass
         self._apply_icon()
-
-    def _resize_to_content(self):
-        """布局稳定后按真实内容尺寸再固定一次。
-
-        构造阶段字体还没量出真实行高、样式也刚变过，此时算出的尺寸不准；
-        等窗口显示后再用 Tk 的 geometry 校正一遍，保证 Tk 记录的尺寸与窗口
-        实际尺寸一致——两者不一致时拖动窗口会出现尺寸跳变甚至崩溃。
-        """
-        self._restore_position()
-        self._style_window()
 
     def _apply_icon(self):
         """设置窗口/任务栏图标（任务栏取窗口大图标，缺失时会退回 exe 图标）。"""
@@ -923,29 +943,44 @@ class CountdownWidget:
             self._set(self.countdown, "--:--")
             self._set(self.info, "等待 mower 启动…")
             self._set(self.task, "　")
+            self._set(self.task2, "　")
             self._set(self.link, "○ 未连接（自动重试）", fg=SUB)
+            self._detail_text = ""
             return
 
         status = snapshot.get("status")
         next_task = snapshot.get("next_task") or ""
-        when = next_task.split(" ")[-1] if next_task else ""
+        clock = next_task.split(" ")[-1] if next_task else ""
+        when = clock_text(next_task)
+        when2 = clock_text(snapshot.get("next_next_task") or "")
         task_name = snapshot.get("next_task_name") or ""
+        task2_name = snapshot.get("next_next_task_name") or ""
 
         if status == "sleeping" and left is not None:
             self._set(self.countdown, format_left(left))
-            self._set(self.info, f"下次任务 {when} · 休眠中" if when else "休眠中")
+            self._set(self.info, f"下次任务 {clock} · 休眠中" if clock else "休眠中")
         elif status == "working":
             self._set(self.countdown, "工作中")
-            self._set(self.info, f"下次任务 {when}" if when else "执行任务中…")
+            self._set(self.info, f"下次任务 {clock}" if clock else "执行任务中…")
         else:
             self._set(self.countdown, "--:--")
             self._set(self.info, STATUS_TEXT.get(status, "状态未知"))
 
-        # 任务名单独一行区域（最多两行）；截断后剩余的完整名称仍可从右键菜单复制
-        self._full_task_name = task_name
-        self._set(self.task, shorten(task_name, TASK_NAME_WIDTH) if task_name else "　")
+        # 队列两行：先写要做的事，下次任务的时间在状态行，下下个任务的时间在行首
+        self._detail_text = queue_detail(when, task_name, when2, task2_name)
+        self._set(
+            self.task,
+            queue_line("", task_name, TASK_NAME_WIDTH) if task_name else "　",
+        )
+        self._set(
+            self.task2,
+            queue_line(when2, task2_name, TASK_NAME_WIDTH)
+            if task2_name
+            else "暂无后续任务",
+        )
 
-        target = shorten(self.poller.target_label(), 40)
+        # 目标文本限长：长 URL 会超过固定窗口宽度而被裁掉
+        target = shorten(self.poller.target_label(), 24)
         if self._toast_error:
             self._set(self.link, f"● 已连接 {target}（通知发送失败）", fg=WARN)
         else:
@@ -1027,6 +1062,7 @@ class CountdownWidget:
             self.countdown,
             self.info,
             self.task,
+            self.task2,
             self.link,
             self.min_button,
             self.close_button,
@@ -1116,6 +1152,7 @@ class CountdownWidget:
             self.countdown,
             self.info,
             self.task,
+            self.task2,
             self.link,
             self.min_button,
             self.close_button,
@@ -1124,18 +1161,19 @@ class CountdownWidget:
         self.countdown.configure(fg=FG)
         self.info.configure(fg=SUB)
         self.task.configure(fg=TASK_FG)
+        self.task2.configure(fg=SUB)
         self.link.configure(fg=WARN if self._toast_error else OK)
         self._hide_tooltip()
 
     def _copy_task_name(self):
-        """右键菜单：显示并复制完整任务名（窗口内单行显示，超出部分截断）。"""
-        name = self._full_task_name
-        if not name:
-            messagebox.showinfo("下次任务", "当前没有下次任务。", parent=self.root)
+        """右键菜单：显示并复制完整任务队列（窗口内单行显示，超出部分截断）。"""
+        text = self._detail_text
+        if not text:
+            messagebox.showinfo("任务队列", "当前没有待执行任务。", parent=self.root)
             return
         self.root.clipboard_clear()
-        self.root.clipboard_append(name)
-        messagebox.showinfo("下次任务", f"已复制到剪贴板：\n\n{name}", parent=self.root)
+        self.root.clipboard_append(text)
+        messagebox.showinfo("任务队列", f"已复制到剪贴板：\n\n{text}", parent=self.root)
 
     # -- 悬停提示（显示完整任务名） --
 
@@ -1151,8 +1189,8 @@ class CountdownWidget:
 
     def _show_tooltip(self):
         self._tip_job = None
-        name = self._full_task_name
-        if not name or self._tip is not None:
+        text = self._detail_text
+        if not text or self._tip is not None:
             return
         tip = tk.Toplevel(self.root)
         tip.overrideredirect(True)
@@ -1171,7 +1209,7 @@ class CountdownWidget:
         frame.pack()
         tk.Label(
             frame,
-            text=name,
+            text=text,
             font=("Microsoft YaHei UI", 10),
             fg=TIP_FG,
             bg=TIP_BG,
