@@ -76,6 +76,9 @@ mimetypes.add_type("image/webp", ".webp")
 app = Flask(__name__, static_folder="ui/dist", static_url_path="")
 app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25, "max_message_size": 64 * 1024}
 app.config["WEBVIEW_LOCAL_ONLY_NO_TOKEN"] = False
+app.config["AI_ASSISTANT_ENABLED"] = config.conf.assistant_enabled_for_launch(
+    managed=os.environ.get("MOWER_MANAGED") == "1"
+)
 
 
 def apply_trusted_proxy(flask_app, environ=None):
@@ -1318,6 +1321,13 @@ def load_config():
                 "message": "配置必须是 JSON 对象",
             }, 400
         req = dict(payload)
+        if "ai_assistant_enabled" in req:
+            if req["ai_assistant_enabled"] != config.conf.ai_assistant_enabled:
+                return {
+                    "error": "manager_owned_setting",
+                    "message": "请在实例停止后通过多开管理器修改 Mower AI 助手开关",
+                }, 403
+            req.pop("ai_assistant_enabled")
         from arknights_mower.__main__ import device_control
 
         if _performance_test_status()["status"] == "running" and set(req) & {
@@ -1769,6 +1779,7 @@ def get_status():
     with scheduled_start_lock:
         start_at = scheduled_start_at.isoformat() if scheduled_start_at else None
     response = {
+        "ai_assistant_enabled": app.config["AI_ASSISTANT_ENABLED"],
         "desktop_startup_handled": bool(app.config.get("DESKTOP_STARTUP_HANDLED")),
         "auto_start_handled": bool(
             app.config.get("DESKTOP_STARTUP_HANDLED")
@@ -2408,12 +2419,24 @@ def save_file_dialog():
 
     upper = Image.open(img)
 
-    if request.args.get("rescue") == "1":
+    if "plan" in request.form:
+        from arknights_mower.utils.config.plan import parse_plan_document
+
+        try:
+            plan_data = parse_plan_document(
+                json.loads(request.form["plan"])
+            ).model_dump(exclude_none=True)
+        except (ValueError, TypeError):
+            return {"error": "导出排班快照格式无效"}, 400
+    elif request.args.get("rescue") == "1":
         plan_data = config.conf.automatic_rescue_plan.model_dump(exclude_none=True)
     else:
         plan_data = config.plan.model_dump(exclude_none=True)
         plan_data["advanced_settings"] = export_advanced_settings(config.conf)
-    img = qrcode.export(plan_data, upper, config.conf.theme)
+    theme = request.form.get("theme", config.conf.theme)
+    if theme not in ("light", "dark"):
+        return {"error": "导出主题无效"}, 400
+    img = qrcode.export(plan_data, upper, theme)
     buffer = BytesIO()
     img.save(buffer, format="JPEG")
     buffer.seek(0)
@@ -2436,6 +2459,34 @@ def export_json():
 @require_token
 def validate_backup_plans_route():
     try:
+        body = request.get_json(silent=True) or {}
+        if "plan" in body:
+            from arknights_mower.utils.config.plan import parse_plan_document
+            from arknights_mower.utils.config.plan_advanced import (
+                apply_advanced_settings,
+            )
+
+            mode = body.get("operatorMode")
+            if mode not in ("cache", "custom", "maximum"):
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "message": "干员练度选项无效",
+                }, 400
+            document = parse_plan_document(body["plan"])
+            conf = apply_advanced_settings(
+                config.conf.model_copy(deep=True), document.advanced_settings
+            )
+            global_plan = build_global_plan(plan_model=document, conf_model=conf)
+            op = Operators(global_plan, runtime_conf=conf)
+            result = op.validate_backup_plans(
+                max_seconds=5, check_owned=mode == "cache", refresh_roster=False
+            )
+            if result.get("status") == "incomplete":
+                result["message"] = (
+                    "排班组合校验未完成，尚未开始演算。请简化副表条件后重试。"
+                )
+            return result
         global_plan = build_global_plan()
         op = Operators(global_plan)
         result = op.validate_backup_plans()
@@ -3904,6 +3955,14 @@ def basement_skill_operators():
     return load_skill_snapshot()
 
 
+@app.route("/riic/income-cache", methods=["GET"])
+@require_token
+def riic_income_cache():
+    from arknights_mower.utils.building_skills import load_income_cache
+
+    return load_income_cache()
+
+
 @app.route("/cultivate-fetch")
 @require_token
 def cultivate_fetch():
@@ -4076,6 +4135,17 @@ def submit_feedback():
 @sock.route("/ws/chat")
 def ws_chat(ws):
     if not _authorize_websocket(ws):
+        return
+    if not app.config["AI_ASSISTANT_ENABLED"]:
+        ws.send(
+            json.dumps(
+                {
+                    "error": "当前实例暂未开启该功能，请联系管理员。",
+                    "code": "ai_assistant_disabled",
+                }
+            )
+        )
+        ws.close(reason=4403, message="AI assistant disabled")
         return
     context = []
     while True:

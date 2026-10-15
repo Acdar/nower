@@ -31,6 +31,7 @@ from arknights_mower.solvers.base_mixin import (
     fixed_selection_profile,
 )
 from arknights_mower.solvers.clue_credit import ClueCreditMixin
+from arknights_mower.solvers.clue_gift import ClueGiftMixin
 from arknights_mower.solvers.credit import CreditSolver
 from arknights_mower.solvers.cultivate_depot import cultivate as cultivateDepotSolver
 from arknights_mower.solvers.depotREC import depotREC as DepotSolver
@@ -387,7 +388,7 @@ class GroupShiftBlocked(ProductSwitchDeferred):
 
 
 class BaseSchedulerSolver(
-    ClueCreditMixin, EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin
+    ClueCreditMixin, ClueGiftMixin, EmergencyRecoveryMixin, SceneGraphSolver, BaseMixin
 ):
     """
     收集基建的产物：物资、赤金、信赖
@@ -3720,6 +3721,7 @@ class BaseSchedulerSolver(
         result = {}
         group_dorm_positions = set()
         replacement_positions = set()
+        joining_resting = set()
         previous_owners = {
             slot.agent: (old_room, slot)
             for old_room, slots in previous_plan.items()
@@ -3757,6 +3759,18 @@ class BaseSchedulerSolver(
                 owner = self.op_data.operators[slot.agent]
                 previous_room, previous = previous_owners.get(slot.agent, (None, None))
                 relocated = old is None or old.agent != slot.agent
+                if (
+                    (previous is None or previous.group != slot.group)
+                    and self.op_data.is_group_shift_anchor(owner)
+                    and self.op_data.group_is_resting(slot.group)
+                    and (not owner.current_room or owner.is_resting())
+                    and owner.name not in self._protected_training_names()
+                    and not (room == "train" and _training_room_scan_disabled)
+                ):
+                    # 切表恢复的离岗成员跟随组内休息，不能以新岗位召回整组。
+                    replacement_positions.add((room, index))
+                    joining_resting.add(owner.name)
+                    continue
                 if previous is not None and (
                     # 未读驻员和心情的岗位沿用初始化纠错，不推断为离岗。
                     (
@@ -3788,7 +3802,7 @@ class BaseSchedulerSolver(
                 result.setdefault(room, ["Current"] * len(self.op_data.plan[room]))[
                     index
                 ] = slot.agent
-        return result, group_dorm_positions, replacement_positions
+        return result, group_dorm_positions, replacement_positions, joining_resting
 
     def _switch_products_before_backup_plan(self):
         """独立条件触发副表时，等切产物任务完成再切表。"""
@@ -3872,7 +3886,7 @@ class BaseSchedulerSolver(
             if any(name != "Current" for name in names):
                 restore_plan[room] = names
 
-        correction, group_dorm_positions, replacement_positions = (
+        correction, group_dorm_positions, replacement_positions, joining_resting = (
             self._cached_changed_slot_plan(
                 previous_plan,
                 {
@@ -3945,6 +3959,40 @@ class BaseSchedulerSolver(
             reserved_slots,
         ):
             return None
+        if joining_resting:
+            simulation = copy.copy(self)
+            simulation.op_data = self.op_data.project_arrangements([transition_plan])
+            missing = [
+                name
+                for name in sorted(joining_resting)
+                if (op := simulation.op_data.operators[name]).group
+                and simulation.op_data.group_is_resting(op.group)
+                and name not in explicit_names
+                and simulation.op_data.get_dorm_by_name(name)[0] is None
+                and not (
+                    not op.current_room
+                    and op.time_stamp is not None
+                    and op.mood >= op.upper_limit
+                )
+            ]
+            if missing:
+                # 新成员尚未恢复时复用正常替班与分床；只改投影中的床位缓存。
+                admissions = {}
+                if not simulation._get_resting_plan(
+                    missing,
+                    list(_assigned_operator_names(transition_plan)),
+                    transition_plan,
+                    simulation.op_data.active_high_resting_count(),
+                    dorm_admissions=admissions,
+                    excluded_names=reserved_names,
+                    reserved_slots=reserved_slots | explicit_dorm_slots,
+                ):
+                    return None
+                for (room, index), name in admissions.items():
+                    transition_plan.setdefault(
+                        room, ["Current"] * len(self.op_data.plan[room])
+                    )[index] = name
+                    preserved.pop(name, None)
         # 替班不足时允许召回本人；其余主班保留位置，阵容变化可使计时失效。
         assigned = _assigned_operator_names(transition_plan)
         preserved = {
@@ -4657,6 +4705,7 @@ class BaseSchedulerSolver(
         *,
         dorm_admissions=None,
         excluded_names=(),
+        reserved_slots=(),
     ):
         from arknights_mower.utils.exhaust_replacement import match_replacements
 
@@ -4669,6 +4718,7 @@ class BaseSchedulerSolver(
         retained_names, retained_slots = retained_task_reservations(
             self.op_data, self.tasks, current_task=getattr(self, "task", None)
         )
+        retained_slots |= set(reserved_slots)
         reserved_names = (
             self.op_data.reserved_product_replacements
             | retained_names
@@ -6581,6 +6631,7 @@ class BaseSchedulerSolver(
             friend_clue = []
 
             clue_status = {}
+            placed_clues = frozenset()
 
             def place_index():
                 for cl, st in clue_status.items():
@@ -6748,6 +6799,7 @@ class BaseSchedulerSolver(
                                 self.tap(unlock_pos)
                         ctm.complete("place")
                     elif ctm.task == "give_away":
+                        placed_clues = self._read_placed_clue_numbers()
                         self.ctap((1799, 578))
                     elif ctm.task == "party_time":
                         self.back()
@@ -6882,6 +6934,12 @@ class BaseSchedulerSolver(
                             clue_status[cl] = None
 
                 elif scene == Scene.CLUE_GIVE_AWAY:
+                    if placed_clues:
+                        self.wait_product_complete()
+                        self.recog.update()
+                        capacity = self._read_clue_gift_capacity()
+                        if capacity is not None:
+                            self.clue_count = capacity[0]
                     give_away_true = self.leifeng_mode or (
                         not self.leifeng_mode
                         and self.clue_count > self.clue_count_limit
@@ -6954,11 +7012,9 @@ class BaseSchedulerSolver(
                 self._run_clue_shop(settlement_checked=settlement_checked)
             else:
                 self._run_clue_shop()
+        except (MowerExit, DeviceRecoveryError, SharedADBError):
+            raise
         except Exception as e:
-            if self._clue_credit_enabled() and isinstance(
-                e, (MowerExit, DeviceRecoveryError, SharedADBError)
-            ):
-                raise
             save_exception(e)
             logger.exception(e)
             return
@@ -12893,6 +12949,13 @@ class BaseSchedulerSolver(
         if dispatched:
             logger.info(f"已为 {dispatched} 个材料足够的空闲专精计划安排开始训练")
 
+    def _sync_idle_device(self):
+        """接收空闲生命周期操作后设备控制持有的设备对象。"""
+        if control := getattr(self.device, "session_control", None):
+            device = control.start().unwrap()
+            self.device = device
+            self.recog.device = device
+
     def _idle_sleep(self, remaining_time, allow_wakeup=True):
         """等待任务并统一维护 `sleeping` 与连续场景观测边界。
 
@@ -12922,6 +12985,7 @@ class BaseSchedulerSolver(
                     raise ConnectionError("休眠结束后模拟器启动失败")
                 # 启动成功即结束本轮的主动启动，后续连接故障交由正常重连恢复。
                 self._simulator_closed_for_idle = False
+                self._sync_idle_device()
                 self.device.reconnect()
             self.recog.reset_after_external_control()
             self._idle_observation_pending = False
@@ -13003,6 +13067,7 @@ class BaseSchedulerSolver(
             if restart_simulator(start=False):
                 self._simulator_closed_for_idle = True
             else:
+                self._sync_idle_device()
                 logger.warning(
                     "空闲关闭模拟器失败，继续等待；请检查所选实例和管理程序。"
                 )

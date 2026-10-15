@@ -78,6 +78,7 @@ class TestIdleSimulatorWake(unittest.TestCase):
         self.solver = object.__new__(BaseSchedulerSolver)
         self.solver._simulator_closed_for_idle = False
         self.solver.device = MagicMock()
+        self.solver.device.session_control = None
         self.solver.recog = MagicMock()
         self.now = datetime(2026, 9, 5, 13, 0)
         self.wake = Event()
@@ -3622,6 +3623,7 @@ class TestClueProductCompleteWait(unittest.TestCase):
         solver.backup_plan_solver = MagicMock()
         solver.read_party_time = MagicMock(return_value=None)
         solver.set_detected_party_time = MagicMock()
+        solver._read_placed_clue_numbers = MagicMock(return_value=frozenset())
 
         scenes = [
             Scene.INFRA_DETAILS,
