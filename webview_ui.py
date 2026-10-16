@@ -5,6 +5,17 @@ import platform
 import sys
 from urllib.parse import quote
 
+if __name__ == "__main__" and sys.argv[1:2] == ["--jpeg-encode-worker"]:
+    from arknights_mower.utils.jpeg_worker import worker_main
+
+    worker_main(*sys.argv[2:])
+    sys.exit()
+
+# Worker flags precede supervision; spawned helpers never open another instance.
+_supervised_instance = sys.argv[1:2] == ["--supervised-instance"]
+if __name__ == "__main__" and _supervised_instance:
+    del sys.argv[1]
+
 if __name__ == "__main__" and sys.argv[1:2] == ["--process-control-worker"]:
     from arknights_mower.utils.process_control import worker_main
 
@@ -600,6 +611,7 @@ def own_child(process, connection=None):
 
 
 def start_desktop_child(kind, *args, log_queue=None):
+    from arknights_mower.utils.desktop_process import run_with_parent_watch
     from arknights_mower.utils.lifecycle import shutdown
 
     if shutdown.closing:
@@ -622,7 +634,9 @@ def start_desktop_child(kind, *args, log_queue=None):
     else:
         parent = child = mp.Queue()
     own_channel(parent)
-    process = mp.Process(target=target, args=(child, *args), daemon=True)
+    process = mp.Process(
+        target=run_with_parent_watch, args=(target, child, *args), daemon=True
+    )
     try:
         process.start()
         own_child(process, parent if kind == "window" else None)
@@ -687,11 +701,17 @@ def report_startup_failure(error) -> None:
 
 
 def run_desktop():
+    from arknights_mower.utils.instance_supervisor import (
+        INTENTIONAL_EXIT_CODE,
+        INTENTIONAL_REASONS,
+        child_exit,
+    )
     from arknights_mower.utils.lifecycle import shutdown
 
     reason = "window"
     try:
         _run_desktop()
+        reason = shutdown.reason or "window"
     except KeyboardInterrupt:
         reason = "ctrl_c"
     except BaseException as error:
@@ -699,7 +719,20 @@ def run_desktop():
         report_startup_failure(error)
         raise
     finally:
-        shutdown.close(reason)
+        exit_record_failed = False
+        try:
+            child_exit(reason)
+        except Exception:
+            from arknights_mower.utils.log import logger
+
+            logger.exception("记录实例退出意图失败，继续完成资源关闭")
+            exit_record_failed = reason in INTENTIONAL_REASONS
+        finally:
+            shutdown.close(reason)
+        if exit_record_failed:
+            # Preserve explicit closure even when its durable report cannot be
+            # written. Ordinary native exit codes still count as unexpected.
+            raise SystemExit(INTENTIONAL_EXIT_CODE)
 
 
 def start_http_server(app, host, port):
@@ -741,6 +774,9 @@ def _run_desktop():
     owner = runtime.read_json(runtime.state_dir() / "active/owner.json", {})
     if runtime.active_job() and os.environ.get("MOWER_RESTART_JOB") != owner.get("id"):
         sys.exit("软件更新或进程操作正在进行，请等待完成后启动 Mower")
+    from arknights_mower.utils.windows_shortcuts import create_admin_shortcuts
+
+    create_admin_shortcuts()
     background = background_requested()
     managed = os.environ.get("MOWER_MANAGED") == "1"
     manager_owned = managed
@@ -844,6 +880,31 @@ def _run_desktop():
         sleep(0.1)
     registration.record["ready"] = True
     registration.publish()
+    from arknights_mower.utils import crash_recovery
+    from arknights_mower.utils.instance_supervisor import child_ready
+
+    resume_mode = os.environ.pop("MOWER_RESUME_MODE", "")
+    resume_run = (
+        bool(os.environ.get("MOWER_RESTART_JOB"))
+        and os.environ.get("MOWER_RESUME_RUN") == "1"
+    )
+    resume = (
+        resume_mode in ("0", "1")
+        or resume_run
+        or (resume_mode != "preserve" and conf.start_automatically)
+    )
+    child_ready(registration, desired_running=resume)
+    crash_notice = crash_recovery.status()
+    if crash_recovery.notice_path() is not None:
+        recovery = crash_recovery.AutomaticRecovery(
+            server._retry_after_process_crash,
+            running=lambda: bool(
+                server.mower_thread and server.mower_thread.is_alive()
+            ),
+            closing=lambda: shutdown.closing,
+        )
+        shutdown.own("automatic recovery", recovery.close, Phase.SIGNAL)
+        recovery.start()
     tray_queue = None
     tray_retry_at = 0
 
@@ -919,12 +980,6 @@ def _run_desktop():
 
     request_auto_check()
 
-    resume_mode = os.environ.pop("MOWER_RESUME_MODE", "")
-    resume = resume_mode in ("0", "1") or (
-        os.environ.get("MOWER_RESUME_RUN") == "1"
-        if os.environ.get("MOWER_RESTART_JOB")
-        else conf.start_automatically
-    )
     auto_resource = conf.resource_update.enable and conf.resource_update.auto_update
 
     def startup_cancelled():
@@ -954,16 +1009,19 @@ def _run_desktop():
                 # A cached page or manual request can already own the install.
                 if server.resource_update.running():
                     server.resource_update.thread.join()
-        if resume and not startup_cancelled():
+        if resume and not crash_notice["active"] and not startup_cancelled():
             with server.app.test_request_context(
                 method="GET", headers={"token": runtime_token}
             ):
                 if resume_mode in ("0", "1"):
-                    server.start(resume_mode)
+                    server.start(resume_mode, automatic=True)
                 else:
-                    server.start("2" if os.environ.get("MOWER_RESTART_JOB") else "0")
+                    server.start(
+                        "2" if resume_run else "0",
+                        automatic=True,
+                    )
 
-    if resume or auto_resource:
+    if resume and not crash_notice["active"] or auto_resource:
         Thread(target=resume_after_update, daemon=True).start()
     manager_missing_since = None
     try:
@@ -1048,4 +1106,20 @@ if __name__ == "__main__":
         }[sys.argv[2]]
         run_worker(target, *sys.argv[3:])
     else:
-        run_desktop()
+        if sys.platform == "win32" and not _supervised_instance:
+            from arknights_mower.utils.instance_supervisor import run_launcher
+
+            sys.exit(run_launcher(sys.argv[1:]))
+        if _supervised_instance:
+            from arknights_mower.utils.instance_supervisor import (
+                child_report,
+                instance_lock,
+            )
+
+            with instance_lock(
+                os.environ["MOWER_SUPERVISOR_DIRECTORY"], timeout=0, child=True
+            ):
+                child_report(started=True)
+                run_desktop()
+        else:
+            run_desktop()

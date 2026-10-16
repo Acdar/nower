@@ -34,6 +34,7 @@ const cacheError = ref('')
 const weightsBusy = ref(false)
 const weightsError = ref('')
 const submitting = ref(false)
+const validating = ref(false)
 const errorAlert = ref(null)
 const controller = new AbortController()
 let alive = true
@@ -121,6 +122,7 @@ const exporting = ref(false)
 const exportError = ref('')
 const exported = ref(false)
 const exportName = ref('')
+const exportDetails = reactive({ author: '', remarks: '' })
 const completedSnapshot = ref(null)
 const archiveLoading = ref(true)
 const archiveError = ref('')
@@ -236,6 +238,8 @@ async function restoreResult() {
     completedSnapshot.value = record.snapshot
     savedAt.value = record.savedAt
     exportName.value = record.exportName || ''
+    exportDetails.author = record.exportDetails?.author || ''
+    exportDetails.remarks = record.exportDetails?.remarks || ''
     progressLog.value = record.progressLog
     Object.assign(state, {
       result: record.result,
@@ -251,7 +255,11 @@ async function restoreResult() {
 }
 async function persistResult() {
   if (!lastCompleted) return
-  lastCompleted = { ...lastCompleted, exportName: exportName.value }
+  lastCompleted = {
+    ...lastCompleted,
+    exportName: exportName.value,
+    exportDetails: { ...exportDetails }
+  }
   archiveError.value = ''
   try {
     await saveIncomeArchive(lastCompleted)
@@ -261,7 +269,13 @@ async function persistResult() {
   }
 }
 function saveName() {
-  if (lastCompleted && lastCompleted.exportName !== exportName.value) persistResult()
+  if (
+    lastCompleted &&
+    (lastCompleted.exportName !== exportName.value ||
+      (lastCompleted.exportDetails?.author || '') !== exportDetails.author ||
+      (lastCompleted.exportDetails?.remarks || '') !== exportDetails.remarks)
+  )
+    persistResult()
 }
 async function start() {
   if (archiveLoading.value || submitting.value || state.running || exporting.value) return
@@ -275,11 +289,13 @@ async function start() {
     const captured = { ...JSON.parse(JSON.stringify(snapshot)), image }
     const runSettings = JSON.parse(JSON.stringify(settings))
     incomeRequest(captured.plan, runSettings)
+    validating.value = true
     const { data: validation } = await axios.post(
       `${import.meta.env.VITE_HTTP_URL}/validate-plan`,
       { plan: captured.plan, operatorMode: runSettings.operatorMode },
-      { timeout: 15000, signal: controller.signal }
+      { timeout: 0, signal: controller.signal }
     )
+    validating.value = false
     if (!alive) return
     if (validation.success !== true)
       throw new Error(validation.message || '排班校验未通过，尚未开始演算')
@@ -302,6 +318,7 @@ async function start() {
       if (alive) errorAlert.value?.$el?.scrollIntoView?.({ block: 'nearest' })
     }
   } finally {
+    validating.value = false
     if (alive) submitting.value = false
   }
 }
@@ -318,7 +335,8 @@ async function exportImage() {
       state.input.settings,
       state.input.plan,
       completedSnapshot.value.theme,
-      completedSnapshot.value.roomBounds
+      completedSnapshot.value.roomBounds,
+      { ...exportDetails }
     )
     if (generation !== exportGeneration) return
     downloadIncomeImage(blob, incomeImageFilename(name, state.result))
@@ -353,7 +371,10 @@ onBeforeUnmount(() => {
     preset="card"
     title="计算收益"
     class="income-dialog"
-    :content-style="{ overflowY: 'auto' }"
+    :content-style="{
+      overflowY: 'auto',
+      paddingBottom: activeTab === 'timeline' ? '0' : undefined
+    }"
     :mask-closable="false"
     @update:show="!$event && close()"
   >
@@ -379,6 +400,9 @@ onBeforeUnmount(() => {
             : '暂未收到新的进度，可以继续等待或停止演算。'
         }}</n-alert>
       </div>
+      <n-alert v-if="validating" class="notice" type="info" role="status">
+        正在校验排班组合，完成后自动开始演算。可关闭窗口取消等待。
+      </n-alert>
       <n-alert v-if="state.error" ref="errorAlert" role="alert" class="notice" type="error">
         {{ state.error }}
         <p v-for="(d, i) in attemptDiagnostics" :key="i">{{ d.message }}</p>
@@ -483,7 +507,7 @@ onBeforeUnmount(() => {
                 <n-select
                   v-model:value="settings.inventorySource"
                   :options="[
-                    { label: '沿用森空岛缓存（可补填修改）', value: 'cache' },
+                    { label: '沿用森空岛缓存（可修改）', value: 'cache' },
                     { label: '手动设定', value: 'manual' }
                   ]"
                 />
@@ -491,7 +515,7 @@ onBeforeUnmount(() => {
               <p v-if="settings.inventorySource === 'cache'">
                 {{
                   settings.cachedInventory
-                    ? '未提供的数量保持空白，请补填后演算。重新读取会替换本次缓存修改。'
+                    ? '未提供的数量按 0 计算，可手动修改。重新读取会替换本次缓存修改。'
                     : '没有可用库存缓存，请同步或选择手动设定。'
                 }}
                 {{
@@ -519,11 +543,9 @@ onBeforeUnmount(() => {
                 :key="item.resource"
                 :label="item.label"
                 ><n-input-number
-                  :value="
-                    stock?.[item.resource] ?? (settings.inventorySource === 'manual' ? 0 : null)
-                  "
+                  :value="stock?.[item.resource] ?? 0"
                   :disabled="!stock || state.running || exporting || submitting || weightsBusy"
-                  placeholder="缓存未提供，请补填"
+                  placeholder="0"
                   :min="0"
                   :max="Number.MAX_SAFE_INTEGER"
                   :precision="0"
@@ -599,6 +621,30 @@ onBeforeUnmount(() => {
                 :disabled="exporting"
             /></n-form-item>
             <p>排班名称仅用于 JPG 文件名，后附日均加权收益和采样天数；图片不显示名称。</p>
+            <n-form-item label="作者" :show-feedback="false">
+              <n-input
+                v-model:value="exportDetails.author"
+                @change="saveName"
+                placeholder="可选，显示在收益与订单统计下方"
+                :maxlength="40"
+                :disabled="exporting"
+              />
+            </n-form-item>
+            <n-form-item label="备注" :show-feedback="false">
+              <n-input
+                v-model:value="exportDetails.remarks"
+                @change="saveName"
+                type="textarea"
+                placeholder="可填写排班版本、适用条件或使用说明"
+                :maxlength="300"
+                show-count
+                :autosize="{ minRows: 2, maxRows: 4 }"
+                :disabled="exporting"
+              />
+            </n-form-item>
+            <p>
+              作者和备注随收益记录保存，导出时显示在收益与订单统计下方；留空不占空间，无需重新演算。
+            </p>
             <p>
               本次结果：预热 {{ state.input.settings.warmupDays }} 天、统计
               {{ state.input.settings.sampleDays }} 天。修改参数后需重新演算；再次导出使用本次结果。
@@ -793,7 +839,9 @@ onBeforeUnmount(() => {
     </template>
     <template #footer
       ><n-space justify="end">
-        <n-button @click="close">{{ state.running ? '停止并关闭' : '关闭' }}</n-button>
+        <n-button @click="close">{{
+          validating ? '取消等待并关闭' : state.running ? '停止并关闭' : '关闭'
+        }}</n-button>
         <n-button v-if="state.running" type="warning" @click="session.cancel">停止演算</n-button>
         <n-button
           v-if="state.result?.success"
@@ -816,7 +864,9 @@ onBeforeUnmount(() => {
           "
           :loading="submitting"
           @click="start"
-          >{{ state.result?.success ? '重新演算' : '开始演算' }}</n-button
+          >{{
+            validating ? '正在校验排班' : state.result?.success ? '重新演算' : '开始演算'
+          }}</n-button
         >
       </n-space></template
     >
@@ -825,10 +875,15 @@ onBeforeUnmount(() => {
 
 <style scoped>
 :global(.income-dialog.n-card) {
-  width: 760px;
-  max-width: calc(95vw / var(--mower-zoom, 1));
-  max-height: calc(90vh / var(--mower-zoom, 1));
+  width: calc(98vw / var(--mower-zoom, 1));
+  height: calc(96vh / var(--mower-zoom, 1));
+  height: calc(96dvh / var(--mower-zoom, 1));
+  max-width: none;
 }
+:global(.income-dialog .n-card-content) {
+  min-height: 0;
+}
+:global(.income-dialog .n-tabs-pane-wrapper),
 :global(.income-dialog .n-tab-pane) {
   overflow: visible;
 }

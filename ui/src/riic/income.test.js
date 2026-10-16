@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { createDefaultWorkspace } from './vendor/workbench/defaults'
+import { compileRosterSchedule } from './vendor/scheduler/compileRosterSchedule'
+import { simulateSchedule } from './vendor/simulator/scheduleSimulation'
+import { resolveOperatorCharId } from './vendor/domain/operatorIdentifiers'
 import {
   defaultIncomeSettings,
   incomeRequest,
@@ -103,6 +107,7 @@ describe('income export calculation', () => {
     // Unstaffed gold factory: 72 minutes per bar, twenty bars daily.
     expect(result.summary.goldCount).toBeCloseTo(20, 8)
     expect(result.summary.totalScore82).toBeCloseTo(8000, 7)
+    expect(result.orderDistribution).toMatchObject({ total: 0, other: 0 })
     expect(
       incomeMetrics(result.summary, 28).find((row) => row.label === '赤金等价龙门币').total
     ).toBeCloseTo(280000, 7)
@@ -517,3 +522,162 @@ it('retains advisory backup validation in the worker report even when the backup
   expect(fixed.success, fixed.error).toBe(true)
   expect(fixed.diagnostics.some((issue) => issue.code === 'CONFLICTING_REPLACEMENT')).toBe(false)
 }, 30000)
+
+describe('cached simulation inventory', () => {
+  it('normalizes absent and null cached quantities to zero without changing reported stock', () => {
+    const settings = {
+      ...modelSettings(),
+      finiteInventory: true,
+      inventorySource: 'cache',
+      cachedInventory: { gold: null, lmd: 42 }
+    }
+    const before = structuredClone(settings)
+    expect(
+      incomeRequest(plan(), settings).options.simulationOptions.production.initialResources
+    ).toEqual({ gold: 0, fragment: 0, orirock: 0, device: 0, lmd: 42, exp: 0 })
+    expect(settings).toEqual(before)
+  })
+  it('accepts an available cache with no reported resources', () => {
+    expect(
+      incomeRequest(plan(), {
+        ...modelSettings(),
+        finiteInventory: true,
+        inventorySource: 'cache',
+        cachedInventory: {}
+      }).options.simulationOptions.production.initialResources
+    ).toEqual({ gold: 0, fragment: 0, orirock: 0, device: 0, lmd: 0, exp: 0 })
+  })
+  it.each([-1, true, '12', NaN, 1.5])('still rejects invalid reported stock %s', (gold) => {
+    expect(() =>
+      incomeRequest(plan(), {
+        ...modelSettings(),
+        finiteInventory: true,
+        inventorySource: 'cache',
+        cachedInventory: { gold }
+      })
+    ).toThrow('赤金')
+  })
+  it('still requires an available cache', () => {
+    expect(() =>
+      incomeRequest(plan(), {
+        ...modelSettings(),
+        finiteInventory: true,
+        inventorySource: 'cache',
+        cachedInventory: null
+      })
+    ).toThrow('没有可用')
+  })
+})
+
+it('calculates product-count backup conditions through the income Worker with a zero-filled cache', () => {
+  const source = plan()
+  source.backup_plans = [
+    {
+      name: '产品统计',
+      trigger:
+        "op_data.facility_product_count('gold') >= 1 and op_data.facility_product_type_count() >= 1 and op_data.inventory_count('源石碎片') == 0",
+      plan: {}
+    }
+  ]
+  const result = calculateIncome(source, {
+    ...modelSettings(),
+    warmupDays: 0,
+    sampleDays: 1,
+    finiteInventory: true,
+    inventorySource: 'cache',
+    cachedInventory: { lmd: 42 }
+  })
+  expect(result.success, result.error).toBe(true)
+  expect(result.inventoryMode).toBe('finite')
+  expect(
+    result.simulationReport.events
+      .filter((event) => event.type === 'backup-plan')
+      .map((event) => [event.backupName, event.active])
+  ).toEqual([['产品统计', true]])
+  expect(result.resources.opening.fragment).toBe(0)
+  expect(result.observedHours).toBeCloseTo(24, 7)
+})
+
+it.each([
+  ['刺玫', 18],
+  ['撷英调香师', 20]
+])(
+  'integrates %s fatigue recovery separately from the all-room maximum until morale %s',
+  (provider, threshold) => {
+    const workspace = createDefaultWorkspace()
+    workspace.mainPlan.facilities.dormitory_1.level = 5
+    workspace.mainPlan.facilities.dormitory_1.slots = [provider, '杜林', '芬'].map((name) => ({
+      occupant: { kind: 'operator', operatorId: name },
+      groupId: null,
+      replacements: []
+    }))
+    const target = resolveOperatorCharId('芬')
+    const schedule = compileRosterSchedule(workspace, {
+      operatorMorale: { [target]: threshold - 1 }
+    })
+    for (const maxStepHours of [0.05, 1]) {
+      const report = simulateSchedule(schedule, { sampleHours: 0.5, maxStepHours })
+      expect(report.success).toBe(true)
+      expect(report.operators.find((op) => op.operatorId === target).finalMorale).toBeCloseTo(
+        threshold + (0.5 - 1 / 4.35) * 4.25,
+        7
+      )
+    }
+  }
+)
+it('takes only one fatigue recovery extra with both providers in the Mower simulation', () => {
+  const workspace = createDefaultWorkspace()
+  workspace.mainPlan.facilities.dormitory_1.level = 5
+  workspace.mainPlan.facilities.dormitory_1.slots = ['刺玫', '撷英调香师', '杜林', '芬'].map(
+    (name) => ({
+      occupant: { kind: 'operator', operatorId: name },
+      groupId: null,
+      replacements: []
+    })
+  )
+  const target = resolveOperatorCharId('芬')
+  const schedule = compileRosterSchedule(workspace, { operatorMorale: { [target]: 10 } })
+  const report = simulateSchedule(schedule, { sampleHours: 1 })
+  expect(report.success).toBe(true)
+  expect(report.operators.find((op) => op.operatorId === target).finalMorale).toBeCloseTo(14.35, 8)
+})
+
+it.each([
+  [true, 14.4],
+  [false, 15.05]
+])(
+  'retains Coldshot shared recovery category with unfinished Fiammetta: %s',
+  (withFiammetta, expected) => {
+    const workspace = createDefaultWorkspace()
+    workspace.mainPlan.facilities.dormitory_1.level = 5
+    const names = ['冰酿', '杜林', '芬', ...(withFiammetta ? ['菲亚梅塔'] : [])]
+    workspace.mainPlan.facilities.dormitory_1.slots = names.map((name) => ({
+      occupant: { kind: 'operator', operatorId: name },
+      groupId: null,
+      replacements: []
+    }))
+    const target = resolveOperatorCharId('芬')
+    const fia = resolveOperatorCharId('菲亚梅塔')
+    const schedule = compileRosterSchedule(workspace, {
+      operatorMorale: { [target]: 10, [fia]: 10 }
+    })
+    const report = simulateSchedule(schedule, { sampleHours: 1 })
+    expect(report.success).toBe(true)
+    expect(report.operators.find((op) => op.operatorId === target).finalMorale).toBeCloseTo(
+      expected,
+      8
+    )
+    if (withFiammetta)
+      expect(report.operators.find((op) => op.operatorId === fia).finalMorale).toBeCloseTo(12, 8)
+  }
+)
+
+it('preserves exchange assumptions when displaying saved clue results', () => {
+  const result = { observedHours: 24, summary: { clueCount: 2 } }
+  const lines = (value) => incomeReportLines(value, modelSettings(), plan(), '主表').join('\n')
+  expect(lines(result)).toContain('历史记录按线索交流关闭')
+  expect(lines({ ...result, clueExchangeMode: 'always-on' })).toContain('线索产量按全程开启交流')
+  expect(lines({ ...result, clueExchangeMode: 'always-on' })).not.toContain(
+    '历史记录按线索交流关闭'
+  )
+})

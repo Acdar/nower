@@ -95,7 +95,12 @@ class Email:
         conf = config.conf
         if conf.mail_enable:
             s.login(conf.account, conf.pass_code)
-            recipient = (
+            if not recipient:
+                recipient = [address for address in conf.recipient if address.strip()] or [
+                    conf.account
+                ]
+            else:
+                recipient = (
                 (conf.recipient or [conf.account]) if not recipient else recipient
             )
             s.send_message(self.msg, conf.account, recipient)

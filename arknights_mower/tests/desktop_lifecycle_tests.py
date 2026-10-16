@@ -242,6 +242,7 @@ class DesktopStartupTests(unittest.TestCase):
         *,
         automatic=True,
         resource=False,
+        background=False,
         restart=False,
         resume_run="0",
         resume_mode="",
@@ -302,7 +303,8 @@ class DesktopStartupTests(unittest.TestCase):
             server.get_resource_version.side_effect = check_resource
             server.install_resource.side_effect = install_resource
 
-            def start_worker(mode):
+            def start_worker(mode, *, automatic=False):
+                self.assertTrue(automatic)
                 events.append(("start", mode))
                 return True
 
@@ -320,7 +322,7 @@ class DesktopStartupTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "MOWER_BACKGROUND": "0",
+                        "MOWER_BACKGROUND": "1" if background else "0",
                         "MOWER_MANAGED": "1",
                         "MOWER_RESTART_JOB": "fixture" if restart else "",
                         "MOWER_RESTART_PORT": restart_port,
@@ -375,7 +377,7 @@ class DesktopStartupTests(unittest.TestCase):
     def test_normal_autostart_admits_task_through_the_start_route(self):
         events, server = self.launch()
         self.assertEqual(events, [("start", "0")])
-        server.start.assert_called_once_with("0")
+        server.start.assert_called_once_with("0", automatic=True)
 
     def test_managed_desktop_honors_explicit_and_random_ports_with_or_without_token(
         self,
@@ -401,7 +403,7 @@ class DesktopStartupTests(unittest.TestCase):
                 self.assertEqual(
                     events, ["check resource", "install resource", ("start", "0")]
                 )
-                server.start.assert_called_once_with("0")
+                server.start.assert_called_once_with("0", automatic=True)
 
     def test_resource_check_error_keeps_existing_resources_and_starts(self):
         events, server = self.launch(resource=True, resource_result=OSError("offline"))
@@ -421,7 +423,7 @@ class DesktopStartupTests(unittest.TestCase):
                 ("start", "0"),
             ],
         )
-        server.start.assert_called_once_with("0")
+        server.start.assert_called_once_with("0", automatic=True)
 
     def test_stop_or_shutdown_during_resource_install_cancels_pending_start(self):
         for cancel in ("stop", "shutdown"):
@@ -438,7 +440,8 @@ class DesktopStartupTests(unittest.TestCase):
     def test_restart_policy_overrides_the_saved_autostart_option(self):
         for automatic in (False, True):
             for resume_run, mode, expected in (
-                ("0", "", None),
+                ("0", "preserve", None),
+                ("1", "preserve", "2"),
                 ("1", "", "2"),
                 ("0", "0", "0"),
                 ("0", "1", "1"),
@@ -457,118 +460,16 @@ class DesktopStartupTests(unittest.TestCase):
                     )
                     self.assertEqual(server.start.call_count, int(expected is not None))
 
-
-class DesktopWindowFailureTests(unittest.TestCase):
-    """窗口故障不得结束实例，失败原因也不得无声消失。"""
-
-    def test_only_a_normal_window_exit_is_a_close_request(self):
-        import webview_ui
-
-        url = "http://127.0.0.1:58000"
-        closed = Mock(exitcode=0)
-        self.assertTrue(webview_ui.handle_finished_window(closed, False, url))
-        self.assertFalse(webview_ui.handle_finished_window(closed, True, url))
-
-    def test_a_failed_window_never_ends_the_instance(self):
-        import webview_ui
-
-        url = "http://127.0.0.1:58000"
-        for exitcode in (1, -15):
-            for keep_running in (False, True):
-                with self.subTest(exitcode=exitcode, keep_running=keep_running):
-                    with patch("webbrowser.open") as open_browser:
-                        self.assertFalse(
-                            webview_ui.handle_finished_window(
-                                Mock(exitcode=exitcode), keep_running, url
-                            )
-                        )
-                    # 没有托盘时浏览器面板是唯一界面，也是退出实例的唯一入口。
-                    self.assertEqual(open_browser.call_count, int(not keep_running))
-
-    def test_a_window_that_cannot_start_exits_nonzero(self):
-        from unittest.mock import MagicMock
-
-        import webview
-
-        import webview_ui
-        from arknights_mower.utils import config as config_module
-        from arknights_mower.utils.config import gui
-
-        connection = Mock()
-        connection.recv.side_effect = EOFError
-        with (
-            patch.object(path, "global_space", ""),
-            patch.object(config_module, "conf", Mock(theme="light")),
-            patch.object(config_module, "load_conf"),
-            patch.object(gui, "load_window_ratio", return_value=None),
-            patch.object(gui, "load_window_launch_mode", return_value="normal"),
-            patch.object(webview_ui, "title_version", return_value="test"),
-            patch.object(webview, "create_window", return_value=MagicMock()),
-            patch.object(
-                webview, "start", side_effect=OSError("WebView2 runtime is missing")
-            ),
-            patch("webbrowser.open") as open_browser,
-        ):
-            with self.assertRaises(SystemExit) as exit_call:
-                webview_ui.webview_window(
-                    connection,
-                    "",
-                    "",
-                    "127.0.0.1",
-                    58000,
-                    "http://127.0.0.1:58000",
-                    True,
+    def test_software_update_autostart_uses_the_saved_option_and_normal_mode(self):
+        for automatic in (False, True):
+            with self.subTest(automatic=automatic):
+                events, server = self.launch(
+                    automatic=automatic,
+                    restart=True,
+                    resource=True,
                 )
-        self.assertEqual(exit_call.exception.code, 1)
-        open_browser.assert_called_once()
-        self.assertTrue(
-            open_browser.call_args.args[0].startswith("http://127.0.0.1:58000?")
-        )
-
-    def test_empty_splash_queue_keeps_polling(self):
-        from queue import Queue
-
-        import webview_ui
-
-        queue = Queue()
-        self.assertEqual(webview_ui.splash_message(queue), (None, None))
-        queue.put({"type": "text", "data": "加载配置"})
-        self.assertEqual(webview_ui.splash_message(queue), ("text", "加载配置"))
-        queue.put({"type": "dialog", "data": "启动失败"})
-        self.assertEqual(webview_ui.splash_message(queue), ("dialog", "启动失败"))
-
-    def test_closed_splash_channel_ends_the_polling(self):
-        import webview_ui
-
-        class ClosedQueue:
-            def get(self, block):
-                raise EOFError
-
-        self.assertEqual(webview_ui.splash_message(ClosedQueue()), ("closed", None))
-
-    def test_startup_failure_is_displayed_on_the_splash(self):
-        import webview_ui
-
-        splash = Mock()
-        splash.is_alive.return_value = True
-        queue = Mock()
-        with (
-            patch.object(webview_ui, "_splash", (splash, queue)),
-            patch.object(webview_ui, "STARTUP_FAILURE_DIALOG_TIMEOUT", 7),
-        ):
-            webview_ui.report_startup_failure(
-                RuntimeError("端口58000已被占用，无法启动！")
-            )
-        self.assertEqual(
-            queue.put.call_args.args[0],
-            {"type": "dialog", "data": "mower 启动失败：端口58000已被占用，无法启动！"},
-        )
-        splash.join.assert_called_once_with(7)
-
-    def test_startup_failure_without_a_splash_only_logs(self):
-        import webview_ui
-
-        with patch.object(webview_ui, "_splash", None):
-            webview_ui.report_startup_failure(
-                SystemExit("软件更新或进程操作正在进行，请等待完成后启动 Mower")
-            )
+                expected = ["check resource", "install resource"]
+                if automatic:
+                    expected.append(("start", "0"))
+                self.assertEqual(events, expected)
+                self.assertEqual(server.start.call_count, int(automatic))

@@ -112,18 +112,17 @@ it('rereads Mower settings before starting and freezes the worker input', async 
   page.settings.cachedInventory.gold = 999
   expect(sent.settings.cachedInventory.gold).toBe(10)
 })
-it('missing cache values require explicit input instead of falling back to maximum or zero', async () => {
+it('uses zero for unreported cached quantities without changing growth mode', async () => {
   const missing = cache()
   missing.inventory.gold = null
+  delete missing.inventory.fragment
   io.client.get.mockResolvedValueOnce({ data: missing })
   await page.readCache()
   await page.start()
-  expect(workers).toHaveLength(0)
-  expect(page.state.error).toContain('赤金')
-  expect(page.settings.operatorMode).toBe('cache')
-  page.settings.inventorySource = 'manual'
-  await page.start()
   expect(workers).toHaveLength(1)
+  const sent = workers[0].postMessage.mock.calls[0][0]
+  expect(sent.settings.cachedInventory).toMatchObject({ gold: 0, fragment: 0, lmd: 42 })
+  expect(sent.settings.operatorMode).toBe('cache')
 })
 it('closing during settings fetch does not create a worker from a late response', async () => {
   await page.readCache()
@@ -237,11 +236,39 @@ it('restores the last result with its original plan image after reopening with a
     saved.input.settings,
     saved.input.plan,
     'light',
-    { room_1_1: { x: 42 } }
+    { room_1_1: { x: 42 } },
+    { author: '', remarks: '' }
   ])
   expect(downloadIncomeImage.mock.calls.at(-1)[1]).toContain('原排班_')
   expect(page.state.input.plan.facility_levels).toBeUndefined()
   expect(props.snapshot.plan.facility_levels).toEqual({ contact: 1 })
+})
+it('saves editable image annotations separately from calculation inputs and restores them', async () => {
+  await page.readCache()
+  await page.start()
+  workers[0].onmessage({ data: { type: 'complete', result: success() } })
+  const original = JSON.parse(JSON.stringify(page.state.input))
+  page.exportDetails.author = '排班作者'
+  page.exportDetails.remarks = '满练，经验站加速\n菲亚梅塔防呆关闭'
+  page.saveName()
+  const saved = saveIncomeArchive.mock.calls.at(-1)[0]
+  expect(saved.exportDetails).toEqual({
+    author: '排班作者',
+    remarks: '满练，经验站加速\n菲亚梅塔防呆关闭'
+  })
+  await page.exportImage()
+  expect(renderIncomeImage.mock.calls.at(-1)[6]).toEqual(saved.exportDetails)
+  page.exportDetails.author = '修改后的作者'
+  expect(saved.exportDetails.author).toBe('排班作者')
+  expect(renderIncomeImage.mock.calls.at(-1)[6].author).toBe('排班作者')
+  expect(page.state.input).toEqual(original)
+  expect(workers).toHaveLength(1)
+  loadIncomeArchive.mockResolvedValue(saved)
+  await page.restoreResult()
+  expect(page.exportDetails).toEqual(saved.exportDetails)
+  delete saved.exportDetails
+  await page.restoreResult()
+  expect(page.exportDetails).toEqual({ author: '', remarks: '' })
 })
 it('keeps the previous success through cancellation and replaces it only after a new success', async () => {
   await page.readCache()
@@ -325,7 +352,7 @@ it.each(['failed', 'incomplete'])(
     expect(io.client.post).toHaveBeenCalledWith(
       `${import.meta.env.VITE_HTTP_URL}/validate-plan`,
       { plan: props.snapshot.plan, operatorMode: 'cache' },
-      expect.objectContaining({ timeout: 15000, signal: expect.any(AbortSignal) })
+      expect.objectContaining({ timeout: 0, signal: expect.any(AbortSignal) })
     )
     expect(workers).toHaveLength(0)
     expect(page.state.error).toContain('鸿雪下班')
@@ -353,11 +380,13 @@ it('calculation uses the same frozen schedule and parameters that passed automat
   const start = page.start()
   await vi.waitFor(() => expect(io.client.post).toHaveBeenCalledOnce())
   expect(workers).toHaveLength(0)
+  expect(page.validating.value).toBe(true)
   props.snapshot.plan.conf.workaholic = '阿米娅'
   page.settings.sampleDays = 7
   finishValidation({ data: { success: true, status: 'passed' } })
   await start
   const input = workers[0].postMessage.mock.calls[0][0]
+  expect(page.validating.value).toBe(false)
   expect(io.client.post.mock.calls[0][1].plan).toEqual(captured)
   expect(input.plan).toEqual(captured)
   expect(input.settings.sampleDays).toBe(28)

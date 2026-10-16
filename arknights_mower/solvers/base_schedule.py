@@ -562,6 +562,14 @@ class BaseSchedulerSolver(
     def _resume_failed_tasks(self):
         for task in self.tasks:
             failure = getattr(task, "execution_failure", None)
+            if failure and getattr(task, "process_recovery_fia_wait", False):
+                fia = self.op_data.operators.get("菲亚梅塔")
+                if (
+                    not has_resting_mood(fia)
+                    or fia.mood < 24
+                    or getattr(fia, "mood_is_prediction", False)
+                ):
+                    continue
             if failure:
                 failure["snapshot"].setdefault(
                     "room_observations", {room: None for room in failure["rooms"]}
@@ -582,6 +590,7 @@ class BaseSchedulerSolver(
                 # 解除派发暂停后，剩余执行仍免于普通过期清理。
                 task.execution_retained = True
                 del task.execution_failure
+                task.__dict__.pop("process_recovery_fia_wait", None)
                 logger.info("相关实测或安排已更新，恢复原任务：%s", task)
 
     def run(self) -> None:
@@ -761,7 +770,11 @@ class BaseSchedulerSolver(
             for name in candidates
             if not self.op_data.operators[name].room.startswith("dorm")
             and not self.op_data.operators[name].workaholic
-            and not self.op_data.operators[name].multi_group
+            and (
+                not self.op_data.operators[name].multi_group
+                or len(candidates) == 1
+                and self.op_data.operators[name].independent_rest
+            )
         ]
         if resting_members and all(op.is_resting() for op in resting_members):
             logger.info(f"{self.task.meta_data} 已完成用尽下班，继续正常规划")
@@ -789,11 +802,11 @@ class BaseSchedulerSolver(
             support = self._plan_exhaust_support(candidates)
             if support:
                 logger.info(f"用尽下班优先协调替班和床位：{support}")
-                self.tasks.append(
-                    SchedulerTask(
-                        task_plan=support, task_type=TaskTypes.SELF_CORRECTION
-                    )
+                support_task = SchedulerTask(
+                    task_plan=support, task_type=TaskTypes.SELF_CORRECTION
                 )
+                support_task.exhaust_support = True
+                self.tasks.append(support_task)
                 # 先确认占用方接岗，再重算用尽下班；不能直接从工作站抽走替班。
                 self.tasks.append(
                     SchedulerTask(
@@ -815,7 +828,11 @@ class BaseSchedulerSolver(
             for name in candidates
             if not self.op_data.operators[name].room.startswith("dorm")
             and not self.op_data.operators[name].workaholic
-            and not self.op_data.operators[name].multi_group
+            and (
+                not self.op_data.operators[name].multi_group
+                or len(candidates) == 1
+                and self.op_data.operators[name].independent_rest
+            )
         ]
         if not members:
             return False
@@ -2157,7 +2174,7 @@ class BaseSchedulerSolver(
                 )
                 self._emergency_save()
 
-    def _read_room_mood(self, room, *, force_mood=False):
+    def _read_room_mood(self, room, *, force_mood=False, strict_observation=False):
         """实读普通房间的驻员与心情，清除已离开房间的缓存驻员。"""
         mood_data = self.get_agent_from_room(
             room,
@@ -2165,6 +2182,7 @@ class BaseSchedulerSolver(
             if room in self.op_data.true_exhaust_room
             else None,
             **({"force_mood": True} if force_mood else {}),
+            **({"strict_observation": True} if strict_observation else {}),
         )
         mood_info = [
             f"干员: '{item['agent']}', 心情: {round(item['mood'], 3)}"
@@ -3598,7 +3616,7 @@ class BaseSchedulerSolver(
             op
             for op in self.total_agent
             if op.is_high()
-            and not op.multi_group
+            and (not op.multi_group or op.independent_rest)
             and (not op.group or self.op_data.is_group_shift_anchor(op))
         ]
         # 宿舍的普通空闲者统一交给补床入口，不依赖不养闲人开关；否则先预约
@@ -3626,6 +3644,10 @@ class BaseSchedulerSolver(
         attempted_groups = set()
         # 工作组先取得床位预约，空闲干员随后由统一补床入口安排。
         for op in shift_candidates:
+            if op.independent_rest and self.op_data.resting_binding_groups(
+                op, self.op_data.arrangement_group_transitions(_plan)
+            ):
+                continue
             mood = moods[op.name]
             if mood is None:
                 continue
@@ -4126,6 +4148,7 @@ class BaseSchedulerSolver(
             for task in task_view(self.tasks, TaskScope.REPLAN)
             if task.type in ordinary
             and task.plan
+            and not getattr(task, "exhaust_support", False)
             and min(task.time, getattr(task, "arrangement_retry_due_at", task.time))
             <= now + timedelta(minutes=1)
             and not getattr(task, "strict_mood_limit", False)
@@ -4777,6 +4800,14 @@ class BaseSchedulerSolver(
             if not op.is_resting() and not self.op_data.is_standby(name):
                 self.op_data.update_standby_low_priority(op)
         logger.debug(f"计算排班:{agents}")
+        superseded_covers = {
+            previous[0]
+            for name in agents
+            if (op := self.op_data.operators[name]).independent_rest
+            and (groups := self.op_data.resting_binding_groups(op))
+            and (previous := plan.get(op.room, [])[op.index : op.index + 1])
+            and previous[0] not in self.op_data.shared_replacements(op, groups)
+        }
         for agent in agents:
             if not success:
                 break
@@ -4841,6 +4872,7 @@ class BaseSchedulerSolver(
                     and obj not in protected_training
                     and (
                         obj not in exist_replacement
+                        or obj in superseded_covers
                         or plan.get(x.room, [])[x.index : x.index + 1] == [obj]
                     )
                     and obj not in reserved_names
@@ -5263,7 +5295,7 @@ class BaseSchedulerSolver(
                     if op.multi_group
                     else resting
                 )
-                if not member_resting:
+                if not member_resting and not (op.independent_rest and op.is_resting()):
                     returns.setdefault(
                         op.room, ["Current"] * len(self.op_data.plan[op.room])
                     )[op.index] = name
@@ -5561,6 +5593,10 @@ class BaseSchedulerSolver(
             task, "backup_shift_active", False
         ):
             return
+        if getattr(task, "exhaust_support", False):
+            # 先确认前置接岗，再由原用尽任务重算下班；普通轮休不能在此抢床。
+            self._prepare_shift_backup(task)
+            return
         # 肥鸭、延期切产物和临近关键任务仍由原有调度边界处理。
         probe = SchedulerTask(task_type=TaskTypes.FILL_DORM)
         simplify_dorm_fill(probe, self.tasks, op_data=self.op_data)
@@ -5617,6 +5653,7 @@ class BaseSchedulerSolver(
             if t is not task
             and t.type in ordinary
             and t.plan
+            and not getattr(t, "exhaust_support", False)
             and t.time <= datetime.now()
             and not getattr(t, "strict_mood_limit", False)
             and not getattr(t, "dorm_recovery_restore", [])
@@ -6407,6 +6444,14 @@ class BaseSchedulerSolver(
         self._tap_recycling_collection((int(right - size / 3), int(top + size / 3)))
         return True
 
+    def _handle_room_entry_reward(self, room):
+        if room != "recycle" or self.scene() != Scene.MATERIEL:
+            return False
+        if not getattr(self, "_recycling_pending", None):
+            self._recycling_pending = {"id": str(uuid4())}
+        self._finish_recycling_collection()
+        return True
+
     def _tap_recycling_collection(self, pos):
         self._recycling_pending = {"id": str(uuid4())}
         self.tap(pos)
@@ -6424,20 +6469,33 @@ class BaseSchedulerSolver(
         self.enter_room("recycle", max_attempts=1)
         if self.detect_room() != "recycle":
             return None
-        for attempt in range(5):
+        opened = False
+        for attempt in range(6):
             if self.find("recycle/dashboard"):
+                if attempt == 5:
+                    return None
                 self.back()
+                opened = False
                 continue
-            if self.find("room_detail") and all(self.get_color((1233, 1)) > [252] * 3):
+            detail = self.find("room_detail")
+            # 取面板内部的白色，避开左边缘；标题出现后仍可能处于展开动画中。
+            if detail and all(self.get_color((1250, 1)) > [252] * 3):
                 break
-            if pos := self.find("arrange_check_in") or self.find(
-                "arrange_check_in_small"
+            if attempt == 5:
+                return None
+            if (
+                not detail
+                and not opened
+                and (
+                    pos := self.find("arrange_check_in")
+                    or self.find("arrange_check_in_small")
+                )
             ):
                 self.tap(pos, interval=0.2)
+                opened = True
             else:
+                # 进驻按钮也会在展开动画中命中，再次点击会把已打开的面板关闭。
                 self.sleep(0.2)
-        else:
-            return None
         names = []
         for top in (135, 344):
             if self.find("infra_no_operator", scope=((1288, top), (1869, top + 191))):
@@ -6485,6 +6543,8 @@ class BaseSchedulerSolver(
             names = None
         if names is not None:
             update_recycling_operators(event["id"], names)
+        else:
+            logger.warning("回收站进驻干员未确认，本次收取记录保留未知")
         self._recycling_pending = None
         self.scene_graph_navigation(Scene.INFRA_MAIN)
 
@@ -7961,15 +8021,11 @@ class BaseSchedulerSolver(
             all_in_scope = self._tap_drone_accelerate(
                 "manufacture_accelerate", "all_in"
             )
-            # 如果不是全部all in
+            self.tap(all_in_scope)
+            # 有跑单时从最大选量减去预留数量。
             if all_in > 0:
-                tap_times = (
-                    drone_count - config.conf.drone_count_limit
-                )  # 修改为无人机阈值
-                for _count in range(tap_times):
+                for _count in range(config.conf.drone_count_limit):
                     self.tap((self.recog.w * 0.7, self.recog.h * 0.5), interval=0.1)
-            else:
-                self.tap(all_in_scope)
             self.tap(accelerate, y_rate=1)
         else:
             accelerate = self.find("bill_accelerate")
@@ -8133,11 +8189,14 @@ class BaseSchedulerSolver(
             and len(new_plan) == 1
             and config.conf.run_order_buffer_time > 0
         ):
+            # 等待结束后仍须读取确认页；为当前截图后端的实测耗时预留时间。
+            capture_seconds = (config.screenshot_avg or 0) / 1000
             wait_confirm = round(
                 (
                     (self.task.time - datetime.now()).total_seconds()
                     + config.conf.run_order_delay * 60
                     - config.conf.run_order_buffer_time
+                    - capture_seconds
                 ),
                 1,
             )
@@ -9536,6 +9595,7 @@ class BaseSchedulerSolver(
         *,
         departing_plan=None,
         force_mood=False,
+        strict_observation=False,
     ):
         """读取实际驻员；姓名未决槽位标记 observed=False，不据此确认离岗。"""
         # 只观察真实读房；初始化试住和肥鸭临时换位不产生新的休息周期。
@@ -9649,6 +9709,10 @@ class BaseSchedulerSolver(
             observation_complete = observation_complete and slot_observed
             if not slot_observed:
                 data["observed"] = False
+            if strict_observation and not slot_observed:
+                raise RecognizeError(
+                    f"房间 {room} 第 {i + 1} 槽位未核实，不能恢复进程崩溃后的调度"
+                )
             _mood = 24
             # 如果房间不为空
             update_time = False
@@ -9690,6 +9754,12 @@ class BaseSchedulerSolver(
                         read_time_index.append(i)
                 if should_read_mood:
                     _mood = self.read_accurate_mood(cropimg(self.recog.gray, mood_p[i]))
+                    if strict_observation and (
+                        not isinstance(_mood, (int, float))
+                        or not math.isfinite(_mood)
+                        or not 0 <= _mood <= 24
+                    ):
+                        raise RecognizeError(f"房间 {room} 第 {i + 1} 槽位心情未核实")
                     update_time = True
                 else:
                     _mood = self.op_data.operators[_name].current_mood()
@@ -10649,13 +10719,18 @@ class BaseSchedulerSolver(
                     ):
                         # 换人前顺路读取离开者，不额外读取其工作／恢复倒计时。
                         self.get_agent_from_room(room, departing_plan=plan[room])
-                    # 沿用原跑单流程：换人前校准确认时刻，选人失败重试不重复读。
+                    # 换入前校准确认时刻；窗口失败后的新实测仍须重新校准。
                     if (
                         self.task.type == TaskTypes.RUN_ORDER
                         and not self.task.adjusted
                         and len(new_plan) == 1
                         and config.conf.run_order_buffer_time > 0
-                        and choose_error <= 0
+                        and (
+                            choose_error <= 0
+                            or not getattr(
+                                self.task, "run_order_restore_pending", False
+                            )
+                        )
                     ):
                         remaining_time = self.get_order_remaining_time()
                         if 0 < remaining_time < (config.conf.run_order_delay + 10) * 60:
@@ -10668,10 +10743,13 @@ class BaseSchedulerSolver(
                             self.back()
                             self.turn_on_room_detail(room)
                         else:
-                            logger.info("检测到漏单")
-                            send_message("检测到漏单！", level="WARNING")
-                            self.reset_room_time(room)
-                            raise Exception("检测到漏单！")
+                            raise RoomArrangementDeferred(
+                                room,
+                                RecognizeError(
+                                    f"订单倒计时 {remaining_time} 秒不在跑单窗口，"
+                                    "尚未确认漏单，等待相关实测或安排更新"
+                                ),
+                            )
                     if room == "train":
                         # #59：idx1 冻结已在 gate L1 按锁定状态处理好（Current），
                         # 不再依赖 find_next_task(SKILL_UPGRADE) 的脆弱信号。
@@ -10776,7 +10854,7 @@ class BaseSchedulerSolver(
                 if self.scene() in self.waiting_scene:
                     if not self.waiting_solver():
                         return
-            except (MowerExit, DeviceRecoveryError):
+            except (MowerExit, DeviceRecoveryError, RoomArrangementDeferred):
                 raise
             except Exception as e:
                 save_exception(e)
@@ -10813,8 +10891,6 @@ class BaseSchedulerSolver(
                     raise
                 choose_error += 1
                 self.recog.update()
-                if "检测到漏单！" in str(e):
-                    return {}
                 if confirmation_pending:
                     reconcile_after_confirmation = True
                     reconcile_after_selection = selection_attempted
@@ -11231,9 +11307,11 @@ class BaseSchedulerSolver(
                                     )
                                 return False
                     else:
-                        logger.error("检测到漏单", extra={"archive_screenshots": True})
-                        save_exception(Exception("检测到漏单"))
-                        send_message("检测到漏单！", level="WARNING")
+                        logger.warning(
+                            "换入后订单倒计时为 %s 秒；核对实际订单后恢复原班，"
+                            "倒计时超出窗口不能确认漏单",
+                            wait_time,
+                        )
                     self.accept_order()
                     if self.drone_room is None or (
                         self.drone_room == room and room in self.op_data.run_order_rooms
@@ -11836,7 +11914,8 @@ class BaseSchedulerSolver(
         if hasattr(conf, "has_maa_daily_tasks"):
             return conf.has_maa_daily_tasks
         return (
-            (
+            getattr(conf, "maa_credit_fight", False)
+            or (
                 getattr(conf, "stage_plan_enable", True)
                 and getattr(conf, "stage_plan_runner", "maa") == "maa"
             )
@@ -11922,7 +12001,8 @@ class BaseSchedulerSolver(
                         or (
                             getattr(conf, "visit_friend_enable", False)
                             and getattr(conf, "visit_friend_mode", "maa") == "maa"
-                        ),
+                        )
+                        or getattr(conf, "maa_credit_fight", False),
                     ):
                         tasks.append("Mall")
                     tasks.append("Award")
