@@ -82,12 +82,16 @@ mower_a = Analysis(
         (f"{site_packages}/pyzbar/libiconv.dll", "."),
     ]
     + add_data,
-    hiddenimports=[(["tinify"] if _tinify_installed else []) + collect_submodules("psutil"),
-        "arknights_mower.utils.instance_supervisor",
-        "arknights_mower.utils.crash_recovery",
-        "arknights_mower.utils.jpeg_worker",
-        "arknights_mower.utils.jpeg_codec",
-    ],
+    hiddenimports=(
+        (["tinify"] if _tinify_installed else [])
+        + collect_submodules("psutil")
+        + [
+            "arknights_mower.utils.instance_supervisor",
+            "arknights_mower.utils.crash_recovery",
+            "arknights_mower.utils.jpeg_worker",
+            "arknights_mower.utils.jpeg_codec",
+        ]
+    ),
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
