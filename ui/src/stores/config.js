@@ -186,6 +186,7 @@ export const useConfigStore = defineStore('config', () => {
   const group_rest_in_full_on_mood_gap = ref(true)
   const group_mood_gap_threshold_minutes = ref(60)
   const group_mood_gap_max_extra_wait_hours = ref(0)
+  const group_mood_gap_exclusions = ref([])
   const fia_fool = ref(true)
   const assistant_follows_schedule = ref(false)
   const enable_mastery = ref(true)
@@ -635,6 +636,7 @@ export const useConfigStore = defineStore('config', () => {
       group_mood_gap_threshold_minutes.value = response.data.group_mood_gap_threshold_minutes ?? 60
       group_mood_gap_max_extra_wait_hours.value =
         response.data.group_mood_gap_max_extra_wait_hours ?? 0
+      group_mood_gap_exclusions.value = [...(response.data.group_mood_gap_exclusions ?? [])]
       fia_fool.value = response.data.fia_fool
       assistant_follows_schedule.value = response.data.assistant_follows_schedule
       enable_mastery.value = response.data.enable_mastery ?? true
@@ -822,6 +824,7 @@ export const useConfigStore = defineStore('config', () => {
       group_rest_in_full_on_mood_gap: group_rest_in_full_on_mood_gap.value,
       group_mood_gap_threshold_minutes: group_mood_gap_threshold_minutes.value,
       group_mood_gap_max_extra_wait_hours: group_mood_gap_max_extra_wait_hours.value,
+      group_mood_gap_exclusions: [...group_mood_gap_exclusions.value],
       fia_fool: fia_fool.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
       enable_mastery: enable_mastery.value,
@@ -868,6 +871,7 @@ export const useConfigStore = defineStore('config', () => {
       group_rest_in_full_on_mood_gap: group_rest_in_full_on_mood_gap.value,
       group_mood_gap_threshold_minutes: group_mood_gap_threshold_minutes.value,
       group_mood_gap_max_extra_wait_hours: group_mood_gap_max_extra_wait_hours.value,
+      group_mood_gap_exclusions: [...group_mood_gap_exclusions.value],
       fia_fool: fia_fool.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
       fia_threshold: fia_threshold.value / 100,
@@ -1180,6 +1184,7 @@ export const useConfigStore = defineStore('config', () => {
     group_rest_in_full_on_mood_gap,
     group_mood_gap_threshold_minutes,
     group_mood_gap_max_extra_wait_hours,
+    group_mood_gap_exclusions,
     fia_fool,
     assistant_follows_schedule,
     enable_mastery,

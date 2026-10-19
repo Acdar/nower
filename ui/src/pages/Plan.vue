@@ -299,6 +299,8 @@ const sub_plan_options = computed(() => {
 function create_sub_plan() {
   if (!requireEditing()) return
   backup_plans.value.push({
+    group_ids: ['default'],
+    type: 'global',
     conf: {
       exhaust_require: [],
       free_blacklist: [],
@@ -448,6 +450,7 @@ async function validate_plan() {
   try {
     await nextTick()
     await plan_store.save_plan()
+    await plan_store.wait_for_plan_save()
     const { data } = await axios.post(
       `${import.meta.env.VITE_HTTP_URL}/${rescue ? 'rescue-plan/validate' : 'validate-plan'}`,
       {},

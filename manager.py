@@ -7,15 +7,14 @@ from pathlib import Path
 
 import webview
 
+from arknights_mower.utils.folder_dialog import choose_directory
 from arknights_mower.utils.manager_instances import InstanceController
 from arknights_mower.utils.path import get_path
 
 
 def choose_instance_directory(window, directory=""):
     if sys.platform != "darwin":
-        return window.create_file_dialog(
-            dialog_type=webview.FOLDER_DIALOG, directory=directory
-        )
+        return choose_directory(window, directory, title="选择实例保存目录")
 
     # pywebview 5.1 does not enable directory creation on NSOpenPanel.
     # Its JS API runs on a worker thread; Cocoa dialogs belong on the main thread.
@@ -129,9 +128,6 @@ def run_manager():
 
     if runtime.active_job() and not os.environ.get("MOWER_RESTART_JOB"):
         sys.exit("软件更新或进程操作正在进行，请等待完成后启动多开管理器")
-    from arknights_mower.utils.windows_shortcuts import create_admin_shortcuts
-
-    create_admin_shortcuts()
     exit_if_webview_backend_missing()
     if existing := runtime.unified_managers():
         runtime.send_instance_command(existing[0], "show")

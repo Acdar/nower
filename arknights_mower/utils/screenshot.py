@@ -41,6 +41,7 @@ _STATUS_FIELDS = (
     "preview_replaced",
     "preview_failed",
     "archive_dropped",
+    "archive_buffer_dropped",
 )
 
 
@@ -174,6 +175,8 @@ class ScreenshotStore:
         self._archive_queue: deque[
             tuple[int, int, str, str, int, deque[Screenshot]]
         ] = deque()
+        self._archive_buffer_bytes = 0
+        self._archive_buffer_dropped = 0
         self._log_archive_queue: list[tuple[int, str]] = []
 
     def start(self):
@@ -280,6 +283,8 @@ class ScreenshotStore:
             self._shutdown_archive_dropped += len(self._archive_queue) + len(
                 self._log_archive_queue
             )
+            for task in self._archive_queue:
+                self._release_archive_buffer_locked(task[5])
             self._archive_queue.clear()
             self._log_archive_queue.clear()
             self._error_windows.clear()
@@ -588,6 +593,52 @@ class ScreenshotStore:
         with self._lock:
             return self._latest
 
+    @staticmethod
+    def _buffered_bytes(buffered) -> int:
+        """归档任务缓冲引用的字节数；同一帧按任务分别计入。"""
+        return sum(frame.size for frame in buffered)
+
+    def _retain_archive_buffer_locked(self, buffered) -> None:
+        """预留归档任务的画面引用；调用方必须持有 _ready。
+
+        预算以任务引用为单位：同一帧被多个任务保留时按任务分别计入。
+        预留会让总数超过 max_recent_bytes 时省略本任务的缓存画面，并按被
+        省略的引用数累加 archive_buffer_dropped。
+        """
+        reserved = self._buffered_bytes(buffered)
+        if self._archive_buffer_bytes + reserved > self.max_recent_bytes:
+            self._archive_buffer_dropped += len(buffered)
+            buffered.clear()
+            return
+        self._archive_buffer_bytes += reserved
+
+    def _release_archive_buffer_locked(self, buffered, reserved=None) -> None:
+        """释放一个归档任务预留的画面引用；调用方必须持有 _ready。
+
+        释放会清空该任务的缓冲，因此重复释放不再扣减，计数也不会变成负数。
+        归档线程逐帧消费后缓冲已空，此时传入消费前记录的 reserved 预量。
+        """
+        if reserved is None:
+            reserved = self._buffered_bytes(buffered)
+        buffered.clear()
+        if reserved:
+            self._archive_buffer_bytes -= reserved
+            if self._archive_buffer_bytes < 0:
+                self._archive_buffer_bytes = 0
+
+    def _assert_archive_buffer_locked(self) -> None:
+        """核对预算计数与排队任务引用一致且非负；调用方必须持有 _ready。
+
+        归档线程已取出的任务仍计入预算但不在 _archive_queue 中，因此本检查
+        只在该线程没有在途任务时成立，供聚焦测试和诊断使用。
+        """
+        reserved = sum(self._buffered_bytes(task[5]) for task in self._archive_queue)
+        assert self._archive_buffer_bytes >= 0, self._archive_buffer_bytes
+        assert self._archive_buffer_bytes == reserved, (
+            self._archive_buffer_bytes,
+            reserved,
+        )
+
     def _in_error_window(self, captured_ns: int) -> bool:
         """调用时持有 _lock。关闭通常保存时只入队必要画面。"""
         return any(
@@ -660,6 +711,9 @@ class ScreenshotStore:
                     <= timestamp_ns + _ERROR_WINDOW_NS
                 ]
                 buffered = deque((*before, *after))
+            # 已接收的归档画面保留至处理结束；容量不足时仅省略新任务的
+            # 缓存画面，错误记录和后续截图仍沿用原有归档流程。
+            self._retain_archive_buffer_locked(buffered)
             self._archive_queue.append(
                 (scan_start, timestamp_ns, archive_id, message[:4096], 1, buffered)
             )
@@ -694,9 +748,13 @@ class ScreenshotStore:
                 self._error_windows = [
                     window for window in self._error_windows if window[2] != archive_id
                 ]
-                self._archive_queue = deque(
-                    item for item in self._archive_queue if item[2] != archive_id
-                )
+                retained = deque()
+                for item in self._archive_queue:
+                    if item[2] == archive_id:
+                        self._release_archive_buffer_locked(item[5])
+                    else:
+                        retained.append(item)
+                self._archive_queue = retained
                 self._log_archive_queue = [
                     item for item in self._log_archive_queue if item[1] != archive_id
                 ]
@@ -872,6 +930,8 @@ class ScreenshotStore:
                 self._save_error_logs(archive_id)
                 continue
             destination = self.folder / "errors" / archive_id
+            # 归档线程逐帧消费缓冲，释放时要按消费前的预量扣减。
+            reserved = self._buffered_bytes(buffered)
             try:
                 with self._archive_lock:
                     if self._flush_expired():
@@ -969,6 +1029,9 @@ class ScreenshotStore:
                             continue
             except (OSError, ValueError, TypeError, AttributeError) as exc:
                 self._report_error("归档报错截图失败", exc)
+            finally:
+                with self._lock:
+                    self._release_archive_buffer_locked(buffered, reserved)
 
     def _save_error_logs(self, archive_id: str):
         from arknights_mower.utils.diagnostics import timeline
@@ -1043,6 +1106,8 @@ class ScreenshotStore:
                 "archive_log_pending_count": len(self._log_archive_queue),
                 "archive_window_count": len(self._error_windows),
                 "archive_dropped": self._archive_dropped,
+                "archive_buffer_bytes": self._archive_buffer_bytes,
+                "archive_buffer_dropped": self._archive_buffer_dropped,
                 "preview_active_count": int(self._preview_active is not None),
                 "preview_pending_bytes": (
                     self._preview_pending.size if self._preview_pending else 0

@@ -1,5 +1,6 @@
 # 用于记录Mower操作行为
 import collections
+import copy
 import json
 import pickle
 import sqlite3
@@ -108,6 +109,11 @@ def _ensure_tables(conn):
                 )
         conn.execute(
             'CREATE INDEX IF NOT EXISTS agent_action_name_time ON agent_action(name, "current_time")'
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS agent_action_working_time "
+            'ON agent_action("current_time", name) '
+            "WHERE is_high = 1 AND current_room NOT LIKE 'dormitory%'"
         )
         conn.commit()
         _tables_created = True
@@ -263,7 +269,19 @@ def current_state():
         "operators": data.operators,
         "facility_states": getattr(data, "facility_states", {}),
         "room_observations": getattr(data, "room_observations", {}),
+        "recall_recovery_rates": copy.deepcopy(
+            getattr(data, "recall_recovery_rates", {})
+        ),
         "group_shift_state": dict(getattr(data, "group_shift_state", {})),
+        "group_recovery_full_members": copy.deepcopy(
+            getattr(data, "group_recovery_full_members", {})
+        ),
+        "group_recovery_return_time": dict(
+            getattr(data, "group_recovery_return_time", {})
+        ),
+        "urgent_recovery_supporters": copy.deepcopy(
+            getattr(data, "urgent_recovery_supporters", {})
+        ),
         "automatic_rescue_state": getattr(base_scheduler, "emergency_state", None),
         "backup_plan_names": [backup.name for backup in data.backup_plans],
         "idle_dorm_search_exhausted": getattr(
@@ -271,6 +289,9 @@ def current_state():
         ),
         "idle_dorm_search_stopped_at": getattr(
             data, "idle_dorm_search_stopped_at", None
+        ),
+        "initial_staffing_pending": bool(
+            getattr(base_scheduler, "_initial_staffing_pending", False)
         ),
         "initial_mood_pending": bool(
             getattr(base_scheduler, "defer_backup_plan_until_mood_read", False)
@@ -457,7 +478,7 @@ def get_work_rest_ratios():
                         JOIN (
                             SELECT DISTINCT b.name
                             FROM agent_action b
-                            WHERE DATE(b.current_time) >= DATE('now', '-7 day', 'localtime')
+                            WHERE b.current_time >= DATE('now', '-7 day', 'localtime')
                             AND b.is_high = 1 AND b.current_room NOT LIKE 'dormitory%'
                             UNION
                             SELECT '菲亚梅塔' AS name
@@ -465,7 +486,7 @@ def get_work_rest_ratios():
             + sel
             + """
                         ) AS subquery ON a.name = subquery.name
-                        WHERE DATE(a.current_time) >= DATE('now', '-1 month', 'localtime')
+                        WHERE a.current_time >= DATE('now', '-1 month', 'localtime')
                         ORDER BY a.current_time;
                        """,
             *favorite,
@@ -515,7 +536,7 @@ def get_work_rest_ratios():
 
 
 # 整理心情曲线
-def get_mood_ratios():
+def get_mood_ratios(*, include_work_rest=True):
     bindings = _mood_report_bindings()
     favorite = [] if config.conf.favorite == "" else config.conf.favorite.split(",")
     favorite = list(dict.fromkeys([*favorite, *bindings]))
@@ -535,7 +556,7 @@ def get_mood_ratios():
                         JOIN (
                             SELECT DISTINCT b.name
                             FROM agent_action b
-                            WHERE DATE(b.current_time) >= DATE('now', '-7 day', 'localtime')
+                            WHERE b.current_time >= DATE('now', '-7 day', 'localtime')
                             AND b.is_high = 1 AND b.current_room NOT LIKE 'dormitory%'
                             UNION
                             SELECT '菲亚梅塔' AS name
@@ -543,7 +564,7 @@ def get_mood_ratios():
             + sel
             + """
                         ) AS subquery ON a.name = subquery.name
-                        WHERE DATE(a.current_time) >= DATE('now', '-7 day', 'localtime')
+                        WHERE a.current_time >= DATE('now', '-7 day', 'localtime')
                         AND
             """
             + FIAMMETTA_CURVE_FILTER
@@ -556,7 +577,7 @@ def get_mood_ratios():
     except sqlite3.Error:
         data = []
 
-    work_rest_data_ratios = get_work_rest_ratios()
+    work_rest_data_ratios = get_work_rest_ratios() if include_work_rest else None
     grouped_data = {}
     grouped_work_rest_data = {}
     for row in data:
@@ -580,9 +601,10 @@ def get_mood_ratios():
             mood_data = grouped_data.setdefault(
                 group_name, {"labels": [], "datasets": []}
             )
-            grouped_work_rest_data.setdefault(
-                group_name, work_rest_data_ratios[mood_label]
-            )
+            if include_work_rest:
+                grouped_work_rest_data.setdefault(
+                    group_name, work_rest_data_ratios[mood_label]
+                )
             mood_data["labels"].append(current_time)
             for dataset in mood_data["datasets"]:
                 if dataset["label"] == mood_label:
@@ -600,13 +622,10 @@ def get_mood_ratios():
         mood_data["labels"].sort()
         for dataset in mood_data["datasets"]:
             dataset["data"].sort(key=lambda point: point["x"])
-        formatted_data.append(
-            {
-                "groupName": group_name,
-                "moodData": mood_data,
-                "workRestData": grouped_work_rest_data[group_name],
-            }
-        )
+        group = {"groupName": group_name, "moodData": mood_data}
+        if include_work_rest:
+            group["workRestData"] = grouped_work_rest_data[group_name]
+        formatted_data.append(group)
     return formatted_data
 
 

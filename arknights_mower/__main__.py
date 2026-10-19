@@ -26,7 +26,11 @@ from arknights_mower.utils.resource_pkg import (
     refresh_resource_at_boundary,
     resource_task_session,
 )
-from arknights_mower.utils.scheduler_task import find_next_task, protect_priority_tasks
+from arknights_mower.utils.scheduler_task import (
+    find_next_task,
+    merge_restored_waiting_shifts,
+    protect_priority_tasks,
+)
 
 base_scheduler = None
 device_control = create_device_control()
@@ -443,6 +447,11 @@ def simulate(saved):
                 or config.conf.automatic_rescue_enable
                 or bool(saved and saved.get("automatic_rescue_state"))
             )
+            base_scheduler._initial_staffing_pending = (
+                not saved
+                or bool(saved.get("_process_crash_no_snapshot"))
+                or bool(saved.get("initial_staffing_pending", False))
+            )
             base_scheduler._initial_mood_refresh_rooms = set(
                 saved.get("initial_mood_refresh_rooms", ()) if saved else ()
             ) | set(saved.get("initial_mood_probe_layout", {}) if saved else {})
@@ -512,6 +521,8 @@ def simulate(saved):
                     ("dorm_mood_peers", {}),
                     ("idle_rest_check", None),
                     ("temporary_dorm_fill", False),
+                    ("recall_work_rate", None),
+                    ("recall_work_rate_checked", False),
                 ):
                     setattr(
                         base_scheduler.op_data.operators[k],
@@ -522,23 +533,45 @@ def simulate(saved):
                     v, "dorm_recovery_fixed", ()
                 )
             base_scheduler.op_data.restore_group_shift_state(
-                saved.get("group_shift_state")
+                saved.get("group_shift_state"),
+                saved.get("group_recovery_full_members"),
+                saved.get("group_recovery_return_time"),
             )
-            base_scheduler.waiting_group_shifts = saved.get("waiting_group_shifts", [])
+            base_scheduler.op_data.urgent_recovery_supporters = copy.deepcopy(
+                saved.get("urgent_recovery_supporters", {})
+            )
+            base_scheduler.waiting_group_shifts = merge_restored_waiting_shifts(
+                saved.get("waiting_group_shifts", [])
+            )
             from arknights_mower.utils.config.plan import migrate_backup_tasks
 
-            base_scheduler.tasks = migrate_backup_tasks(
-                tasks,
-                saved.get("backup_plan_names", []),
-                [backup.name for backup in base_scheduler.op_data.backup_plans],
-                config.retired_backup_indices,
-                retired=bool(saved.get("rescue_state"))
+            retired_backups = (
+                bool(saved.get("rescue_state"))
                 or config.retired_backup_migrated
                 or bool(
                     set(saved.get("backup_plan_names", []))
                     - {backup.name for backup in base_scheduler.op_data.backup_plans}
-                ),
+                )
             )
+            restored_tasks, restored_predecessors = [], {}
+            for task in tasks:
+                migrated = migrate_backup_tasks(
+                    [task],
+                    saved.get("backup_plan_names", []),
+                    [backup.name for backup in base_scheduler.op_data.backup_plans],
+                    config.retired_backup_indices,
+                    retired=retired_backups,
+                )
+                if migrated:
+                    restored_predecessors[id(task)] = migrated[0]
+                    restored_tasks.extend(migrated)
+            base_scheduler.tasks = restored_tasks
+            for task in base_scheduler.waiting_group_shifts:
+                if hasattr(task, "group_shift_predecessors"):
+                    task.group_shift_predecessors = tuple(
+                        restored_predecessors.get(id(previous), previous)
+                        for previous in task.group_shift_predecessors
+                    )
             base_scheduler.op_data.restore_dorm_state(
                 saved["dorm"],
                 group_transitions=base_scheduler._pending_group_transitions(),
@@ -548,6 +581,9 @@ def simulate(saved):
             )
             base_scheduler.op_data.room_observations = copy.deepcopy(
                 saved.get("room_observations", {})
+            )
+            base_scheduler.op_data.recall_recovery_rates = copy.deepcopy(
+                saved.get("recall_recovery_rates", {})
             )
             base_scheduler.emergency_state = copy.deepcopy(
                 saved.get("automatic_rescue_state")
@@ -621,6 +657,11 @@ def simulate(saved):
         from arknights_mower.utils.crash_recovery import reconcile_scheduler
 
         reconcile_scheduler(base_scheduler)
+    else:
+        from arknights_mower.utils import crash_recovery
+
+        if crash_recovery.reset_observation_pending():
+            crash_recovery.checkpoint_reset(base_scheduler)
     base_scheduler._state_restore_complete = True
     while True:
         try:

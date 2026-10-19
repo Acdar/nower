@@ -145,7 +145,7 @@ def test_switch_rebuilds_existing_return_and_preserves_other_tasks(solver, custo
     solver.op_data.backup_plans[0].task = custom_task
     solver.plan_metadata()
     old_task = return_task(solver)
-    assert old_task.time == datetime(2026, 9, 11, 16, 24, 21)
+    assert old_task.time == datetime(2026, 9, 11, 17, 5, 3)
     depot = SchedulerTask(task_type=TaskTypes.DEPOT)
     solver.tasks.append(depot)
     assert solver.backup_plan_solver() is False
@@ -235,10 +235,13 @@ def test_unchanged_backup_preserves_dynamic_exhaust_deadline(solver, path):
 def test_failed_backup_commit_preserves_dynamic_exhaust_deadline(solver, path):
     old = SchedulerTask(task_type=TaskTypes.EXHAUST_OFF, meta_data="歌蕾蒂娅")
     solver.tasks = [old]
+    deadline = old.time
     swap = solver.op_data.swap_plan
     solver.op_data.swap_plan = MagicMock(
-        side_effect=lambda conditions, refresh=False: (
-            "invalid merged plan" if conditions == [True] else swap(conditions, refresh)
+        side_effect=lambda conditions, refresh=False, *, backup_group=None: (
+            "invalid merged plan"
+            if conditions == [True]
+            else swap(conditions, refresh, backup_group=backup_group)
         )
     )
     if path == "cached":
@@ -249,6 +252,14 @@ def test_failed_backup_commit_preserves_dynamic_exhaust_deadline(solver, path):
         with pytest.raises(ValueError, match="最终排班生效失败"):
             solver._activate_shift_backup(task)
     assert solver.tasks == [old]
+    solver.op_data.swap_plan.assert_any_call(
+        [True], refresh=True, backup_group="default" if path == "cached" else None
+    )
+    solver.op_data.swap_plan.assert_any_call(
+        [False], refresh=True, backup_group="default"
+    )
+    assert old.time == deadline
+    assert solver.op_data.backup_group == "default"
     assert solver.op_data.plan_condition == [False]
 
 
@@ -766,7 +777,7 @@ def test_switch_preserves_shift_on_target_when_backup_modifies_room_plan(solver)
     solver.plan_metadata()
     old_task = return_task(solver)
     assert old_task.plan["contact"][0] == "黑键"
-    assert old_task.time == datetime(2026, 9, 11, 16, 24, 21)
+    assert old_task.time == datetime(2026, 9, 11, 17, 5, 3)
 
     # 模拟副表调整了工位（黑键与陈换位），并将歌蕾蒂娅设为用尽
     backup = solver.op_data.backup_plans[0]

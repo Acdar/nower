@@ -31,6 +31,25 @@ describe('recoverable Mower preview failure',()=>{
   expect(state.occupants).toEqual(before)
  })
 
+ it('ignores virtual order wakes after an empty preview and waits for a real mood boundary',()=>{
+  const {state,source,task}=previewFixture(),before={...state.occupants}
+  state.config.mowerTaskScheduling={...state.config.mowerTaskScheduling,adjustForRunOrders:false}
+  const order=new MowerTask({type:T.RUN_ORDER,metadata:'room_1_1'})
+  source.queue.tasks.push(order)
+  source.runFlags={planned:true,todoTask:true,collectNotification:true}
+  source.phaseExecution={steps:(function*(){})(),wakeMicros:0,skipPlanning:false,previewNoop:true}
+  const boundaryRates={...rates,thresholds:()=>[23.9]}
+  settleRoster(state,boundaryRates)
+  expect(nextRosterActionHours(state,boundaryRates)).toBeCloseTo(.1,8)
+  const traceLength=source.trace.length
+  settleRoster(state,boundaryRates)
+  expect(source.trace).toHaveLength(traceLength)
+  expect(source.queue.tasks).toEqual(expect.arrayContaining([task,order]))
+  expect(task.timeMicros).toBe(0)
+  expect(order.timeMicros).toBe(0)
+  expect(state.occupants).toEqual(before)
+ })
+
  it('retains an exhausted preview at its original deadline and dispatches independent due work',()=>{
   const {state,source,task}=previewFixture()
   let calls=0
@@ -105,16 +124,28 @@ describe('recoverable Mower preview failure',()=>{
   expect(source.queue.tasks).toEqual(expect.arrayContaining([task,fia]))
  })
 
- it('does not recheck an exhausted preview at an unrelated predicted morale boundary',()=>{
+ it('keeps predicted mood from releasing a failed preview until a real room read',()=>{
   const {state,source,task}=previewFixture()
   const boundaryRates={...rates,thresholds:()=>[23.9]}
+  let calls=0
+  state.mowerShiftModel!.evaluate=()=>{calls++;throw new MowerShiftPreviewError('unchanged failed preview')}
   settleRoster(state,boundaryRates)
+  const initialCalls=calls,plan=structuredClone(task.plan)
   expect(nextRosterActionHours(state,boundaryRates)).toBeGreaterThan(.1)
   expect(task.executionFailure).toBeDefined()
   state.time=.1;source.data.operators.A!.mood=23.9;source.data.operators.A!.moodIsPrediction=true
-  settleRoster(state,boundaryRates)
+  expect(nextRosterActionHours(state,boundaryRates)).toBeGreaterThan(.1)
   expect(task.executionFailure).toBeDefined()
+  expect(calls).toBe(initialCalls)
+  // Completing the pending native phase reads actual occupants; this is new evidence.
+  settleRoster(state,boundaryRates)
+  expect(source.data.operators.A!.currentRoom).toBe('room_1_1')
+  expect(source.data.operators.A!.moodIsPrediction).toBe(false)
+  expect(source.data.operators.A!.timeStampMicros).toBe(360_000_000)
+  expect(task.executionFailure).toBeUndefined()
+  expect(task.executionRetained).toBe(true)
   expect(source.queue.tasks).toContain(task);expect(task.timeMicros).toBe(0)
+  expect(task.plan).toEqual(plan)
  })
 
  it('passes both the rejected preview and a later unchanged shift without disabling backups',()=>{

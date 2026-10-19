@@ -1,6 +1,6 @@
 <script setup>
 import { storeToRefs } from 'pinia'
-import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useDialog, useMessage } from 'naive-ui'
 
 import { useMowerStore } from '@/stores/mower'
@@ -13,18 +13,9 @@ import {
 import { createScreenshotPreview } from '@/utils/screenshotPreview'
 import StartSchedule from '@/components/StartSchedule.vue'
 const mower_store = useMowerStore()
-const {
-  log,
-  log_mobile,
-  running,
-  status_label,
-  plan_condition,
-  log_lines,
-  task_list,
-  waiting,
-  get_task_id
-} = storeToRefs(mower_store)
-const { get_tasks, get_running } = mower_store
+const { log, log_mobile, running, status_label, plan_condition, log_lines, task_list, waiting } =
+  storeToRefs(mower_store)
+const { get_tasks, get_running, start_task_polling, stop_task_polling } = mower_store
 const axios = inject('axios')
 const mobile = inject('mobile')
 
@@ -168,7 +159,7 @@ watch(
 
 let runningTimer
 onMounted(() => {
-  get_tasks()
+  start_task_polling()
   get_running()
   runningTimer = setInterval(get_running, 5000)
   const savedPreviewState = localStorage.getItem('sc_preview')
@@ -184,7 +175,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  clearTimeout(get_task_id.value)
+  task_dialog_active = false
+  stop_task_polling()
   clearInterval(runningTimer)
   document.removeEventListener('visibilitychange', updateScreenshotPreview)
   layoutObserver?.disconnect()
@@ -236,6 +228,27 @@ import ExpandIcon from '@vicons/fluent/PanelTopExpand20Regular'
 
 const show_task_table = ref(true)
 const show_task = ref(false)
+const TaskDialog = shallowRef(null)
+const task_dialog_loading = ref(false)
+let task_dialog_active = true
+async function openTaskDialog() {
+  if (task_dialog_loading.value) return
+  if (TaskDialog.value) {
+    show_task.value = true
+    return
+  }
+  task_dialog_loading.value = true
+  try {
+    const { default: component } = await import('@/components/TaskDialog.vue')
+    if (!task_dialog_active) return
+    TaskDialog.value = component
+    show_task.value = true
+  } catch {
+    if (task_dialog_active) db_message.error('新增任务表单加载失败，请点击「新增任务」重试')
+  } finally {
+    if (task_dialog_active) task_dialog_loading.value = false
+  }
+}
 const add_task = ref(true)
 provide('show_task', show_task)
 provide('show_feedback', show_feedback)
@@ -450,7 +463,8 @@ async function db_delete(keys) {
                 {{ task.time.split('T')[1].split('.')[0] }}
               </td>
               <td :colspan="2">
-                {{ task.type.display_value }}{{ task.meta_data ? ' ' + task.meta_data : '' }}
+                {{ task.display_name || task.type.display_value
+                }}{{ task.meta_data ? ' ' + task.meta_data : '' }}
               </td>
             </tr>
           </template>
@@ -499,8 +513,8 @@ async function db_delete(keys) {
         :waiting="waiting"
       />
       <ProcessControl ref="process_control" compact :running="running" />
-      <task-dialog />
-      <n-button type="warning" @click="show_task = true">
+      <component :is="TaskDialog" v-if="TaskDialog" />
+      <n-button type="warning" :loading="task_dialog_loading" @click="openTaskDialog">
         <template #icon>
           <n-icon>
             <add-icon />

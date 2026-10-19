@@ -3,10 +3,11 @@ import copy
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta
+from functools import lru_cache
 from time import monotonic
 from typing import Any, Literal, overload
 
-from evalidate import Expr, base_eval_model
+from evalidate import EvalModel, ExecutionException, Expr, base_eval_model
 
 from arknights_mower.utils import config
 from arknights_mower.utils.config.plan_advanced import export_advanced_settings
@@ -50,6 +51,7 @@ _MAX_INTEGER_LITERAL_BITS = 256
 _MAX_STRING_LITERAL_LENGTH = 512
 _MAX_POWER_EXPONENT = 64
 _MAX_NUMERIC_RESULT_BITS = 4096
+_MAX_COMPILED_EXPRESSIONS = 256
 _NUMERIC_EXPRESSION_CALLS = {
     "current_mood",
     "facility_operator_count",
@@ -156,6 +158,21 @@ def _validate_expression_resources(expression: str) -> None:
                 raise ValueError("幂运算结果过大")
 
 
+@lru_cache(maxsize=_MAX_COMPILED_EXPRESSIONS)
+def _compile_expression(
+    expression, nodes, attributes, allowed_functions, imported_names
+):
+    """最多保留 256 条已校验代码；许可变化另行校验，旧项按 LRU 淘汰。"""
+    _validate_expression_resources(expression)
+    permissions = EvalModel(
+        nodes=list(nodes),
+        attributes=list(attributes),
+        allowed_functions=list(allowed_functions),
+        imported_functions=dict.fromkeys(imported_names),
+    )
+    return Expr(expression, permissions).code
+
+
 @overload
 def build_global_plan(
     *,
@@ -231,6 +248,10 @@ def build_global_plan(
     # 默认任务
     plan["default_plan"] = Plan(plan1, plan_config, products=default_products)
     # 备用自定义任务
+    groups = {
+        group["id"]: get_logic_exp(copy.deepcopy(group["trigger"]))
+        for group in plan["backup_groups"]
+    }
     backup_plans: list[Plan] = []
 
     for i in plan["backup_plans"]:
@@ -283,6 +304,11 @@ def build_global_plan(
                 task=backup_task,
                 name=i.get("name"),
                 products=backup_products,
+                group_ids=i["group_ids"],
+                backup_type=i["type"],
+                group_triggers={
+                    key: groups[key] for key in i["group_ids"] if key != "default"
+                },
             )
         )
     plan["backup_plans"] = backup_plans
@@ -299,6 +325,8 @@ class Operators:
 
     global_plan = None
     plan_condition = []
+    backup_group = "default"
+    backup_groups = ()
     shadow_copy = {}
     current_room_changed_callback = None
     first_init = True
@@ -308,6 +336,9 @@ class Operators:
         self.operators = {}
         self.groups = {}
         self.group_shift_state = {}
+        self.group_recovery_full_members = {}
+        self.group_recovery_return_time = {}
+        self.urgent_recovery_supporters = {}
         self.exhaust_agent = set()
         self.exhaust_group = set()
         self.rest_in_full_group = set()
@@ -317,12 +348,15 @@ class Operators:
         self.idle_dorm_search_exhausted = False
         self.idle_dorm_search_stopped_at = None
         self.dorm_mood_estimates = {}
+        self.recall_recovery_rates = {}
         self.emergency_reserved_agents = set()
         self.emergency_dorm_agents = set()
         self.workaholic_agent = set()
         self.free_blacklist = []
         self.global_plan = plan
         self.backup_plans = plan["backup_plans"]
+        self.backup_groups = plan.get("backup_groups", [])
+        self.backup_group = "default"
         # 切换默认排班
         self.swap_plan([False] * (len(self.backup_plans)))
         self.run_order_rooms = {}
@@ -371,7 +405,23 @@ class Operators:
             self.maintenance_primary_slots
         )
 
-    def swap_plan(self, condition, refresh=False):
+    def evaluate_backup_selection(self):
+        from arknights_mower.utils.backup_groups import select_backup_plans
+        from arknights_mower.utils.logic_expression import get_logic_exp
+
+        groups = [
+            {**group, "trigger": get_logic_exp(copy.deepcopy(group["trigger"]))}
+            for group in self.backup_groups
+        ]
+        return select_backup_plans(
+            self.backup_plans,
+            groups,
+            lambda trigger: bool(self.evaluate_expression(str(trigger))),
+            current_group=self.backup_group,
+            current=self.plan_condition,
+        )
+
+    def swap_plan(self, condition, refresh=False, *, backup_group=None):
         from arknights_mower.utils.backup_validation import validate_backup_facilities
 
         if error := validate_backup_facilities(
@@ -399,7 +449,10 @@ class Operators:
                 self.plan, self.config = self.merge_plan(index, self.config, self.plan)
                 backup = self.global_plan["backup_plans"][index]
                 self.products.update(backup.products)
-                maintenance = backup.uses_major_maintenance_condition
+                maintenance = backup.uses_condition(
+                    "major_maintenance_remaining_hours",
+                    backup_group or self.backup_group,
+                )
                 for room, slots in backup.plan.items():
                     if room not in self.plan:
                         continue
@@ -410,6 +463,8 @@ class Operators:
                         if maintenance and slot.agent in TRADE_ORDER_AGENTS:
                             self.maintenance_primary_slots.add((room, slot_index))
         self.plan_condition = condition
+        if backup_group is not None:
+            self.backup_group = backup_group
         if refresh:
             self.first_init = True
             error = self.init_and_validate(True)
@@ -984,13 +1039,22 @@ class Operators:
 
     def evaluate_expression(self, expression):
         try:
-            _validate_expression_resources(expression)
+            code = _compile_expression(
+                expression,
+                tuple(self.eval_model.nodes),
+                tuple(self.eval_model.attributes),
+                tuple(self.eval_model.allowed_functions),
+                tuple(self.eval_model.imported_functions),
+            )
             model = {e: e for e in base_room_list}
             model.update({e: e for e in MANUFACTURE_PRODUCTS | TRADE_PRODUCTS})
             model.update({e: e for e in FACILITY_TYPE_IDS.values()})
             model["op_data"] = self
-            result = Expr(expression, self.eval_model).eval(model)
-            return result
+            # 代码缓存不保留运行时对象；每次从当前模型和驻员状态求值。
+            try:
+                return eval(code, self.eval_model.imported_functions.copy(), model)
+            except Exception as e:
+                raise ExecutionException(e) from e
         except Exception as e:
             logger.exception(f"附表格式出错: {e}")
             return None
@@ -1028,6 +1092,17 @@ class Operators:
             for backup in self.backup_plans
             for hours in backup.major_maintenance_thresholds
         ]
+        from arknights_mower.utils.logic_expression import get_logic_exp
+        from arknights_mower.utils.plan import Plan
+
+        thresholds.extend(
+            hours
+            for group in self.backup_groups
+            if group["id"] != "default"
+            for hours in Plan.maintenance_thresholds(
+                get_logic_exp(copy.deepcopy(group["trigger"]))
+            )
+        )
         if not thresholds:
             return None
         info = NewsChecker.get_maintenance()
@@ -1129,6 +1204,14 @@ class Operators:
         for group in self.groups:
             if group not in self.group_shift_state:
                 self.group_shift_state[group] = self.group_is_resting(group)
+        recovery = getattr(self, "group_recovery_full_members", {})
+        anchors = dict(getattr(self, "group_recovery_return_time", {}))
+        for group, resting in transitions.items():
+            if self.group_shift_state.get(group) != resting:
+                recovery.pop(group, None)
+                anchors.pop(group, None)
+        self.group_recovery_full_members = recovery
+        self.group_recovery_return_time = anchors
         self.group_shift_state.update(transitions)
         for op in self.operators.values():
             if op.multi_group:
@@ -1138,12 +1221,22 @@ class Operators:
                         op.name, op.group if op.group in groups else groups[0]
                     )
 
-    def restore_group_shift_state(self, saved=None):
+    def restore_group_shift_state(self, saved=None, recovery=None, return_time=None):
         """Legacy snapshots infer rest only from ordinary fixed members."""
         self.group_shift_state = {
             group: resting
             for group, resting in (saved or {}).items()
             if type(resting) is bool
+        }
+        self.group_recovery_full_members = {
+            group: list(names)
+            for group, names in (recovery or {}).items()
+            if self.group_shift_state.get(group) and isinstance(names, (list, tuple))
+        }
+        self.group_recovery_return_time = {
+            group: at
+            for group, at in (return_time or {}).items()
+            if group in self.group_recovery_full_members and isinstance(at, datetime)
         }
         self.commit_group_shifts({})
 
@@ -1622,6 +1715,16 @@ class Operators:
         ) and (current_room, current_index) == (agent.room, agent.index)
         logger.debug(f"{name},{mood},{current_room},{current_index},{update_time}")
         if update_time:
+            from arknights_mower.utils.recall_estimates import observe_work_rate
+
+            observe_work_rate(
+                agent,
+                mood,
+                current_room,
+                current_index,
+                datetime.now(),
+                preserve=preserve_depletion_rate,
+            )
             agent.mood_is_prediction = False
             if (
                 not preserve_depletion_rate
@@ -1736,6 +1839,11 @@ class Operators:
                         dorm.time = _agent.time_stamp + timedelta(seconds=sec_remaining)
                     else:
                         dorm.time = agent["time"]
+                    from arknights_mower.utils.recall_estimates import (
+                        observe_recovery_rate,
+                    )
+
+                    observe_recovery_rate(self, dorm)
                 break
         # 记录真实用尽时间
         if room in self.true_exhaust_room and _name in self.operators.keys():
@@ -1852,6 +1960,10 @@ class Operators:
             operator.time_stamp = exist.time_stamp
             operator.mood_is_prediction = getattr(exist, "mood_is_prediction", False)
             operator.depletion_rate = exist.depletion_rate
+            operator.recall_work_rate = getattr(exist, "recall_work_rate", None)
+            operator.recall_work_rate_checked = getattr(
+                exist, "recall_work_rate_checked", False
+            )
             operator.current_room = exist.current_room
             operator.current_index = exist.current_index
             operator.dorm_position_version = getattr(exist, "dorm_position_version", 0)
@@ -2121,9 +2233,21 @@ class Operators:
         产物切换和回班规划共用这一份位置语义，不能只改工位而留下旧床位。
         """
         projected = copy.copy(self)
+        projected.recall_recovery_rates = dict(
+            getattr(self, "recall_recovery_rates", {})
+        )
         projected.operators = copy.deepcopy(self.operators)
         projected.groups = copy.deepcopy(self.groups)
         projected.group_shift_state = dict(self.group_shift_state)
+        projected.group_recovery_full_members = copy.deepcopy(
+            getattr(self, "group_recovery_full_members", {})
+        )
+        projected.group_recovery_return_time = dict(
+            getattr(self, "group_recovery_return_time", {})
+        )
+        projected.urgent_recovery_supporters = copy.deepcopy(
+            getattr(self, "urgent_recovery_supporters", {})
+        )
         projected.dorm = copy.deepcopy(self.dorm)
         projected.group_dorm = copy.deepcopy(getattr(self, "group_dorm", []))
         for plan in plans:
@@ -2275,13 +2399,15 @@ class Operators:
             and candidate.current_mood(now) <= candidate.lower_limit
         )
 
-    def replacement_candidates(self, operator):
+    def replacement_candidates(self, operator, *, replacement_override=None):
         """工作替班按配置顺序取用；未豁免的耗尽候补稳定移到末尾。"""
         replacements = (
             self.shared_replacements(operator, self.resting_binding_groups(operator))
             if operator.multi_group
             else operator.replacement
         )
+        if replacement_override is not None:
+            replacements = replacement_override
         candidates = [
             name
             for name in replacements
@@ -2661,6 +2787,9 @@ class Operators:
     def _find_dorm_slot(
         self, name, used, *, active_groups=None, plan=None, isolation=True
     ):
+        from arknights_mower.utils.dorm_recovery import single_recovery_bed_cost
+        from arknights_mower.utils.dorm_skills import is_single_recovery_manager
+
         if self.rest_mood_complete(name):
             return None
         if resting_tier(self, name) == RestingTier.EXCLUDED:
@@ -2687,13 +2816,25 @@ class Operators:
             )
         ]
         now = datetime.now()
+        compatible_beds = [
+            self.dorm[index]
+            for index in order
+            if self.is_effective_free_slot(
+                self.dorm[index], active_groups=active_groups
+            )
+        ]
+        single_manager = is_single_recovery_manager(name)
 
         def takeover_cost(index):
             bed = self.dorm[index]
+            single_cost = (
+                single_recovery_bed_cost(bed, compatible_beds) if single_manager else 0
+            )
             if not bed.name:
                 return (
                     0,
                     0,
+                    single_cost,
                     0,
                     self.dorm_isolation_cost(name, *bed.position, plan=plan)
                     if isolation
@@ -2704,6 +2845,7 @@ class Operators:
             return (
                 1,
                 -tier,
+                single_cost,
                 self.dorm_isolation_cost(name, *bed.position, plan=plan)
                 if isolation
                 else 0,
@@ -2908,6 +3050,7 @@ class Operators:
                 MAX_BACKUP_VALIDATION_COMBINATIONS,
                 known_operators=baseline.operators,
                 deadline=deadline,
+                groups=self.backup_groups,
             )
             for flags in combinations:
                 check_validation_deadline(deadline)

@@ -5,6 +5,18 @@ import platform
 import sys
 from urllib.parse import quote
 
+if __name__ == "__main__" and sys.argv[1:2] == ["--shared-ocr-service"]:
+    from arknights_mower.utils.ocr_service import main as shared_ocr_main
+
+    shared_ocr_main()
+    sys.exit()
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--maa-runtime-worker"]:
+    from arknights_mower.utils.maa_process import worker_main
+
+    worker_main()
+    sys.exit()
+
 if __name__ == "__main__" and sys.argv[1:2] == ["--jpeg-encode-worker"]:
     from arknights_mower.utils.jpeg_worker import worker_main
 
@@ -485,9 +497,15 @@ def webview_window(
                     dialog_type=webview.OPEN_DIALOG,
                 )
             elif msg == "folder":
-                result = window.create_file_dialog(
-                    dialog_type=webview.FOLDER_DIALOG,
-                )
+                from arknights_mower.utils.folder_dialog import choose_directory
+
+                try:
+                    result = choose_directory(window)
+                except Exception:
+                    from arknights_mower.utils.log import logger
+
+                    logger.exception("打开目录选择窗口失败")
+                    result = None
             if result is None:
                 result = ""
             elif not isinstance(result, str):
@@ -774,9 +792,6 @@ def _run_desktop():
     owner = runtime.read_json(runtime.state_dir() / "active/owner.json", {})
     if runtime.active_job() and os.environ.get("MOWER_RESTART_JOB") != owner.get("id"):
         sys.exit("软件更新或进程操作正在进行，请等待完成后启动 Mower")
-    from arknights_mower.utils.windows_shortcuts import create_admin_shortcuts
-
-    create_admin_shortcuts()
     background = background_requested()
     managed = os.environ.get("MOWER_MANAGED") == "1"
     manager_owned = managed
@@ -852,6 +867,7 @@ def _run_desktop():
         port=port,
         listen_host=host,
         token_hash=sha256(runtime_token.encode()).hexdigest(),
+        updates_enabled=config.updates_enabled,
     )
     registration.publish()
     if splash_queue is not None:
@@ -978,9 +994,14 @@ def _run_desktop():
 
     from arknights_mower.utils.software_update import request_auto_check
 
-    request_auto_check()
+    if config.updates_enabled:
+        request_auto_check()
 
-    auto_resource = conf.resource_update.enable and conf.resource_update.auto_update
+    auto_resource = (
+        config.updates_enabled
+        and conf.resource_update.enable
+        and conf.resource_update.auto_update
+    )
 
     def startup_cancelled():
         return (

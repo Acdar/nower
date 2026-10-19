@@ -30,12 +30,17 @@ from arknights_mower.utils.device.maatouch import MaaTouch
 from arknights_mower.utils.device.manager_io import run_command
 from arknights_mower.utils.device.mumu12ipc.capture import MuMuCaptureSession
 from arknights_mower.utils.device.mumu12ipc.input import MuMuInputSession as MuMu12IPC
+from arknights_mower.utils.device.mumu_popup import (
+    UI_DUMP_COMMAND,
+    is_mumu_launcher,
+    startup_ad_close_point,
+)
 from arknights_mower.utils.device.recovery import (
     DeviceRecoveryError,
     recover_connection,
 )
 from arknights_mower.utils.device.scrcpy import Scrcpy
-from arknights_mower.utils.device.screenshot import capture_adb_frame
+from arknights_mower.utils.device.screenshot import ADBCaptureSession
 from arknights_mower.utils.device.screenshot_backend import (
     ScreenshotFailure,
     ScreenshotSession,
@@ -273,6 +278,7 @@ class Device:
         self._interrupt_error = None
         self._recovery_active = False
         self._recovery_error = None
+        self._adb_capture = None
         try:
             self.start(wait_for_device=wait_for_device)
         except Exception:
@@ -350,6 +356,7 @@ class Device:
             if self._interrupted.is_set():
                 return
             self._interrupted.set()
+            self._adb_capture = None
             resources = (
                 (self.control, "interrupt"),
                 (getattr(self, "_mumu_capture", None), "interrupt"),
@@ -439,6 +446,16 @@ class Device:
         mode = launch_conf.mode or ("tap" if launch_conf.enable else "adb")
 
         if mode == "tap":
+            focus = self.current_focus()
+            if is_mumu_launcher(focus):
+                self._dismiss_mumu_startup_ad(focus)
+                focus = self.current_focus()
+                if focus.startswith(self.game_package + "/"):
+                    return
+                if not is_mumu_launcher(focus):
+                    raise DeviceRecoveryError(
+                        "MuMu 广告检查后的前台已变化，尚未点击游戏图标"
+                    )
             self._input_once(
                 lambda: self.client.run(f"input tap {launch_conf.x} {launch_conf.y}"),
                 transport="adb",
@@ -452,6 +469,58 @@ class Device:
             self.run(command)
         else:
             self.run(f"am start -n {self.game_package}/{config.APP_ACTIVITY_NAME}")
+
+    def _dismiss_mumu_startup_ad(self, focus: str) -> bool:
+        if not is_mumu_launcher(focus):
+            return False
+        deadline = time.monotonic() + 10
+
+        def remaining():
+            seconds = deadline - time.monotonic()
+            if seconds <= 0:
+                raise DeviceRecoveryError("MuMu 广告检查超时，尚未继续游戏操作")
+            return seconds
+
+        def close_point():
+            try:
+                return startup_ad_close_point(self.run(UI_DUMP_COMMAND))
+            except ValueError as exc:
+                raise DeviceRecoveryError(str(exc)) from exc
+
+        try:
+            with device_io_budget(remaining):
+                point = close_point()
+                if point is None:
+                    return False
+                if config.stop_mower.is_set():
+                    raise MowerExit
+                if not is_mumu_launcher(self.current_focus()):
+                    raise DeviceRecoveryError(
+                        "MuMu 广告检查期间前台已变化，尚未发送关闭点击"
+                    )
+                logger.info("关闭已确认的 MuMu 桌面广告")
+                self._input_once(
+                    lambda: self.client.run(f"input tap {point[0]} {point[1]}"),
+                    transport="adb",
+                )
+                focus = self.current_focus()
+                if focus.startswith(self.game_package + "/"):
+                    return True
+                if not is_mumu_launcher(focus):
+                    raise DeviceRecoveryError(
+                        "MuMu 广告关闭后的前台已变化，尚未继续游戏操作"
+                    )
+                if close_point() is not None:
+                    raise DeviceRecoveryError(
+                        "MuMu 广告关闭后仍然显示，尚未继续游戏操作"
+                    )
+                return True
+        except (MowerExit, DeviceRecoveryError):
+            raise
+        except Exception as exc:
+            raise DeviceRecoveryError(
+                "MuMu 广告状态检查失败，尚未继续游戏操作"
+            ) from exc
 
     def exit(self) -> None:
         """exit the application"""
@@ -543,7 +612,7 @@ class Device:
                 capture = self._mumu_capture
             return self._validated(capture.capture_frame())
         if backend == "adb_gzip":
-            return capture_adb_frame(self.client.adb_bin, self.device_id)
+            return self._capture_adb_frame()
         if backend == "droidcast":
             if getattr(self, "_droidcast", None) is None:
                 self.start_droidcast()
@@ -575,7 +644,21 @@ class Device:
     def standard_frame(self):
         """The plain ADB screencap used for degradation, on the same target."""
         self._check_open()
-        return capture_adb_frame(self.client.adb_bin, self.device_id)
+        return self._capture_adb_frame()
+
+    def _capture_adb_frame(self):
+        with getattr(self, "_resource_lock", nullcontext()):
+            self._check_open()
+            capture = getattr(self, "_adb_capture", None)
+            if (
+                capture is None
+                or capture.serial != self.device_id
+                or capture.adb_path != self.client.adb_bin
+            ):
+                capture = self._adb_capture = ADBCaptureSession(
+                    self.client.adb_bin, self.device_id
+                )
+        return capture.capture_frame()
 
     @staticmethod
     def _validated(frame):
@@ -591,6 +674,7 @@ class Device:
     def rebuild_screenshot(self):
         """Release/recreate only resources belonging to the selected capture."""
         self._check_open()
+        self._adb_capture = None
         backend = self.profile.screenshot_backend
         if backend == "ld_native":
             capture = getattr(self, "_ld_capture", None)
@@ -955,6 +1039,7 @@ class Device:
             failure = getattr(self, "_recovery_error", None)
             if getattr(failure, "cleanup_failed", False):
                 raise failure
+            self._adb_capture = None
             self._recovery_error = None
 
     def close(self) -> None:
@@ -962,6 +1047,7 @@ class Device:
         if getattr(self, "owner_pid", None) != os.getpid():
             return
         with self._resource_lock:
+            self._adb_capture = None
             resources = (
                 *getattr(self, "_pending_cleanup", ()),
                 (getattr(self, "_mumu_capture", None), "close"),
@@ -1003,6 +1089,7 @@ class Device:
 
     def reconnect(self, *, retries: int = 3, restarts: int = 0) -> None:
         """Delegate lifecycle policy to the owning application session."""
+        self._adb_capture = None
         if control := getattr(self, "session_control", None):
             control.recover().unwrap()
             return
@@ -1053,6 +1140,16 @@ class Device:
                 logger.warning("MuMu 加速服务没有响应，关闭该服务后恢复游戏前台")
                 self.run("am force-stop com.mumu.acc")
                 update = True
+            if is_mumu_launcher(focus):
+                if self._dismiss_mumu_startup_ad(focus):
+                    update = True
+                focus = self.current_focus()
+                if focus.startswith(self.game_package + "/"):
+                    return True
+                if not is_mumu_launcher(focus):
+                    raise DeviceRecoveryError(
+                        "MuMu 广告检查后的前台已变化，尚未继续游戏操作"
+                    )
             # 前台判定：package 前缀匹配（游戏包下任何界面都算前台，免疫新 activity）
             if focus.startswith(self.game_package + "/"):
                 return update
@@ -1064,6 +1161,8 @@ class Device:
                 # 游戏进程未运行，重新启动
                 self.launch()
                 csleep(10)
+            if not self.current_focus().startswith(self.game_package + "/"):
+                raise DeviceRecoveryError("恢复后尚未确认游戏前台，停止本次画面识别")
             update = True
             return update
 
