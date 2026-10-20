@@ -3,10 +3,11 @@
 from datetime import datetime
 from functools import cache
 
+from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
 from arknights_mower.utils.group_recovery import (
     completed_mood_limit_release,
     group_recovery_workers,
-    observed_full_mood,
+    recovery_mood_complete,
 )
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.operators import TRADE_ORDER_AGENTS
@@ -41,7 +42,7 @@ def covered_recovery_members(op_data):
             or op.current_room
             and not op.is_resting()
             or op.time_stamp is not None
-            and op.current_mood() >= op.upper_limit
+            and recovery_mood_complete(op_data, op)
             or op_data.rest_mood_complete(name)
         ):
             continue
@@ -65,10 +66,32 @@ def covered_recovery_members(op_data):
     return result
 
 
+def off_duty_full_recovery_members(op_data):
+    """已离岗且有效心情未满的回满主班按下班处理，不依赖恢复期限。"""
+    return {
+        name
+        for name, op in op_data.operators.items()
+        if op.is_high()
+        and op.rest_in_full
+        and not op.workaholic
+        and not op.room.startswith("dorm")
+        and not op.is_working()
+        and not op_data.rest_mood_complete(name)
+        and (mood := dorm_candidate_mood(op_data, name)) is not None
+        and mood < op.upper_limit
+    }
+
+
 def _resting_members(op_data):
     ends = {d.name: d.time for d in op_data.all_dorms() if d.name}
     covered = covered_recovery_members(op_data)
-    resting, groups, recovery_groups = set(covered), set(), set()
+    off_duty = off_duty_full_recovery_members(op_data)
+    resting, groups = set(covered) | off_duty, set()
+    recovery_groups = {
+        op_data.operators[name].group
+        for name in off_duty
+        if op_data.operators[name].group
+    }
     now = datetime.now()
     for name, op in op_data.operators.items():
         if (
@@ -79,7 +102,10 @@ def _resting_members(op_data):
         ):
             continue
         end = ends.get(name)
-        unfinished = end > now if end is not None else 0 <= op.mood < op.upper_limit
+        mood = dorm_candidate_mood(op_data, name, now)
+        unfinished = (
+            end > now if end is not None else mood is not None and mood < op.upper_limit
+        )
         if unfinished:
             resting.add(name)
             if op.group and op_data.is_group_shift_anchor(op):
@@ -88,7 +114,7 @@ def _resting_members(op_data):
         workers = group_recovery_workers(op_data, group)
         if any(op.is_resting() for op in workers) and any(
             op.rest_in_full
-            and not observed_full_mood(op)
+            and not recovery_mood_complete(op_data, op)
             and not completed_mood_limit_release(op_data, op)
             for op in workers
         ):
@@ -207,7 +233,7 @@ def reconsider_low_mood_replacements(op_data, fix_plan, is_busy):
                     or not 0 <= candidate.mood <= 24
                     or candidate.rest_in_full
                     and candidate.is_resting()
-                    and candidate.current_mood(now) < candidate.upper_limit
+                    and not recovery_mood_complete(op_data, candidate, now)
                     or op_data.is_dorm_replacement(name)
                     or is_busy(name)
                     or op_data.replacement_exhausted(name, now, operator=owner)
@@ -241,7 +267,9 @@ def prefer_resting_replacements(op_data, fix_plan, is_busy):
     if not fix_plan:
         return
     resting, recovery_groups = _resting_members(op_data)
-    protected = _recall_recovery_members(op_data)
+    protected = _recall_recovery_members(op_data) | off_duty_full_recovery_members(
+        op_data
+    )
     resting.update(protected)
     if not resting:
         return
@@ -510,7 +538,7 @@ def preserve_backup_replacements(
                 or op_data.replacement_exhausted(candidate, operator=owner)
                 or cover.rest_in_full
                 and cover.is_resting()
-                and cover.current_mood() < cover.upper_limit
+                and not recovery_mood_complete(op_data, cover)
             ):
                 continue
             if source not in movable and (

@@ -221,13 +221,32 @@ def sync_replacement_checks(solver):
         existing[key] = task
         snapshot = replacement_check_snapshot(solver, task)
         previous = getattr(task, "replacement_check_source", None)
+        cover = data.operators[target["cover"]]
+        observation = snapshot["observations"][target["cover"]]
+        previous_observation = (
+            previous["observations"].get(target["cover"]) if previous else None
+        )
+        rate_changed = (
+            observation[4] is not None
+            and observation[4] > 0
+            and (
+                previous_observation is None
+                or previous_observation[4] != observation[4]
+            )
+        )
         # 候选恢复和预约释放只重新开放失败检查，不移动已有工作期限。
+        # 仅更新采样保留工作期限；达到下限或实测速率改变时重新核实倒计时。
         if (
             previous is not None
             and (
                 previous["environment"] != snapshot["environment"]
-                or previous["observations"].get(target["cover"])
-                != snapshot["observations"].get(target["cover"])
+                or (
+                    previous_observation != observation
+                    and cover.time_stamp is not None
+                    and not getattr(cover, "mood_is_prediction", False)
+                    and _finite_mood(cover.mood)
+                    and (cover.mood <= cover.lower_limit or rate_changed)
+                )
                 or previous["revision"] != snapshot["revision"]
             )
             and not task.retains_execution
@@ -272,12 +291,53 @@ def _finite_mood(value):
     return isinstance(value, (int, float)) and isfinite(value) and 0 <= value <= 24
 
 
+def _check_read_values(snapshot, room):
+    """比较实读前后的业务值，排除本次读房产生的采样时间和观测次数。"""
+    values = deepcopy(snapshot)
+    for name, observation in values["observations"].items():
+        if observation[0] == room:
+            values["observations"][name] = (*observation[:2], None)
+    values["room_observations"].pop(room, None)
+    facility = values["facilities"].get(room)
+    if facility is not None:
+        facility.pop("updated_at", None)
+    source = values["replacement_check"]
+    for name, observation in source["observations"].items():
+        if observation[0] == room:
+            source["observations"][name] = (
+                *observation[:3],
+                None,
+                *observation[4:],
+            )
+    source["room_observations"].pop(room, None)
+    return values
+
+
+def _preserve_peer_failures(solver, peers, room):
+    for peer, failure, before in peers:
+        if getattr(peer, "execution_failure", None) is not failure:
+            continue
+        # 读取前已有相关变化时不能消费，否则会遗漏候补释放等恢复条件。
+        if failure["snapshot"] != before:
+            continue
+        after = solver._task_failure_snapshot(peer, failure["rooms"])
+        if _check_read_values(before, room) == _check_read_values(after, room):
+            failure["snapshot"] = after
+
+
 def run_replacement_check(solver, task):
     """到期核实原岗位；确认达到个人下限后复用普通替班纠错。"""
     target, data = task.replacement_check, solver.op_data
     if not _target_applies(data, target):
         return True
     room, index = target["room"], target["index"]
+    peers = [
+        (peer, failure, solver._task_failure_snapshot(peer, failure["rooms"]))
+        for peer in solver.tasks
+        if peer is not task
+        and getattr(peer, "replacement_check", None)
+        and (failure := getattr(peer, "execution_failure", None))
+    ]
     try:
         solver.enter_room(room)
         result = solver.get_agent_from_room(
@@ -289,7 +349,9 @@ def run_replacement_check(solver, task):
         )
         solver.back()
     except RecognizeError as exc:
+        _preserve_peer_failures(solver, peers, room)
         return _retain(solver, task, f"替班心情检查未取得有效读数：{exc}")
+    _preserve_peer_failures(solver, peers, room)
     observed = result[index] if 0 <= index < len(result) else {}
     if observed.get("observed") is False or not _finite_mood(observed.get("mood")):
         return _retain(solver, task, "替班心情检查未取得有效读数")
