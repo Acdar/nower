@@ -236,6 +236,69 @@ class TrayRecoveryTests(unittest.TestCase):
                 registration.close.assert_called_once()
 
 
+class FinishedWindowTests(unittest.TestCase):
+    def test_exit_code_survives_the_cleanup_that_closes_the_process_object(self):
+        import webview_ui
+
+        class Process:
+            closed = False
+
+            def is_alive(self):
+                if self.closed:
+                    raise ValueError("process object is closed")
+                return False
+
+            def close(self):
+                self.closed = True
+
+            @property
+            def exitcode(self):
+                if self.closed:
+                    raise ValueError("process object is closed")
+                return 3
+
+        process = Process()
+        with patch.object(webview_ui, "close_child", side_effect=lambda p: p.close()):
+            finished, exitcode = webview_ui.window_exit_state(process)
+            webview_ui.close_child(process)
+        self.assertTrue(process.closed)
+        self.assertEqual((finished, exitcode), (True, 3))
+
+    def test_process_closed_by_shutdown_is_not_a_window_fault(self):
+        import webview_ui
+
+        class ClosedProcess:
+            def is_alive(self):
+                raise ValueError("process object is closed")
+
+            @property
+            def exitcode(self):
+                raise ValueError("process object is closed")
+
+        with patch("webbrowser.open") as open_browser:
+            self.assertEqual(
+                webview_ui.window_exit_state(ClosedProcess()), (True, None)
+            )
+            self.assertFalse(
+                webview_ui.handle_finished_window(None, True, "http://127.0.0.1:58000")
+            )
+        open_browser.assert_not_called()
+
+    def test_crashed_window_without_a_tray_hands_the_panel_to_the_browser(self):
+        import webview_ui
+
+        with patch("webbrowser.open") as open_browser:
+            self.assertFalse(
+                webview_ui.handle_finished_window(1, False, "http://127.0.0.1:58000")
+            )
+            open_browser.assert_called_once_with("http://127.0.0.1:58000")
+            open_browser.reset_mock()
+            self.assertFalse(
+                webview_ui.handle_finished_window(1, True, "http://127.0.0.1:58000")
+            )
+        open_browser.assert_not_called()
+
+
 class DesktopStartupTests(unittest.TestCase):
     def launch(
         self,

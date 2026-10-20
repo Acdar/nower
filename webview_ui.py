@@ -581,20 +581,33 @@ def webview_window(
         sys.exit(1)
 
 
-def handle_finished_window(process, keep_running: bool, url: str) -> bool:
+def window_exit_state(process):
+    """读取窗口进程的结束状态，返回 (是否已结束, 退出码)。
+
+    close_child() 会关闭 multiprocessing 进程对象，之后读取 exitcode 会抛
+    ValueError；退出流程也可能先一步在其他线程关闭它。已关闭说明窗口已经不在，
+    按正常结束处理，不能把清理误当成窗口故障。
+    """
+    try:
+        return not process.is_alive(), getattr(process, "exitcode", None)
+    except ValueError:
+        return True, None
+
+
+def handle_finished_window(exitcode, keep_running: bool, url: str) -> bool:
     """处理已结束的窗口进程，返回实例是否要随之退出。
 
     退出码 0 表示用户关闭了窗口，或主进程要求窗口退出；窗口没能打开、或在运行中
     崩溃时退出码非零。没有托盘时用户关窗即结束实例，但窗口故障不是退出请求：实例
     继续运行，并把面板交给浏览器，避免留下一个没有任何界面的实例。
     """
-    if getattr(process, "exitcode", None) in (0, None):
+    if exitcode in (0, None):
         return not keep_running
     from arknights_mower.utils.log import logger
 
     logger.error(
         "窗口进程异常结束（退出码 %s），实例继续运行；可从托盘再次打开窗口",
-        process.exitcode,
+        exitcode,
     )
     if not keep_running:
         # 没有托盘时浏览器面板是唯一界面，也是结束这个实例的唯一入口。
@@ -1104,15 +1117,16 @@ def _run_desktop():
                 if stopped and registration.shutdown_requested():
                     shutdown.request("runtime_request")
                     break
-            if config.webview_process and not config.webview_process.is_alive():
-                finished = config.webview_process
-                close_child(finished)
-                config.webview_process = None
-                if config.parent_conn is not None:
-                    close_channel(config.parent_conn)
-                    config.parent_conn = None
-                if handle_finished_window(finished, keep_running, url):
-                    break
+            if config.webview_process is not None:
+                finished, exitcode = window_exit_state(config.webview_process)
+                if finished:
+                    close_child(config.webview_process)
+                    config.webview_process = None
+                    if config.parent_conn is not None:
+                        close_channel(config.parent_conn)
+                        config.parent_conn = None
+                    if handle_finished_window(exitcode, keep_running, url):
+                        break
             if manager_owned:
                 if runtime.unified_managers():
                     manager_missing_since = None
