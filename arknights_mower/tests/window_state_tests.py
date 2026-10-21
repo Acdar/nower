@@ -95,14 +95,18 @@ class TestPageLoadReadiness(unittest.TestCase):
         win.events.loaded.is_set.return_value = False
         bridge = window_shell.WindowShellBridge(win, system="linux")
         bridge._on_resized(1200, 700)
+        bridge._publish_state()
+        win.evaluate_js.assert_not_called()
         # pywebview runs the loaded callbacks before it marks that event as set,
         # so this callback must not re-ask the event it represents.
-        bridge._on_page_loaded()
+        bridge._on_loaded()
+        bridge._publish_state()
         win.evaluate_js.assert_called_once()
         script = win.evaluate_js.call_args.args[0]
         self.assertIn(window_shell.WINDOW_SHELL_EVENT, script)
         self.assertIn('"width": 1200', script)
         bridge._on_restored()
+        bridge._publish_state()
         self.assertEqual(win.evaluate_js.call_count, 2)
 
     def test_attach_asks_for_a_delivery_once_the_page_loads(self):
@@ -111,7 +115,7 @@ class TestPageLoadReadiness(unittest.TestCase):
         win = mock.MagicMock()
         loaded = win.events.loaded
         bridge = window_shell.attach_window_shell(win, system="linux")
-        loaded.__iadd__.assert_called_once_with(bridge._on_page_loaded)
+        loaded.__iadd__.assert_called_once_with(bridge._on_loaded)
 
     def test_window_without_the_event_keeps_the_best_effort_delivery(self):
         class Window:
@@ -122,5 +126,5 @@ class TestPageLoadReadiness(unittest.TestCase):
 
         win = Window()
         bridge = window_shell.WindowShellBridge(win, system="linux")
-        bridge._on_restored()
+        bridge._publish_state()
         self.assertIn(window_shell.WINDOW_SHELL_EVENT, win.script)

@@ -559,6 +559,7 @@ def webview_window(
 
     Thread(target=recv_msg, daemon=True).start()
 
+    exit_code = 0
     try:
         webview.start(gui=backend if backend in ("gtk", "qt") else None)
 
@@ -567,7 +568,6 @@ def webview_window(
             ratio = ratio_from_window_size(WindowSize(*size))
             if ratio is not None:
                 save_window_ratio(ratio)
-        sys.exit()
     except Exception:
         from arknights_mower.utils.log import logger
 
@@ -575,10 +575,11 @@ def webview_window(
         import webbrowser
 
         webbrowser.open(url)
+        # 非零退出码让主进程区分「窗口没起来」与「用户关掉了窗口」。
+        exit_code = 1
     finally:
         bridge.dispose()
-        # 非零退出码让主进程区分「窗口没起来」与「用户关掉了窗口」。
-        sys.exit(1)
+    sys.exit(exit_code)
 
 
 def window_exit_state(process):

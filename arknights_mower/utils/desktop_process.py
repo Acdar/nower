@@ -156,7 +156,17 @@ def watch_parent():
 def run_with_parent_watch(target, *args):
     """Use the same parent lifetime for multiprocessing GUI helpers."""
     watch_parent()
-    return target(*args)
+    try:
+        return target(*args)
+    except Exception:
+        # 打包版本的辅助进程没有控制台，未记录的异常只会留下退出码 1。
+        # SystemExit 是窗口正常关闭的出口，不属于异常。
+        from arknights_mower.utils.log import logger
+
+        logger.exception(
+            "桌面辅助进程异常退出：%s", getattr(target, "__name__", target)
+        )
+        raise
 
 
 def run_worker(target, descriptor, log_descriptor=None):

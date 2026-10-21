@@ -310,7 +310,7 @@ class WindowShellBridge:
                 if (
                     self._close_listener_ready
                     and self._pending_close.is_set()
-                    and (self._page_loaded or self._window.events.loaded.is_set())
+                    and self._page_ready()
                 ):
                     event = json.dumps(WINDOW_SHELL_CLOSE_EVENT)
                     accepted = self._window.evaluate_js(
@@ -552,12 +552,17 @@ class WindowShellBridge:
         else:
             self._publish_state()
 
+    def _page_ready(self) -> bool:
+        """A window without a loaded event is delivered best-effort."""
+        if self._page_loaded:
+            return True
+        events = getattr(self._window, "events", None)
+        return events is None or bool(events.loaded.is_set())
+
     def _publish_state(self) -> None:
         if self._disposed:
             return
-        if self._backend != "winforms" and not (
-            self._page_loaded or self._window.events.loaded.is_set()
-        ):
+        if self._backend != "winforms" and not self._page_ready():
             return
         state = self.get_window_state()
         mode = state["state"]
@@ -614,7 +619,6 @@ def attach_window_shell(
         bridge.set_window_launch_mode,
     )
 
-    window.events.loaded += bridge._on_page_loaded
     window.events.maximized += bridge._on_maximized
     window.events.minimized += bridge._on_minimized
     window.events.restored += bridge._on_restored
