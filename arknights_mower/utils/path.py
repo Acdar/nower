@@ -1,5 +1,8 @@
+import errno
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 appname = "arknights_mower"
@@ -108,6 +111,37 @@ def get_path(path: str, space=None) -> Path:
     else:
         return Path(path)
         # raise ValueError("{} 路径必须以 '@xxx' 开头".format(path))
+
+
+def move_file(source, destination) -> None:
+    """Move one file, falling back to copy-and-replace across volumes.
+
+    ``os.replace`` refuses to cross volumes (``EXDEV`` / ``WinError 17``) when
+    ``@app/tmp`` is a junction or mount on another disk and the configuration
+    directory is not. The copy lands in the destination directory first, so its
+    readers still see either no file or the complete file, and only then is the
+    source removed.
+    """
+    source, destination = Path(source), Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(source, destination)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV and getattr(exc, "winerror", None) != 17:
+            raise
+    handle, temporary = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(handle, "wb") as target, source.open("rb") as origin:
+            shutil.copyfileobj(origin, target)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    source.unlink()
 
 
 def resolve_config_path(value: str) -> str:

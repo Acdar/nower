@@ -20,7 +20,7 @@ import requests
 from arknights_mower import __version__
 from arknights_mower.utils import github_download, network_settings
 from arknights_mower.utils import update_runtime as runtime
-from arknights_mower.utils.path import get_path
+from arknights_mower.utils.path import get_path, move_file
 from arknights_mower.utils.software_update_worker import (
     MAX_PACKAGE_BYTES,
     SourceChangesError,
@@ -114,8 +114,7 @@ def get_settings():
             runtime.state_dir() / "settings-migration", timeout=5
         ):
             if not destination.exists() and legacy.is_file():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(legacy, destination)
+                move_file(legacy, destination)
     saved = runtime.read_json(destination, {})
     return {
         "channel": saved.get(

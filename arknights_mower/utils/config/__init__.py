@@ -23,7 +23,7 @@ from arknights_mower.utils.config.plan import (
 )
 from arknights_mower.utils.log import frontend_log_queue, logger
 from arknights_mower.utils.network_settings import apply_http_proxy
-from arknights_mower.utils.path import get_path
+from arknights_mower.utils.path import get_path, move_file
 
 # Compatibility alias; log delivery does not depend on configuration loading.
 log_queue = frontend_log_queue
@@ -103,23 +103,27 @@ def atomic_write(path, writer, replace_retries=3):
 
 
 def migrate_app_config_paths():
-    """新路径缺失且旧路径存在 → os.replace 搬过去；两边都在 → 不动。
+    """新路径缺失且旧路径存在 → 搬过去；两边都在 → 不动。
 
-    os.replace 失败（Windows 上 AV/另一进程瞬时锁住旧文件，或双进程并发首次迁移
-    的 TOCTOU）时检查目标是否已由另一进程迁移；否则中止启动，防止生成默认配置遮蔽旧文件。
+    跨卷时（如 @app/tmp 是指向其他磁盘的 junction）move_file 退回复制后替换，
+    因为 os.replace 无法跨卷。搬移失败（Windows 上 AV/另一进程瞬时锁住旧文件，
+    或双进程并发首次迁移的 TOCTOU）时检查目标是否已就绪；否则中止启动，
+    防止生成默认配置遮蔽旧文件。
     """
     for old, new in _CONFIG_PATH_PAIRS:
         if new.exists() or not old.exists():
             continue
         try:
-            new.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(old, new)
-        except (FileNotFoundError, PermissionError) as exc:
+            move_file(old, new)
+        except OSError as exc:
             if not new.is_file():
                 raise OSError(
                     f"迁移配置 {old} → {new} 失败；已停止启动以保留原配置，请检查目录权限或文件占用"
                 ) from exc
-            logger.info("配置已由另一进程迁移：%s", new)
+            if old.exists():
+                logger.info("目标配置已就绪，旧文件未能删除：%s", new)
+            else:
+                logger.info("配置已由另一进程迁移：%s", new)
 
 
 migrate_app_config_paths()

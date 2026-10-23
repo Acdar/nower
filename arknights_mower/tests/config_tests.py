@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import tempfile
@@ -338,6 +339,68 @@ class TestMigrateAppConfigPaths(unittest.TestCase):
             migrate_app_config_paths()
         self.assertTrue(old.exists())
         self.assertFalse(new.exists())
+
+    def test_cross_volume_migration_copies_then_removes_old(self):
+        # @app/tmp 可能是指向其他磁盘的 junction，os.replace 跨卷会报 WinError 17。
+        self.old.write_text("data", encoding="utf-8")
+        real_replace = os.replace
+
+        def cross_volume(source, destination):
+            if Path(source) == self.old:
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_replace(source, destination)
+
+        with (
+            patch.object(config_module, "_CONFIG_PATH_PAIRS", self._pairs()),
+            patch("arknights_mower.utils.path.os.replace", cross_volume),
+        ):
+            migrate_app_config_paths()
+        self.assertFalse(self.old.exists())
+        self.assertEqual(self.new.read_text(encoding="utf-8"), "data")
+        leftovers = [p.name for p in self.new.parent.iterdir() if p.suffix == ".tmp"]
+        self.assertEqual(leftovers, [])
+
+    def test_cross_volume_migration_failure_stops_after_leaving_old_file(self):
+        self.old.write_text("legacy", encoding="utf-8")
+
+        def cross_volume(*args):
+            raise OSError(errno.EXDEV, "cross-device link")
+
+        with (
+            patch.object(config_module, "_CONFIG_PATH_PAIRS", self._pairs()),
+            patch("arknights_mower.utils.path.os.replace", cross_volume),
+        ):
+            with self.assertRaisesRegex(OSError, "已停止启动"):
+                migrate_app_config_paths()
+        self.assertTrue(self.old.exists())
+        self.assertFalse(self.new.exists())
+        leftovers = [p.name for p in self.new.parent.iterdir() if p.suffix == ".tmp"]
+        self.assertEqual(leftovers, [])
+
+    def test_copied_migration_continues_when_legacy_file_stays_locked(self):
+        self.old.write_text("data", encoding="utf-8")
+        real_replace = os.replace
+        real_unlink = Path.unlink
+
+        def cross_volume(source, destination):
+            if Path(source) == self.old:
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_replace(source, destination)
+
+        def locked(instance, *args, **kwargs):
+            if instance == self.old:
+                raise PermissionError("locked")
+            return real_unlink(instance, *args, **kwargs)
+
+        with (
+            patch.object(config_module, "_CONFIG_PATH_PAIRS", self._pairs()),
+            patch("arknights_mower.utils.path.os.replace", cross_volume),
+            patch.object(Path, "unlink", locked),
+        ):
+            # 新配置已完整落地，不能因为旧文件删不掉就阻止启动。
+            migrate_app_config_paths()
+        self.assertEqual(self.new.read_text(encoding="utf-8"), "data")
+        self.assertTrue(self.old.exists())
 
     def test_concurrent_migration_success_does_not_block_startup(self):
         self.old.write_text("legacy", encoding="utf-8")

@@ -1,6 +1,9 @@
 """更新偏好脱离缓存，保留安装与数据根目录共享范围。"""
 
+import errno
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -55,6 +58,24 @@ def test_update_settings_share_instances_but_isolate_installations_and_data(
     assert (
         update.settings_path().parent == storage / "another-data/config/software-update"
     )
+
+
+def test_cross_volume_update_settings_migration_copies_then_removes_legacy(
+    storage, monkeypatch
+):
+    legacy = update.runtime.state_dir() / "settings.json"
+    update.runtime.write_json(legacy, {"channel": "dev"})
+    real_replace = os.replace
+
+    def cross_volume(source, destination):
+        if Path(source) == legacy:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", cross_volume)
+    assert update.get_settings()["channel"] == "dev"
+    assert not legacy.exists()
+    assert json.loads(update.settings_path().read_text())["channel"] == "dev"
 
 
 def test_failed_update_settings_migration_preserves_old_file(storage, monkeypatch):

@@ -32,8 +32,12 @@ Startup moves the former `tmp/growth_plan.json` there only when the new file is
 absent. Legacy manual workshop presets likewise move to `config/workshop_preset.json`;
 modern manual workshop settings retain their existing `conf.yml` storage.
 Existing destination files take precedence. A move failure stops configuration
-loading without generating replacement defaults. Growth history and observed
-inventory remain runtime data in `tmp/`. Configuration ZIP imports use the
+loading without generating replacement defaults. `tmp/` and `config/` can sit on
+different volumes, for example when `tmp/` is a junction to another disk, so
+`os.replace` cannot move the file. The legacy file is then copied into `config/`
+and removed only after the copy completes; a copied file that leaves the legacy
+copy in place does not stop loading. Growth history and observed inventory
+remain runtime data in `tmp/`. Configuration ZIP imports use the
 [backup migration rules](config-backup.md#2-import-boundary).
 
 ## 2. Materials and Farming

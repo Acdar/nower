@@ -145,9 +145,12 @@ SHA-256-derived key of the resolved update state directory, retaining installati
 and data-root separation while all its instances share the settings. This file
 stores channel, background mode, automatic checks and updates, source branch,
 source remote and remote history. On first read, an absent destination receives
-the former update-cache `settings.json` under a migration lock. An existing
-destination wins; migration errors propagate without overwriting the source.
-Update coordination, downloads and temporary workspaces remain in the cache.
+the former update-cache `settings.json` under a migration lock. When the cache
+and the configuration directory sit on different volumes, the file is copied
+into the configuration directory and the cache copy is removed only after the
+copy completes. An existing destination wins; migration errors propagate
+without overwriting the source. Update coordination, downloads and temporary
+workspaces remain in the cache.
 
 `tmp/` sits beside `config/` and `logs/` in the Mower data root. `MOWER_DATA_DIR` redirects this root; macOS frozen applications use their writable application data root rather than the signed `.app` bundle. Resource packages and MAA storage retain their existing contracts. Update rollback backups retain their existing locations and verification lifecycle.
 
