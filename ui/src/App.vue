@@ -111,23 +111,8 @@
                 />
               </n-layout-sider>
               <n-layout-content class="layout-content-container">
-                <ConfigSaveNotice v-if="$route.name === 'log'" />
-                <n-alert
-                  v-if="config_save_error && $route.name !== 'log'"
-                  type="error"
-                  title="配置保存失败"
-                  role="alert"
-                >
-                  {{ config_save_error }}。修改仍保留在当前页面。
-                  <template #action>
-                    <n-button
-                      :loading="config_saving"
-                      @click="config_store.save_config().catch(() => {})"
-                      >重试保存</n-button
-                    >
-                  </template>
-                </n-alert>
-                <CrashRecoveryNotice v-if="loaded" :floating="$route.name === 'log'" />
+                <ConfigSaveNotice />
+                <CrashRecoveryNotice v-if="loaded" />
                 <router-view v-if="loaded" />
                 <ChatBot v-if="chatBotMounted" v-model:show="showChatBot" />
                 <Feedback />
@@ -414,10 +399,10 @@ function handleMenuClick(key) {
     showChatBot.value = true
   }
 }
-import { RouterLink } from 'vue-router'
+import SessionLink from '@/components/SessionLink.vue'
 const menuOptions = [
   {
-    label: () => h(RouterLink, { to: { path: '/' } }, { default: () => '运行日志' }),
+    label: () => h(SessionLink, { to: { path: '/' } }, { default: () => '运行日志' }),
     icon: renderIcon(BookOutline),
     key: 'go-to-log'
   },
@@ -428,25 +413,26 @@ const menuOptions = [
     children: [
       {
         label: () =>
-          h(RouterLink, { to: { path: '/mowersettings' } }, { default: () => 'mower设置' }),
+          h(SessionLink, { to: { path: '/mowersettings' } }, { default: () => 'mower设置' }),
         icon: renderIcon(Coffee),
         key: 'go-to-mowersetting'
       },
       {
-        label: () => h(RouterLink, { to: { path: '/maasettings' } }, { default: () => '日常设置' }),
+        label: () =>
+          h(SessionLink, { to: { path: '/maasettings' } }, { default: () => '日常设置' }),
         icon: renderIcon(RoseOutline),
         key: 'go-to-maasetting'
       }
     ]
   },
   {
-    label: () => h(RouterLink, { to: { path: '/plan-editor' } }, { default: () => '排班编辑' }),
+    label: () => h(SessionLink, { to: { path: '/plan-editor' } }, { default: () => '排班编辑' }),
     icon: renderIcon(Home),
     key: 'go-to-plan'
   },
   {
     label: () =>
-      h(RouterLink, { to: { path: '/mastery-recommendation' } }, { default: () => '养成规划' }),
+      h(SessionLink, { to: { path: '/mastery-recommendation' } }, { default: () => '养成规划' }),
     icon: renderIcon(TrendingUp),
     key: 'go-to-mastery-recommendation'
   },
@@ -457,31 +443,31 @@ const menuOptions = [
     children: [
       {
         label: () =>
-          h(RouterLink, { to: { path: '/record/line' } }, { default: () => '干员心情报表' }),
+          h(SessionLink, { to: { path: '/record/line' } }, { default: () => '干员心情报表' }),
         icon: renderIcon(BarChart),
         key: 'go-to-record-line'
       },
       {
         label: () =>
-          h(RouterLink, { to: { path: '/record/pie' } }, { default: () => '工休比报表' }),
+          h(SessionLink, { to: { path: '/record/pie' } }, { default: () => '工休比报表' }),
         icon: renderIcon(PieChart),
         key: 'go-to-record-pie'
       },
       {
-        label: () => h(RouterLink, { to: { path: '/record/depot' } }, { default: () => '仓库' }),
+        label: () => h(SessionLink, { to: { path: '/record/depot' } }, { default: () => '仓库' }),
         icon: renderIcon(Storefront),
         key: 'go-to-record-depot'
       },
       {
         label: () =>
-          h(RouterLink, { to: { path: '/record/report' } }, { default: () => '基建报表' }),
+          h(SessionLink, { to: { path: '/record/report' } }, { default: () => '基建报表' }),
         icon: renderIcon(ReaderOutline),
         key: 'go-to-record-report'
       },
       {
         label: () =>
           h(
-            RouterLink,
+            SessionLink,
             { to: { path: '/record/trading_analysis' } },
             { default: () => '贸易订单分析' }
           ),
@@ -490,30 +476,34 @@ const menuOptions = [
       },
       {
         label: () =>
-          h(RouterLink, { to: { path: '/record/recycling' } }, { default: () => '回收站材料统计' }),
+          h(
+            SessionLink,
+            { to: { path: '/record/recycling' } },
+            { default: () => '回收站材料统计' }
+          ),
         icon: renderIcon(PieChart),
         key: 'go-to-recycling'
       },
       {
         label: () =>
-          h(RouterLink, { to: { path: '/record/log-schedule' } }, { default: () => '日志调度' }),
+          h(SessionLink, { to: { path: '/record/log-schedule' } }, { default: () => '日志调度' }),
         icon: renderIcon(TimeOutline),
         key: 'go-to-log-schedule'
       }
     ]
   },
   {
-    label: () => h(RouterLink, { to: { path: '/doc' } }, { default: () => '帮助文档' }),
+    label: () => h(SessionLink, { to: { path: '/doc' } }, { default: () => '帮助文档' }),
     icon: renderIcon(HelpCircle),
     key: 'go-to-doc'
   },
   {
-    label: () => h(RouterLink, { to: { path: '/readme' } }, { default: () => '其他资源' }),
+    label: () => h(SessionLink, { to: { path: '/readme' } }, { default: () => '其他资源' }),
     icon: renderIcon(Bag),
     key: 'readme'
   },
   {
-    label: () => h(RouterLink, { to: { path: '/BasementSkill' } }, { default: () => '基建技能' }),
+    label: () => h(SessionLink, { to: { path: '/BasementSkill' } }, { default: () => '基建技能' }),
     icon: renderIcon(SkillLevelAdvanced),
     key: 'BasementSkill'
   },
@@ -577,8 +567,6 @@ const { load_config, load_shop, load_item } = config_store
 const {
   resource_update_enable,
   resource_update_auto_update,
-  config_save_error,
-  config_saving,
   simulator,
   start_automatically,
   theme,
@@ -782,6 +770,7 @@ async function handleWindowControl(action) {
   if (!api?.get_close_preference) return windowShell.close()
   try {
     const pref = await api.get_close_preference()
+    if (pref.managed === true) return windowShell.close()
     const intent = resolveCloseIntent(pref)
     closeTrayAvailable.value = intent.trayAvailable
     closeChoice.value = intent.choice
@@ -862,6 +851,17 @@ async function handleUpdateNoticeAck() {
   }
 }
 
+async function loadStartupUpdateNotice() {
+  try {
+    const notice = await loadUpdateNotice()
+    showUpdateNoticeModal.value = notice.should_show
+    if (notice.should_show) await renderChangelog()
+  } catch (error) {
+    console.error('failed to load update notice', error)
+    showUpdateNoticeModal.value = false
+  }
+}
+
 const operators_with_free_current = computed(() => {
   return [
     { value: 'Current', label: 'Current' },
@@ -888,7 +888,13 @@ onMounted(async () => {
       watermarkData.value = info
     })
     .catch(() => {})
-  await Promise.all([load_config(), load_shop(), load_item(), load_operators(), get_running()])
+  const optionListsRequest = Promise.allSettled([load_shop(), load_item()]).then((results) => {
+    for (const result of results) {
+      if (result.status === 'rejected')
+        console.error('failed to load setting options', result.reason)
+    }
+  })
+  await Promise.all([load_config(), load_plan(), load_operators(), get_running()])
 
   document.title = instanceName
     ? `${instanceName} - arknights-mower`
@@ -907,21 +913,10 @@ onMounted(async () => {
       )
       .catch((error) => console.error('failed to request automatic software check', error))
 
-  await load_plan()
-
-  try {
-    const notice = await loadUpdateNotice()
-    showUpdateNoticeModal.value = notice.should_show
-    if (notice.should_show) {
-      renderChangelog()
-    }
-  } catch (error) {
-    console.error('failed to load update notice', error)
-    showUpdateNoticeModal.value = false
-  }
   // Desktop startup owns automatic installation and task admission.
   const resourceUpdateRequest = (async () => {
     try {
+      await optionListsRequest
       if (updates_enabled.value === true && (await loadResourceJob())) {
         await Promise.all([load_shop(), load_item(), load_operators()])
       }
@@ -944,6 +939,7 @@ onMounted(async () => {
   })()
 
   loaded.value = true
+  void loadStartupUpdateNotice()
 
   const r = RegExp(operators_with_free_current.value.map((x) => "'" + x.value).join('|'))
   hljs.registerLanguage('mower', () => ({

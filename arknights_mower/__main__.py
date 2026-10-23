@@ -2,11 +2,9 @@ import copy
 import os
 from datetime import datetime, timedelta
 from threading import Lock, Timer
+from typing import TYPE_CHECKING
 
 from arknights_mower.data import base_room_list
-from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
-from arknights_mower.solvers.reclamation_algorithm import ReclamationAlgorithm
-from arknights_mower.solvers.secret_front import SecretFront
 from arknights_mower.utils import config, path, rapidocr
 from arknights_mower.utils.csleep import MowerExit, csleep
 from arknights_mower.utils.csv_utils import EmptyDataError, read_csv_rows
@@ -31,6 +29,9 @@ from arknights_mower.utils.scheduler_task import (
     merge_restored_waiting_shifts,
     protect_priority_tasks,
 )
+
+if TYPE_CHECKING:
+    from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
 
 base_scheduler = None
 device_control = create_device_control()
@@ -308,6 +309,9 @@ def main(saved_state, *, preparation_serial=None):
 
 def _main(saved_state):
     logger.info("开始运行Mower")
+    from arknights_mower.utils.recycling_report import start_recycling_reports
+
+    start_recycling_reports()
     maintenance = NewsChecker.get_maintenance()
     if maintenance is not None:
         _arm_maintenance_timer(maintenance)
@@ -324,10 +328,10 @@ def _main(saved_state):
 
 def initialize(
     tasks: list,
-    scheduler: BaseSchedulerSolver | None = None,
+    scheduler: "BaseSchedulerSolver | None" = None,
     *,
     connection_retries: int = 3,
-) -> BaseSchedulerSolver:
+) -> "BaseSchedulerSolver":
     if scheduler:
         scheduler.handle_error(True)
         return scheduler
@@ -343,6 +347,8 @@ def initialize(
 
 
 def _initialize_scheduler(tasks, device):
+    from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
+
     base_scheduler = BaseSchedulerSolver(device=device)
     base_scheduler._state_restore_complete = False
     from arknights_mower.utils.operators import build_global_plan
@@ -391,8 +397,9 @@ def _resume_device_dispatch(scheduler=None, failure=None):
             scheduler.device = device
             scheduler.recog.device = device
             if uncertain or getattr(scheduler, "_idle_observation_pending", False):
-                scheduler.recog.reset_after_external_control()
-                scheduler._idle_observation_pending = False
+                from arknights_mower.solvers.base_schedule import BaseSchedulerSolver
+
+                BaseSchedulerSolver._complete_idle_observation(scheduler)
             else:
                 scheduler.recog.update()
         return device
@@ -653,16 +660,28 @@ def simulate(saved):
                 room for room in base_scheduler.op_data.plan if room in base_room_list
             }
         base_scheduler.tasks.insert(0, SchedulerTask(time=datetime.now()))
-    if saved and saved.get("_process_crash_recovery"):
-        from arknights_mower.utils.crash_recovery import reconcile_scheduler
+    while True:
+        try:
+            if saved and saved.get("_process_crash_recovery"):
+                from arknights_mower.utils.crash_recovery import reconcile_scheduler
 
-        reconcile_scheduler(base_scheduler)
-    else:
-        from arknights_mower.utils import crash_recovery
+                reconcile_scheduler(base_scheduler)
+            else:
+                from arknights_mower.utils import crash_recovery
 
-        if crash_recovery.reset_observation_pending():
-            crash_recovery.checkpoint_reset(base_scheduler)
+                crash_recovery.checkpoint_start(base_scheduler)
+            break
+        except RECOVERABLE_DEVICE_ERRORS as exc:
+            # 恢复前的房间读取也由原设备会话处理，保留已还原的任务和调度器。
+            try:
+                _resume_device_dispatch(base_scheduler, exc)
+            except MowerExit:
+                return
+        except MowerExit:
+            return
     base_scheduler._state_restore_complete = True
+    if saved:
+        base_scheduler._request_run_order_restoration_observations()
     while True:
         try:
             config.maintenance_recheck.clear()
@@ -872,6 +891,10 @@ def simulate(saved):
 
                     if not rg_sleep:
                         if config.conf.RA:
+                            from arknights_mower.solvers.reclamation_algorithm import (
+                                ReclamationAlgorithm,
+                            )
+
                             base_scheduler.recog.update()
                             base_scheduler.back_to_index()
                             ra_solver = ReclamationAlgorithm(
@@ -890,6 +913,8 @@ def simulate(saved):
                                 - datetime.now()
                             ).total_seconds()
                         elif config.conf.SF:
+                            from arknights_mower.solvers.secret_front import SecretFront
+
                             base_scheduler.recog.update()
                             base_scheduler.back_to_index()
                             sf_solver = SecretFront(

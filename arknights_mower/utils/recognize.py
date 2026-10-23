@@ -141,6 +141,9 @@ class Recognizer:
 
     def check_current_focus(self) -> bool:
         if self.device.check_current_focus():
+            probe = getattr(self.device, "check_ui_responsive", None)
+            if probe is not None:
+                probe()
             self.reset_after_external_control()
             return True
         return False
@@ -175,6 +178,9 @@ class Recognizer:
             elapsed_time = (current_time - self.last_scene_time).total_seconds()
             if elapsed_time > config.conf.run_order_delay * 90:
                 logger.warning("相同场景等待超时 ")
+                probe = getattr(self.device, "check_ui_responsive", None)
+                if probe is not None:
+                    probe()
                 self.last_scene = None
                 self.last_scene_time = current_time
                 self.device.exit()
@@ -298,7 +304,11 @@ class Recognizer:
         elif self.find("ope_recover_originite_on", scope=((1530, 120), (1850, 190))):
             self.scene = Scene.OPERATOR_RECOVER_ORIGINITE
         elif self.find("double_confirm/main"):
-            if self.find("double_confirm/exit"):
+            if self.find("double_confirm/login_cancelled") and self.find(
+                "double_confirm/retry_login"
+            ):
+                self.scene = Scene.LOGIN_CANCELLED
+            elif self.find("double_confirm/exit"):
                 self.scene = Scene.EXIT_GAME
             elif self.find("double_confirm/friend"):
                 self.scene = Scene.BACK_TO_FRIEND_LIST
@@ -777,7 +787,7 @@ class Recognizer:
             "arrange_confirm": (963, 969),
             "arrange_order_options": (1652, 23),
             ## "arrange_order_options_scene": (369, 199),
-            "clue": (1751, 750),
+            "clue": (1656, 940),
             "clue/daily": (526, 623),
             "clue/filter_all": (1297, 99),
             "clue/give_away": (25, 18),
@@ -791,9 +801,11 @@ class Recognizer:
             "double_confirm/friend": (978, 465),
             "double_confirm/give_up": (574, 716),
             "double_confirm/infrastructure": (1077, 435),
+            "double_confirm/login_cancelled": (780, 460),
             "double_confirm/main": (835, 683),
             "double_confirm/network": (708, 435),
             "double_confirm/recruit": (981, 464),
+            "double_confirm/retry_login": (1164, 712),
             "double_confirm/voice": (745, 435),
             "drone": (274, 437),
             "factory_collect": (1542, 886),
@@ -873,28 +885,32 @@ class Recognizer:
         }
 
         if not force_feature_match and res in color:
-            res_img = loadres(res)
-            if res == "depot":
-                # 限时物品标签会遮住旧模板上沿，只匹配下方固定背景，兼容现有资源包。
-                res_img = res_img[45:]
-            h, w, _ = res_img.shape
+            templates = [loadres(res)]
+            if res == "clue":
+                # 灰色按钮替换旧图标，橙色按钮复用已有模板；均避开数量角标。
+                templates.append(loadres("clue/fast_place"))
+            for res_img in templates:
+                if res == "depot":
+                    # 限时物品标签会遮住旧模板上沿，只匹配下方固定背景，兼容现有资源包。
+                    res_img = res_img[45:]
+                h, w, _ = res_img.shape
 
-            pos_list = color[res]
-            if not isinstance(pos_list[0], tuple):
-                pos_list = [color[res]]
-            for pos in pos_list:
-                scope = pos, va(pos, (w, h))
-                img = cropimg(self.img, scope)
-                if cmatch(img, res_img, draw=draw):
-                    gray = cropimg(self.gray, scope)
-                    res_img = cv2.cvtColor(res_img, cv2.COLOR_RGB2GRAY)
-                    ssim = vision_np.ssim(gray, res_img)
-                    threshold = 0.9
-                    if res in template_matching_score:
-                        threshold = template_matching_score[res]
-                    if ssim >= threshold:
-                        logger.debug(f"find: {res} {scope=} {ssim=}")
-                        return scope
+                pos_list = color[res]
+                if not isinstance(pos_list[0], tuple):
+                    pos_list = [color[res]]
+                for pos in pos_list:
+                    scope = pos, va(pos, (w, h))
+                    img = cropimg(self.img, scope)
+                    if cmatch(img, res_img, draw=draw):
+                        gray = cropimg(self.gray, scope)
+                        res_img = cv2.cvtColor(res_img, cv2.COLOR_RGB2GRAY)
+                        ssim = vision_np.ssim(gray, res_img)
+                        threshold = 0.9
+                        if res in template_matching_score:
+                            threshold = template_matching_score[res]
+                        if ssim >= threshold:
+                            logger.debug(f"find: {res} {scope=} {ssim=}")
+                            return scope
 
             if res == "confirm":
                 # 背景透出会改变整条按钮栏的颜色/纹理；保留原匹配，失败时
