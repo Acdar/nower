@@ -232,7 +232,6 @@ class WindowShellBridge:
         self.on_ready = None
         self._last_mode = None
         self._lock = Lock()
-        self._page_loaded = False
         self._state = {
             "state": "normal",
             "maximized": False,
@@ -312,7 +311,7 @@ class WindowShellBridge:
                 if (
                     self._close_listener_ready
                     and self._pending_close.is_set()
-                    and (self._page_loaded or self._window.events.loaded.is_set())
+                    and self._page_ready()
                 ):
                     event = json.dumps(WINDOW_SHELL_CLOSE_EVENT)
                     accepted = self._window.evaluate_js(
@@ -393,6 +392,20 @@ class WindowShellBridge:
         except Exception:
             logger.debug("Native window size probe unavailable", exc_info=True)
             return None
+
+    def _page_ready(self) -> bool:
+        """Whether the page can run the state script yet.
+
+        pywebview raises ``loaded`` before it marks that event as set, so the
+        callback records readiness instead of asking the event again. A window
+        object without the event keeps plain best-effort delivery.
+        """
+        if self._page_loaded:
+            return True
+        try:
+            return bool(self._window.events.loaded.is_set())
+        except Exception:
+            return True
 
     def _on_loaded(self):
         self._page_loaded = True
@@ -564,9 +577,7 @@ class WindowShellBridge:
     def _publish_state(self) -> None:
         if self._disposed:
             return
-        if self._backend != "winforms" and not (
-            self._page_loaded or self._window.events.loaded.is_set()
-        ):
+        if self._backend != "winforms" and not self._page_ready():
             return
         state = self.get_window_state()
         mode = state["state"]
@@ -626,7 +637,6 @@ def attach_window_shell(
         bridge.set_window_launch_mode,
     )
 
-    window.events.loaded += bridge._on_page_loaded
     window.events.maximized += bridge._on_maximized
     window.events.minimized += bridge._on_minimized
     window.events.restored += bridge._on_restored

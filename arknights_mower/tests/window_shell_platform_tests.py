@@ -468,7 +468,9 @@ def test_desktop_window_start_failure_opens_the_original_browser_url(
 ):
     fixture = desktop_url_window
     fixture.start.side_effect = RuntimeError("Window startup unavailable")
-    fixture.launch(backend)
+    # 窗口进程用非零退出码报告启动失败，主进程据此提示并允许从托盘重开。
+    with pytest.raises(SystemExit):
+        fixture.launch(backend)
     fixture.create_window.assert_called_once()
     fixture.browser_open.assert_called_once_with(fixture.browser_url)
 
