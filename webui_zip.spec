@@ -3,7 +3,8 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 import sys
 
-import rapidocr_onnxruntime
+import rapidocr
+
 # tinify is optional in the build environment; import safely.
 try:
     import tinify
@@ -16,13 +17,9 @@ SPEC_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.
 if str(SPEC_DIR) not in sys.path:
     sys.path.insert(0, str(SPEC_DIR))
 
-from build_assets import get_pyinstaller_common_datas
+from build_assets import get_pyinstaller_common_datas, get_rapidocr_datas
 
 block_cipher = None
-
-# 参考 https://github.com/RapidAI/RapidOCR/blob/main/ocrweb/rapidocr_web/ocrweb.spec
-package_name = "rapidocr_onnxruntime"
-install_dir = Path(rapidocr_onnxruntime.__file__).resolve().parent
 
 # Include tinify package files so PyInstaller will bundle tinify resources
 # Include Python source and PEM/certificate files used by tinify (e.g. API certs).
@@ -48,24 +45,8 @@ if _tinify_installed:
             dest = "tinify"
         tinify_add_data.append((str(parent / "*.pem"), dest))
 
-onnx_paths = list(install_dir.rglob("*.onnx"))
-yaml_paths = list(install_dir.rglob("*.yaml"))
 
-onnx_add_data = [(str(v.parent), f"{package_name}/{v.parent.name}") for v in onnx_paths]
-
-yaml_add_data = []
-for v in yaml_paths:
-    if package_name == v.parent.name:
-        yaml_add_data.append((str(v.parent / "*.yaml"), package_name))
-    else:
-        yaml_add_data.append(
-            (str(v.parent / "*.yaml"), f"{package_name}/{v.parent.name}")
-        )
-
-add_data = list(set(yaml_add_data + onnx_add_data + tinify_add_data))
-
-
-site_packages = install_dir.parent
+site_packages = Path(rapidocr.__file__).resolve().parent.parent
 
 
 mower_a = Analysis(
@@ -81,9 +62,10 @@ mower_a = Analysis(
         (f"{site_packages}/pyzbar/libzbar-64.dll", "."),
         (f"{site_packages}/pyzbar/libiconv.dll", "."),
     ]
-    + add_data,
+    + get_rapidocr_datas()
+    + tinify_add_data,
     hiddenimports=(
-        ["quickjs", "_quickjs"]
+        ["rapidocr.main", "quickjs", "_quickjs"]
         + (["tinify"] if _tinify_installed else [])
         + collect_submodules("psutil")
         + [

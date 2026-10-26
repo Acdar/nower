@@ -68,7 +68,7 @@ from arknights_mower.solvers.report import ReportSolver
 from arknights_mower.solvers.secret_front import SecretFront
 from arknights_mower.solvers.shop import CreditShop
 from arknights_mower.solvers.skland import SKLand
-from arknights_mower.utils import config, detector, rapidocr, segment
+from arknights_mower.utils import config, detector, rapidocr, round_stop, segment
 from arknights_mower.utils import typealias as tp
 from arknights_mower.utils.calculated_mood import log_mood_calculation
 from arknights_mower.utils.character_recognize import estimate_agent_mood
@@ -147,6 +147,7 @@ from arknights_mower.utils.resting_priority import (
     resting_tier,
 )
 from arknights_mower.utils.scheduler_task import (
+    MAINTENANCE_TASK_TYPES,
     MANUAL_TASK_TYPES,
     SchedulerTask,
     TaskScope,
@@ -594,47 +595,13 @@ class BaseSchedulerSolver(
                 "按非工作状态或心情耗尽处理"
             )
             return datetime.now()
+        if (
+            not isinstance(remaining, (int, float))
+            or not math.isfinite(remaining)
+            or remaining < 0
+        ):
+            raise RecognizeError(f"房间 {room} 第 {index + 1} 槽位倒计时未核实")
         return datetime.now() + timedelta(seconds=remaining)
-
-    def _fractional_work_mood(self, agent, room, index, remaining):
-        """用实际工作倒计时补足心情条未显示的小数，不采用默认消耗速率。"""
-        if (agent.current_room, agent.current_index) != (room, index):
-            return None
-        if getattr(self.op_data, "mood_calculation_enabled", False):
-            from arknights_mower.utils.calculated_mood import sync_model
-
-            model = copy.deepcopy(sync_model(self.op_data, advance_clock=False))
-            model.advance(datetime.now())
-            # 现有技能在 0 与 4 之间没有阈值；0.5 只选择正心情技能，
-            # 不作为观测，也不改变实际模型中的心情。
-            model.moods[agent.name] = 0.5
-            rate = model._rates().get(agent.name)
-        else:
-            rate = (
-                agent.depletion_rate
-                if getattr(agent, "depletion_rate_position", None) == (room, index)
-                and agent.time_stamp is not None
-                and agent.time_stamp <= datetime.now()
-                and isinstance(agent.mood, (int, float))
-                and math.isfinite(agent.mood)
-                and 0 <= agent.mood <= 24
-                and not getattr(agent, "mood_is_prediction", False)
-                else None
-            )
-        if not isinstance(rate, (int, float)) or not math.isfinite(rate) or rate <= 0:
-            return None
-        mood = rate * remaining / 3600
-        return mood if 0 < mood < 1 else None
-
-    def _unconfirmed_work_mood(self, agent):
-        """保留原采样，撤销未核实的工作心情基线；重复观测不增加版本。"""
-        agent.working_mood_unconfirmed = True
-        agent.exhaust_time = None
-        if getattr(self.op_data, "mood_calculation_enabled", False):
-            model = self.op_data.mood_model
-            if agent.name in model.moods:
-                model.moods.pop(agent.name)
-                model.revision += 1
 
     def _task_failure_snapshot(self, task, rooms):
         """失败任务仅由新观测或相关安排变化重新准入，不使用时钟计时。"""
@@ -979,6 +946,53 @@ class BaseSchedulerSolver(
                 task.__dict__.pop("process_recovery_fia_wait", None)
                 logger.info("相关观测或安排已更新，恢复原任务：%s", task)
 
+    def _prepare_manual_maintenance(self, info):
+        """先执行完提前跑单、原班恢复及换人，再暂停或停服。"""
+        windows = [
+            task
+            for task in self.tasks
+            if task.type in MAINTENANCE_TASK_TYPES
+            and task.maintenance_info.announcement_id == info.announcement_id
+        ]
+        if not windows:
+            return True
+        if not any(
+            getattr(task, "maintenance_preparation_pending", False) for task in windows
+        ):
+            scheduling(self.tasks, op_data=self.op_data)
+        pending = any(
+            getattr(task, "maintenance_start", None) == info.start
+            or task.type == TaskTypes.SWAP_SUPPORT
+            and getattr(task, "advance_support_swap", False)
+            and task.time <= info.start
+            for task in self.tasks
+        )
+        has_backup = info.update_type == "major" and any(
+            backup.uses_major_maintenance_condition
+            for backup in getattr(self.op_data, "backup_plans", ())
+        )
+        if has_backup:
+            for task in windows:
+                task.maintenance_preparation_pending = True
+            self.backup_plan_solver()
+            selection = self.op_data.evaluate_backup_selection()
+            pending = pending or (
+                selection.conditions != self.op_data.plan_condition
+                or selection.group_id != self.op_data.backup_group
+                or getattr(self, "maintenance_entry_pending", False)
+                or any(
+                    getattr(task, "backup_shift_active", False)
+                    or task.meta_data == "副表内存收敛"
+                    or getattr(task, "group_shift_expected", {})
+                    or getattr(task, "maintenance_replacement_run", False)
+                    or getattr(task, "maintenance_advance_before_backup", False)
+                    for task in self.tasks
+                )
+            )
+        for task in windows:
+            task.maintenance_preparation_pending = bool(pending)
+        return not pending
+
     def run(self) -> None:
         """
         :param clue_collect: bool, 是否收取线索
@@ -989,6 +1003,14 @@ class BaseSchedulerSolver(
         if config.maintenance_recheck.is_set():
             return
         self._discard_legacy_mood_control_tasks()
+        if any(
+            task.type in MAINTENANCE_TASK_TYPES
+            and task.maintenance_info.active_at(datetime.now())
+            and not getattr(task, "maintenance_preparation_pending", False)
+            for task in self.tasks
+        ):
+            config.maintenance_recheck.set()
+            return
         self.error = False
         self._refresh_observed_recovery_tasks()
         sync_replacement_checks(self)
@@ -1021,6 +1043,9 @@ class BaseSchedulerSolver(
             logger.info(f"出现任务调度情况休息{reschedule_time}秒等待下一个任务开始")
             # 休眠可能被新增任务唤醒；返回后重新排序、选择并检查到期时间。
             self._idle_sleep(reschedule_time)
+        if self.task is not None and self.task.type in MAINTENANCE_TASK_TYPES:
+            config.maintenance_recheck.set()
+            return
         if config.maintenance_recheck.is_set():
             return
         if self.party_time is not None and self.party_time < datetime.now():
@@ -1245,6 +1270,11 @@ class BaseSchedulerSolver(
             for op in members
             if (mood := self.op_data.calculated_mood(op.name, now)) is not None
             and mood <= op.lower_limit
+            and not (
+                op.lower_limit == 0
+                and (end := op.working_zero_deadline(now)) is not None
+                and end > now
+            )
         ]
         if any(
             not getattr(op, "mood_is_prediction", False)
@@ -1282,6 +1312,12 @@ class BaseSchedulerSolver(
                     and item.get("agent") == op.name
                     and isinstance(item.get("mood"), (int, float))
                     and 0 <= item["mood"] <= op.lower_limit
+                    and not (
+                        op.lower_limit == 0
+                        and (end := op.working_zero_deadline(datetime.now()))
+                        is not None
+                        and end > datetime.now()
+                    )
                 ):
                     return True
         deadlines = [
@@ -2079,13 +2115,17 @@ class BaseSchedulerSolver(
                 TaskTypes.SWITCH_PRODUCT,
                 TaskTypes.FIAMMETTA,
             }
-            future_preserved = {
-                TaskTypes.RUN_ORDER,
-                TaskTypes.FURNITURE,
-                TaskTypes.DEPOT,
-                TaskTypes.CLUE,
-                TaskTypes.WORKSHOP,
-            } | MANUAL_TASK_TYPES
+            future_preserved = (
+                {
+                    TaskTypes.RUN_ORDER,
+                    TaskTypes.FURNITURE,
+                    TaskTypes.DEPOT,
+                    TaskTypes.CLUE,
+                    TaskTypes.WORKSHOP,
+                }
+                | MANUAL_TASK_TYPES
+                | MAINTENANCE_TASK_TYPES
+            )
             if any(
                 t.time < now - timedelta(minutes=15)
                 and t.type not in preserved
@@ -2097,6 +2137,8 @@ class BaseSchedulerSolver(
                 and not getattr(t, "execution_failure", None)
                 and not getattr(t, "execution_retained", False)
                 and not getattr(t, "replacement_check", None)
+                and not getattr(t, "maintenance_preparation_pending", False)
+                and getattr(t, "maintenance_start", None) is None
                 for t in self.tasks
             ):
                 logger.info(
@@ -2115,6 +2157,8 @@ class BaseSchedulerSolver(
                     or getattr(t, "execution_failure", None)
                     or getattr(t, "execution_retained", False)
                     or getattr(t, "replacement_check", None)
+                    or getattr(t, "maintenance_preparation_pending", False)
+                    or getattr(t, "maintenance_start", None) is not None
                 ]
                 # #144：清队后补立即空任务——队列只剩远期专精重检时，让下一次
                 # run() 走正常 planned 分支重读心情/换班/跑单，而不是睡到远期任务开始
@@ -3876,17 +3920,10 @@ class BaseSchedulerSolver(
                                     estimates.pop(name, None)
                         else:
                             estimates[name] = (mood, observed_at)
-                            if (
-                                getattr(self.op_data, "mood_calculation_enabled", False)
-                                and name
-                                not in getattr(
-                                    self, "_initial_mood_room_observations", set()
-                                )
-                                and not getattr(
-                                    self.op_data.operators.get(name),
-                                    "working_mood_unconfirmed",
-                                    False,
-                                )
+                            if getattr(
+                                self.op_data, "mood_calculation_enabled", False
+                            ) and name not in getattr(
+                                self, "_initial_mood_room_observations", set()
                             ):
                                 self.op_data.mood_model.observe(name, mood, observed_at)
                     if mood == 24:
@@ -3901,11 +3938,6 @@ class BaseSchedulerSolver(
                             for candidate in agent_list:
                                 if (
                                     candidate not in observed_names
-                                    and not getattr(
-                                        self.op_data.operators.get(candidate),
-                                        "working_mood_unconfirmed",
-                                        False,
-                                    )
                                     and candidate
                                     not in getattr(
                                         self, "_initial_mood_room_observations", set()
@@ -5508,8 +5540,6 @@ class BaseSchedulerSolver(
                 or not op.is_high()
                 or op.current_room not in base_room_list
             ):
-                continue
-            if getattr(op, "working_mood_unconfirmed", False):
                 continue
             if getattr(
                 self.op_data, "mood_calculation_enabled", False
@@ -13112,7 +13142,6 @@ class BaseSchedulerSolver(
             # 如果房间不为空
             update_time = False
             working_time = None
-            fractional_work_mood = False
             if _name != "":
                 if _name not in self.op_data.operators.keys() and _name in agent_list:
                     self.op_data.add(Operator(_name, ""))
@@ -13121,7 +13150,6 @@ class BaseSchedulerSolver(
                 previous_position = (agent.current_room, agent.current_index)
                 should_read_mood = (
                     force_mood
-                    or getattr(agent, "working_mood_unconfirmed", False)
                     or self.op_data.operators[_name].need_to_refresh(r=room)
                     or (self.tasks and self.tasks[0].type == TaskTypes.SHIFT_ON)
                     or i in read_time_index
@@ -13181,47 +13209,7 @@ class BaseSchedulerSolver(
                         or room.startswith("room_")
                     )
                 ):
-                    remaining = self.read_time(time_p[i], None)
-                    read_at = datetime.now()
-                    if (
-                        isinstance(remaining, (int, float))
-                        and math.isfinite(remaining)
-                        and remaining > 0
-                    ):
-                        working_time = read_at + timedelta(seconds=remaining)
-                        _mood = BaseSchedulerSolver._fractional_work_mood(
-                            self, agent, room, i, remaining
-                        )
-                        fractional_work_mood = _mood is not None
-                    elif remaining is None or remaining == 0:
-                        # 耗尽后游戏不显示倒计时；复核房间、姓名与零心情，
-                        # 不将未核实的空倒计时单独作为耗尽依据。
-                        self.recog.update()
-                        confirmed_zero = (
-                            not self.find("connecting")
-                            and self.find("room_detail") is not None
-                            and self.detect_room() == room
-                            and self.read_screen(
-                                cropimg(self.recog.gray, name_p[i]), type="name"
-                            )
-                            == _name
-                            and self.read_accurate_mood(
-                                cropimg(self.recog.gray, mood_p[i])
-                            )
-                            == 0
-                        )
-                        _mood = 0 if confirmed_zero else None
-                        if confirmed_zero:
-                            working_time = read_at
-                    else:
-                        _mood = None
-                    if _mood is None:
-                        BaseSchedulerSolver._unconfirmed_work_mood(self, agent)
-                        if strict_observation:
-                            raise RecognizeError(
-                                f"房间 {room} 第 {i + 1} 槽位零心情与工作倒计时未核实"
-                            )
-                        _mood, update_time = -1, False
+                    working_time = self.read_operator_time(room, i, time_p[i])
                 # 估算值只用于本次读数，保留与原采样时间配对的心情，避免重复扣减。
                 sample_mood = _mood if update_time else agent.mood
                 if training_observation is not None:
@@ -13273,11 +13261,13 @@ class BaseSchedulerSolver(
                         room.startswith("dorm") or agent.current_room.startswith("dorm")
                     )
                 )
-                # 倒计时补足的读数也不反过来作为实测下降更新消耗速率。
-                if charge_transition or fractional_work_mood:
+                if charge_transition:
                     record_kwargs["preserve_depletion_rate"] = True
                 record_kwargs.update(recovery_context)
                 high_no_time = self.op_data.update_detail(*update_args, **record_kwargs)
+                if working_time is not None:
+                    agent.exhaust_time = working_time
+                    data["time"] = working_time
                 BaseSchedulerSolver._record_dorm_admission(
                     self, _name, room, i, previous_position
                 )
@@ -14979,6 +14969,8 @@ class BaseSchedulerSolver(
                         restore_task.maintenance_advance_before_backup = True
                     if getattr(self.task, "maintenance_replacement_run", False):
                         restore_task.maintenance_replacement_run = True
+                    if hasattr(self.task, "maintenance_start"):
+                        restore_task.maintenance_start = self.task.maintenance_start
                     self.tasks.append(restore_task)
                     self.skip()
                 if missed_order:
@@ -16688,10 +16680,23 @@ class BaseSchedulerSolver(
             self.device = device
             self.recog.device = device
 
-    def _idle_sleep(self, remaining_time, allow_wakeup=True):
+    def _stop_after_round(self, body=""):
+        if not round_stop.finish_if_requested():
+            return
+        message = "本轮任务结束，已按要求停止"
+        logger.info(message)
+        try:
+            send_message(body or message, message)
+        except Exception:
+            logger.exception("发送本轮结束停止通知失败")
+        raise MowerExit
+
+    def _idle_sleep(
+        self, remaining_time, allow_wakeup=True, *, round_end=False, cancelled=None
+    ):
         """等待任务并统一维护 `sleeping` 与连续场景观测边界。
 
-        普通等待响应调度器唤醒；维护等待仅响应停止信号。
+        普通等待响应调度器唤醒；维护等待响应停止或当前暂停的明确取消。
         成功恢复时清理标准画面帧、场景和计时；设备恢复失败时保留待完成的识别复位。
         主循环成功恢复设备后完成复位；取消与错误始终复位 `sleeping`。
         """
@@ -16704,6 +16709,10 @@ class BaseSchedulerSolver(
         try:
             end_time = datetime.now() + timedelta(seconds=remaining_time)
             while datetime.now() < end_time:
+                if cancelled is not None and cancelled():
+                    break
+                if round_end:
+                    self._stop_after_round()
                 refresh_resource_at_boundary()
                 if allow_wakeup and config.wake_scheduler.is_set():
                     config.wake_scheduler.clear()
@@ -16711,6 +16720,8 @@ class BaseSchedulerSolver(
                 csleep(min(1, (end_time - datetime.now()).total_seconds()))
             if config.stop_mower.is_set():
                 raise MowerExit
+            if round_end:
+                self._stop_after_round()
             self._idle_observation_pending = True
             if restoration_failures is not None:
                 self._idle_run_order_restoration_failures = restoration_failures
@@ -16786,6 +16797,7 @@ class BaseSchedulerSolver(
         protect_priority_tasks(self.tasks, op_data=getattr(self, "op_data", None))
         first = self.find_next_task()
         if first is None:
+            self._stop_after_round()
             return
         remaining_time = (first.time - datetime.now()).total_seconds()
         if remaining_time <= 0:
@@ -16808,19 +16820,20 @@ class BaseSchedulerSolver(
         )
         context = f"下一次任务:{first.plan if len(first.plan) != 0 else '空任务' if first.type == '' else first.type}"
         logger.info(context)
-        logger.info(subject)
         self.task_count += 1
         logger.info(f"第{self.task_count}次任务结束")
         body = task_template.render(
             tasks=[obj.format(timezone_offset) for obj in self.tasks],
             base_scheduler=self,
         )
+        self._stop_after_round(body)
+        logger.info(subject)
         send_message(
             body,
             f"休息 {format_time(remaining_time)}，到{first.format(timezone_offset).time.strftime('%H:%M:%S')}开始工作",
         )
         if remaining_time > 0:
-            self._idle_sleep(remaining_time)
+            self._idle_sleep(remaining_time, round_end=True)
             self.check_current_focus()
 
     def handle_idle_action(self, remaining_time=0):
