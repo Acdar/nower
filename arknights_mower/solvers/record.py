@@ -6,7 +6,7 @@ import pickle
 import sqlite3
 import traceback
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from threading import Event, Lock
 
 import pytz
@@ -112,6 +112,12 @@ def _ensure_tables(conn):
                 )
         conn.execute(
             'CREATE INDEX IF NOT EXISTS agent_action_name_time ON agent_action(name, "current_time")'
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS agent_action_mood_directory "
+            'ON agent_action(name, "current_time", mood) '
+            "WHERE name IS NOT NULL AND TRIM(name) <> '' "
+            'AND mood IS NOT NULL AND "current_time" IS NOT NULL'
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS agent_action_working_time "
@@ -264,12 +270,19 @@ def current_state():
     ):
         return None
     data, tasks = base_scheduler.op_data, base_scheduler.tasks
+    if any(getattr(task, "mood_control_event", None) for task in tasks):
+        tasks = [
+            task for task in tasks if not getattr(task, "mood_control_event", None)
+        ]
     return {
         "dorm": data.all_dorms(),
         "tasks": tasks,
         "waiting_group_shifts": getattr(base_scheduler, "waiting_group_shifts", []),
         "party_time": data.party_time,
         "operators": data.operators,
+        "calculated_mood": copy.deepcopy(vars(data.mood_model))
+        if getattr(data, "mood_model", None) is not None
+        else None,
         "facility_states": getattr(data, "facility_states", {}),
         "room_observations": getattr(data, "room_observations", {}),
         "recall_recovery_rates": copy.deepcopy(
@@ -309,6 +322,10 @@ def current_state():
         "daily_report": base_scheduler.daily_report,
         "daily_skland": base_scheduler.daily_skland,
         "daily_mail": base_scheduler.daily_mail,
+        "daily_event_sign_in": getattr(base_scheduler, "daily_event_sign_in", date.min),
+        "daily_event_sign_in_attempt": getattr(
+            base_scheduler, "daily_event_sign_in_attempt", None
+        ),
         "task_count": base_scheduler.task_count,
     }
 
@@ -335,6 +352,16 @@ def save_state_to_db(saved_state):
 
     current_time = datetime.now()
 
+    # 运行引用不写进 pickle，旧版本仍能读取实际驻员及未完成任务。
+    persisted = dict(saved_state)
+    if "operators" in persisted:
+        persisted["operators"] = {}
+        for name, operator in saved_state["operators"].items():
+            detached = copy.copy(operator)
+            detached.__dict__.pop("_mood_model", None)
+            detached.__dict__.pop("_mood_conf", None)
+            persisted["operators"][name] = detached
+
     try:
         with _conn() as connection:
             cursor = connection.cursor()
@@ -343,7 +370,7 @@ def save_state_to_db(saved_state):
                 "INSERT INTO saved_state VALUES (?, ?)",
                 (
                     str(current_time),
-                    sqlite3.Binary(pickle.dumps(saved_state)),
+                    sqlite3.Binary(pickle.dumps(persisted)),
                 ),
             )
             connection.commit()

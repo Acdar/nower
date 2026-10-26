@@ -10,6 +10,7 @@ from typing import Any, Literal, overload
 from evalidate import EvalModel, ExecutionException, Expr, base_eval_model
 
 from arknights_mower.utils import config
+from arknights_mower.utils.calculated_mood import measure_mood_calculation
 from arknights_mower.utils.config.plan_advanced import export_advanced_settings
 from arknights_mower.utils.manufacture_product import (
     MANUFACTURE_PRODUCTS,
@@ -358,8 +359,16 @@ class Operators:
     current_room_changed_callback = None
     first_init = True
 
-    def __init__(self, plan, *, runtime_conf=None):
+    def __init__(self, plan, *, runtime_conf=None, facility_levels=None):
         self.runtime_conf = runtime_conf
+        self.facility_levels = copy.deepcopy(
+            facility_levels
+            if facility_levels is not None
+            else getattr(config.plan, "facility_levels", {})
+        )
+        from arknights_mower.utils.calculated_mood import CalculatedMood
+
+        self.mood_model = CalculatedMood()
         self.operators = {}
         self.groups = {}
         self.group_shift_state = {}
@@ -534,6 +543,9 @@ class Operators:
         for name in self.config.operator_mood_limits:
             if name not in agent_list:
                 return f"心情上下限中的干员名无效：{name}"
+        for name in self.config.free_room_exclusions:
+            if name and name not in agent_list:
+                return f"宿舍保留中的干员名无效：{name}"
         saved_dorms = copy.deepcopy(self.all_dorms()) if (update) else []
         self.displaced_dorms = []
         self.groups = {}
@@ -723,6 +735,9 @@ class Operators:
                 ):
                     self.dorm.append(Dormitory((dorm, index)))
                     added.append(key)
+        for name in self.config.free_room_exclusions:
+            if name and name not in self.operators:
+                self.add(Operator(name, ""))
         if update:
             for key, value in self.shadow_copy.items():
                 if key not in self.operators:
@@ -859,6 +874,61 @@ class Operators:
             )
         self._dorm_skill_generation = dorm_skills.resource_generation
 
+    @property
+    def mood_calculation_enabled(self):
+        conf = getattr(self, "runtime_conf", None) or config.conf
+        enabled = bool(getattr(conf, "test_mood_calculation", False))
+        if hasattr(self, "mood_model"):
+            self.mood_model.enabled = enabled
+        return enabled
+
+    @measure_mood_calculation
+    def calculated_mood(self, name, now=None):
+        if getattr(self.operators.get(name), "working_mood_unconfirmed", False):
+            return None
+        if not self.mood_calculation_enabled:
+            return None
+        from arknights_mower.utils.calculated_mood import sync_model
+
+        return sync_model(
+            self, getattr(self, "_projection_now", None), advance_clock=False
+        ).value(name, now or getattr(self, "_projection_now", None))
+
+    @measure_mood_calculation
+    def calculated_mood_rate(self, name, now=None):
+        if not self.mood_calculation_enabled:
+            return None
+        from arknights_mower.utils.calculated_mood import sync_model
+
+        now = now or getattr(self, "_projection_now", None)
+        model = sync_model(self, getattr(self, "_projection_now", None))
+        if now is not None:
+            model = copy.deepcopy(model)
+            model.advance(now)
+        return model._rates().get(name) if name in model.moods else None
+
+    @measure_mood_calculation
+    def calculated_mood_deadline(self, name, target, now=None, max_hours=240):
+        if getattr(self.operators.get(name), "working_mood_unconfirmed", False):
+            return None
+        if not self.mood_calculation_enabled:
+            return None
+        from arknights_mower.utils.calculated_mood import sync_model
+
+        now = now or getattr(self, "_projection_now", None)
+        model = sync_model(
+            self, getattr(self, "_projection_now", None), advance_clock=False
+        )
+        cached = getattr(self, "_projection_deadlines", None)
+        key = (name, target, max_hours)
+        if cached is not None and key in cached:
+            due = cached[key]
+            return max(now, due) if due is not None and now is not None else due
+        due = model.deadline(name, target, now, max_hours)
+        if cached is not None:
+            cached[key] = due
+        return due
+
     def set_mood_limit(self, name, upper_limit=24, lower_limit=0):
         if name in self.operators and self.is_planned_operator(name):
             self.operators[name].upper_limit = upper_limit
@@ -902,12 +972,11 @@ class Operators:
         )
 
     def is_free_room_excluded(self, name):
-        """名单内入住者不被清退或接管床位；达到个人上限仍须离宿。"""
+        """宿舍保留禁止自动清退为空闲，不限制换床或合法工作安排。"""
         return (
             (bool(name))
             and name in getattr(self.config, "free_room_exclusions", ())
             and resting_tier(self, name) != RestingTier.EXCLUDED
-            and not self.rest_mood_complete(name)
         )
 
     def stop_idle_dorm_search(self, now=None):
@@ -1101,21 +1170,32 @@ class Operators:
                 "中级作战记录": 1000,
                 "高级作战记录": 2000,
             }
-            counts = get_inventory_counts(list(experience_values))
+            counts = getattr(self, "_projection_inventory", None)
+            if counts is None:
+                counts = get_inventory_counts(list(experience_values))
             return sum(
                 counts.get(name, 0) * value for name, value in experience_values.items()
             )
         allowed_items = {"赤金", "源石碎片", "固源岩", "装置", "龙门币"}
         if item_name not in allowed_items:
             raise ValueError(f"不支持的副表仓库资源：{item_name}")
-        return get_inventory_counts([item_name]).get(item_name, 0)
+        counts = getattr(self, "_projection_inventory", None)
+        if counts is None:
+            counts = get_inventory_counts([item_name])
+        return counts.get(item_name, 0)
 
     def major_maintenance_remaining_hours(self) -> float:
         """返回停服大更新开始前的小时数；已停服时条件不成立。"""
-        info = NewsChecker.get_maintenance()
+        info = (
+            self._projection_maintenance
+            if hasattr(self, "_projection_maintenance")
+            else NewsChecker.get_maintenance()
+        )
         if info is None or info.update_type != "major" or info.is_flash_update:
             return float("inf")
-        hours = (info.start - datetime.now()).total_seconds() / 3600
+        hours = (
+            info.start - (getattr(self, "_projection_now", None) or datetime.now())
+        ).total_seconds() / 3600
         return hours if hours > 0 else float("inf")
 
     def next_major_maintenance_check(self, now=None):
@@ -1755,7 +1835,7 @@ class Operators:
         if update_time:
             from arknights_mower.utils.recall_estimates import observe_work_rate
 
-            observe_work_rate(
+            learned_rate = observe_work_rate(
                 agent,
                 mood,
                 current_room,
@@ -1764,23 +1844,12 @@ class Operators:
                 preserve=preserve_depletion_rate,
             )
             agent.mood_is_prediction = False
-            if (
-                not preserve_depletion_rate
-                and agent.time_stamp is not None
-                and agent.mood > mood
-            ):
-                time_difference = datetime.now() - agent.time_stamp
-                if time_difference > timedelta(minutes=29):
-                    logger.debug("开始计算心情掉率")
-                    logger.debug(
-                        f"当前心情：{mood},上次{agent.mood},上次时间{agent.time_stamp}"
-                    )
-                    agent.depletion_rate = (
-                        (agent.mood - mood) * 3600 / time_difference.total_seconds()
-                    )
-                    logger.debug(
-                        f"更新 {agent.name} 心情掉率为：{agent.depletion_rate}"
-                    )
+            agent.working_mood_unconfirmed = False
+            agent.work_rate_sample_eligible = not preserve_depletion_rate
+            if learned_rate is not None:
+                agent.depletion_rate = learned_rate
+                agent.depletion_rate_position = (current_room, current_index)
+                logger.debug(f"更新 {agent.name} 心情掉率为：{agent.depletion_rate}")
             agent.time_stamp = datetime.now()
         from_dorm = agent.current_room.startswith("dorm")
         to_dorm = current_room.startswith("dorm")
@@ -1801,6 +1870,12 @@ class Operators:
         agent.current_room = current_room
         agent.current_index = current_index
         agent.mood = mood
+        if self.mood_calculation_enabled:
+            if current_room == "train":
+                agent.depletion_rate = 0
+            self.mood_model.move(name, current_room, current_index)
+            if update_time:
+                self.mood_model.observe(name, mood)
         if returned_to_post and not to_dorm and not preserve_depletion_rate:
             # 实际回班结束本人的本轮恢复；临时换组后离岗不能重新加入旧等待。
             for group, names in self.group_recovery_full_members.items():
@@ -1934,7 +2009,11 @@ class Operators:
                     dorm.name = ""
                     dorm.time = None
                 else:
-                    if dorm.time is not None and dorm.time < datetime.now():
+                    if (
+                        not self.mood_calculation_enabled
+                        and dorm.time is not None
+                        and dorm.time < datetime.now()
+                    ):
                         if (op.time_stamp is not None) and op.mood >= op.upper_limit:
                             # 全体上限不是实际心情封顶，保留已读到的较高心情及读数时间。
                             op.depletion_rate = 0
@@ -2023,13 +2102,26 @@ class Operators:
             operator.mood = exist.mood
             operator.time_stamp = exist.time_stamp
             operator.mood_is_prediction = getattr(exist, "mood_is_prediction", False)
+            operator.working_mood_unconfirmed = getattr(
+                exist, "working_mood_unconfirmed", False
+            )
             operator.depletion_rate = exist.depletion_rate
+            operator.depletion_rate_position = getattr(
+                exist, "depletion_rate_position", None
+            )
+            operator.work_rate_sample_eligible = getattr(
+                exist, "work_rate_sample_eligible", True
+            )
             operator.recall_work_rate = getattr(exist, "recall_work_rate", None)
             operator.recall_work_rate_checked = getattr(
                 exist, "recall_work_rate_checked", False
             )
-            operator.current_room = exist.current_room
-            operator.current_index = exist.current_index
+            if getattr(self, "_projection_now", None) is not None:
+                operator._current_room = exist.current_room
+                operator.__dict__["current_index"] = exist.current_index
+            else:
+                operator.current_room = exist.current_room
+                operator.current_index = exist.current_index
             operator.dorm_position_version = getattr(exist, "dorm_position_version", 0)
             operator.dorm_recovery_room = getattr(exist, "dorm_recovery_room", "")
             operator.dorm_recovery_index = getattr(exist, "dorm_recovery_index", -1)
@@ -2049,6 +2141,13 @@ class Operators:
                 exist, "individual_return_window", None
             )
         self.operators[operator.name] = operator
+        if self.mood_calculation_enabled:
+            operator._mood_model = self.mood_model
+            operator._mood_conf = self.runtime_conf or config.conf
+            operator._projection_now = getattr(self, "_projection_now", None)
+            operator._projection_deadlines = getattr(
+                self, "_projection_deadlines", None
+            )
         self.apply_custom_mood_limits(operator)
         self.apply_ling_xi_mood_limits()
         # 需要用尽心情干员逻辑
@@ -2271,17 +2370,25 @@ class Operators:
                 count += 1
         return count
 
-    def project_arrangements(self, plans):
+    def project_arrangements(self, plans, *, now=None, runtime_conf=None):
         """按执行顺序推演排班后的驻员和恢复床位，不产生实际换人副作用。
 
         阵容未变的宿舍保留恢复时间；受影响宿舍等待最终阵容实读。
         产物切换和回班规划共用这一份位置语义，不能只改工位而留下旧床位。
         """
         projected = copy.copy(self)
+        projected.runtime_conf = runtime_conf or self.runtime_conf or config.conf
+        projected._projection_now = now or getattr(self, "_projection_now", None)
         projected.recall_recovery_rates = dict(
             getattr(self, "recall_recovery_rates", {})
         )
-        projected.operators = copy.deepcopy(self.operators)
+        memo = {}
+        if self.mood_calculation_enabled:
+            projected.mood_model = copy.deepcopy(self.mood_model, memo)
+        projected.operators = copy.deepcopy(self.operators, memo)
+        if self.mood_calculation_enabled:
+            for op in projected.operators.values():
+                op._mood_model = projected.mood_model
         projected.groups = copy.deepcopy(self.groups)
         projected.group_shift_state = dict(self.group_shift_state)
         projected.group_recovery_full_members = copy.deepcopy(
@@ -2295,8 +2402,23 @@ class Operators:
         )
         projected.dorm = copy.deepcopy(self.dorm)
         projected.group_dorm = copy.deepcopy(getattr(self, "group_dorm", []))
+        projected._apply_projected_arrangements(plans, now=projected._projection_now)
+        return projected
+
+    def _apply_projected_arrangements(self, plans, *, now=None):
+        """仅在调用方独占的隔离副本上推进驻员和床位，不再复制副本。"""
+        self._projection_now = now or getattr(self, "_projection_now", None)
+        now = self._projection_now or datetime.now()
+        if self.mood_calculation_enabled:
+            self.mood_model.advance(now)
+        if getattr(self, "_projection_now", None) is not None:
+            self._projection_deadlines = {}
         for plan in plans:
-            projected.commit_group_shifts(projected.arrangement_group_transitions(plan))
+            previous_positions = {
+                name: (op.current_room, op.current_index)
+                for name, op in self.operators.items()
+            }
+            self.commit_group_shifts(self.arrangement_group_transitions(plan))
             changed_slots = {
                 (room, index)
                 for room, names in plan.items()
@@ -2305,7 +2427,7 @@ class Operators:
                 and (
                     (
                         occupant.name
-                        if (occupant := projected.get_current_operator(room, index))
+                        if (occupant := self.get_current_operator(room, index))
                         is not None
                         else ""
                     )
@@ -2319,39 +2441,38 @@ class Operators:
                 op.current_room
                 for room, names in plan.items()
                 for index, name in enumerate(names)
-                if (op := projected.operators.get(name)) is not None
+                if (op := self.operators.get(name)) is not None
                 and op.current_room.startswith("dorm")
                 and (op.current_room, op.current_index) != (room, index)
             )
             recovery_times = {
                 bed.name: (bed.position, bed.time)
-                for bed in projected.all_dorms()
+                for bed in self.all_dorms()
                 if bed.name
             }
-            for op in projected.operators.values():
+            for op in self.operators.values():
                 if (op.current_room, op.current_index) in changed_slots:
-                    op._current_room, op.current_index = "", -1
+                    op._current_room = ""
+                    op.__dict__["current_index"] = -1
             for room, names in plan.items():
                 for index, name in enumerate(names):
-                    if name in projected.operators:
-                        op = projected.operators[name]
-                        # 不触发 current_room 的通知／记账回调；跨房移动
-                        # 即使槽位编号不变，也使原单回确认失效。
-                        if op.current_room != room:
-                            op.clear_dorm_recovery()
-                            op.dorm_position_version = (
-                                getattr(op, "dorm_position_version", 0) + 1
-                            )
-                        op._current_room, op.current_index = room, index
+                    if name in self.operators:
+                        op = self.operators[name]
+                        # 投影统一在末尾同步模型，不能通过属性通知推进真实时钟。
+                        op._current_room = room
+                        op.__dict__["current_index"] = index
                         op.rest_mood_release_limit = None
-            for op in projected.operators.values():
+            for op in self.operators.values():
+                if previous_positions[op.name] != (op.current_room, op.current_index):
+                    op.clear_dorm_recovery()
+                    op.dorm_position_version = (
+                        getattr(op, "dorm_position_version", 0) + 1
+                    )
                 if not op.is_resting():
                     op.temporary_dorm_fill = False
-            for bed in projected.all_dorms():
-                occupant = projected.get_current_operator(*bed.position)
-                if occupant is not None and projected.is_recovery_dorm(
-                    bed, occupant.name
-                ):
+            for bed in self.all_dorms():
+                occupant = self.get_current_operator(*bed.position)
+                if occupant is not None and self.is_recovery_dorm(bed, occupant.name):
                     bed.name = occupant.name
                     old_position, old_time = recovery_times.get(
                         occupant.name, (None, None)
@@ -2364,7 +2485,14 @@ class Operators:
                     )
                 else:
                     bed.reset()
-        return projected
+
+        if self.mood_calculation_enabled:
+            from arknights_mower.utils.calculated_mood import sync_model
+
+            sync_model(self, max(now, self.mood_model.at or datetime.min))
+            for op in self.operators.values():
+                op._projection_now = self._projection_now
+                op._projection_deadlines = getattr(self, "_projection_deadlines", None)
 
     def all_dorms(self):
         """返回动态床位与只供配置内同组工作替班恢复的固定床位。"""
@@ -2460,7 +2588,7 @@ class Operators:
             and not (operator.room.startswith("dorm") and self.rest_mood_complete(name))
         ]
         if not operator.room.startswith("dorm") and operator.name != "菲亚梅塔":
-            now = datetime.now()
+            now = getattr(self, "_projection_now", None) or datetime.now()
 
             def exhausted_last(name):
                 return (self.replacement_exhausted(name, now, operator=operator),)
@@ -2475,7 +2603,7 @@ class Operators:
             or operator.name == "菲亚梅塔"
         ):
             return candidates
-        now = datetime.now()
+        now = getattr(self, "_projection_now", None) or datetime.now()
 
         def mood_order(name):
             candidate = self.operators.get(name)
@@ -2504,7 +2632,10 @@ class Operators:
                 and (not v.group or self.is_group_shift_anchor(v))
                 and not self.is_standby(k)
             ):
-                current_mood += v.current_mood() - v.lower_limit
+                mood = v.current_mood()
+                if not isinstance(mood, (int, float)) or not 0 <= mood <= 24:
+                    continue
+                current_mood += mood - v.lower_limit
                 total_mood += v.upper_limit - v.lower_limit
                 count += 1
         if total_mood == 0:
@@ -2835,7 +2966,7 @@ class Operators:
         from arknights_mower.utils.dorm_recovery import single_recovery_bed_cost
         from arknights_mower.utils.dorm_skills import is_single_recovery_manager
 
-        if self.rest_mood_complete(name):
+        if self.rest_mood_complete(name) and not self.is_free_room_excluded(name):
             return None
         if resting_tier(self, name) == RestingTier.EXCLUDED:
             return None
@@ -2860,7 +2991,7 @@ class Operators:
                 plan=plan,
             )
         ]
-        now = datetime.now()
+        now = getattr(self, "_projection_now", None) or datetime.now()
         compatible_beds = [
             self.dorm[index]
             for index in order
@@ -2943,15 +3074,23 @@ class Operators:
         self, names, active_groups=None, plan=None, *, reserved_slots=()
     ):
         """先保障必需床位；候补有床则休息，无床则随组离岗待命。"""
-        # 达到个人上限后随组离岗即可，不再占床恢复。
-        names = [name for name in names if not self.rest_mood_complete(name)]
+        # 保留干员随组离岗仍须有床；上限完成不能授权将其安排为空闲。
+        names = [
+            name
+            for name in names
+            if not self.rest_mood_complete(name) or self.is_free_room_excluded(name)
+        ]
         used = {
             index
             for index, bed in enumerate(self.dorm)
             if bed.position in reserved_slots
         }
         assignments = []
-        optional = self.standby_candidates(names)
+        optional = {
+            name
+            for name in self.standby_candidates(names)
+            if not self.is_free_room_excluded(name)
+        }
         ordered_names = sorted(
             names,
             key=lambda name: (
@@ -3228,8 +3367,11 @@ class Operator:
         self.current_index = current_index
         self.lower_limit = lower_limit
         self.depletion_rate = depletion_rate
+        self.depletion_rate_position = None
+        self.work_rate_sample_eligible = True
         self.time_stamp = time_stamp
         self.mood_is_prediction = False
+        self.working_mood_unconfirmed = False
         self.workaholic = False
         self.arrange_order = ["技能", "false"]
         self.exhaust_time = None
@@ -3263,6 +3405,15 @@ class Operator:
     @current_room.setter
     def current_room(self, value):
         if self._current_room != value:
+            model = getattr(self, "_mood_model", None)
+            if (
+                model is not None
+                and model.enabled
+                and getattr(
+                    getattr(self, "_mood_conf", None), "test_mood_calculation", False
+                )
+            ):
+                model.move(self.name, value or "", self.current_index)
             self.dorm_position_version = getattr(self, "dorm_position_version", 0) + 1
             was_working = self.is_working()
             self.idle_rest_check = None
@@ -3294,6 +3445,15 @@ class Operator:
     @current_index.setter
     def current_index(self, value):
         if self.current_index != value:
+            model = getattr(self, "_mood_model", None)
+            if (
+                model is not None
+                and model.enabled
+                and getattr(
+                    getattr(self, "_mood_conf", None), "test_mood_calculation", False
+                )
+            ):
+                model.move(self.name, self.current_room or "", value)
             self.dorm_position_version = getattr(self, "dorm_position_version", 0) + 1
             self.clear_dorm_recovery()
         self.__dict__["current_index"] = value
@@ -3329,6 +3489,25 @@ class Operator:
             return True
 
     def not_valid(self):
+        model = getattr(self, "_mood_model", None)
+        if (
+            model is not None
+            and model.enabled
+            and getattr(
+                getattr(self, "_mood_conf", None), "test_mood_calculation", False
+            )
+        ):
+            if self.operator_type != "high":
+                return False
+            if (
+                not self.workaholic
+                and not self.room.startswith("dorm")
+                and self.is_resting()
+            ):
+                return (
+                    self.current_mood() < 0 or self.current_mood() >= self.upper_limit
+                )
+            return self.current_room != self.room or self.index != self.current_index
         if self.operator_type == "high":
             if self.workaholic:
                 return (
@@ -3349,6 +3528,20 @@ class Operator:
         return False
 
     def current_mood(self, time=None):
+        if getattr(self, "working_mood_unconfirmed", False):
+            return -1
+        time = time or getattr(self, "_projection_now", None)
+        model = getattr(self, "_mood_model", None)
+        if (
+            model is not None
+            and model.enabled
+            and getattr(
+                getattr(self, "_mood_conf", None), "test_mood_calculation", False
+            )
+            and self.current_room != "train"
+        ):
+            value = model.value(self.name, time)
+            return value if value is not None else -1
         if not time:
             time = datetime.now()
         predict = self.mood
@@ -3371,9 +3564,32 @@ class Operator:
             )
         return max(now, zero_time)
 
-    def predict_exhaust(self):
+    def predict_exhaust(self, now=None):
         if self.workaholic or self.exhaust_require or self.room in ["factory", "train"]:
             return datetime.now() + timedelta(hours=24)
+        model = getattr(self, "_mood_model", None)
+        if (
+            model is not None
+            and model.enabled
+            and getattr(
+                getattr(self, "_mood_conf", None), "test_mood_calculation", False
+            )
+            and self.room not in ("factory", "train")
+        ):
+            now = now or getattr(self, "_projection_now", None) or datetime.now()
+            cached = getattr(self, "_projection_deadlines", None)
+            key = (self.name, self.lower_limit, 240)
+            if cached is not None and key in cached:
+                deadline = cached[key]
+            else:
+                deadline = model.deadline(self.name, self.lower_limit, now)
+                if cached is not None:
+                    cached[key] = deadline
+            return (
+                max(now, deadline - timedelta(minutes=30))
+                if deadline
+                else now + timedelta(hours=24)
+            )
         remaining_mood = self.mood - self.lower_limit  # 剩余心情
         depletion_rate = self.depletion_rate  # 心情掉率，小时单位
         # 计算到心情归零所需时间（小时），再加上当前时间戳

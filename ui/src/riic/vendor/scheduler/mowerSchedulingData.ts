@@ -1,4 +1,4 @@
-import {mowerDormCandidateMood} from './mowerAlphaCandidates'
+import {mowerDormCandidateMood} from './mowerSchedulingMood'
 import {isTradeRunOrderOperator} from '../domain/shiftRunPolicy'
 import {mowerRestingBindingGroups,mowerSharedReplacements,mowerSameGroupPrimaryReplacement} from './mowerSharedGroups'
 // Decision state for the pinned Mower port. Reservations do not imply physical occupancy.
@@ -126,7 +126,7 @@ export class MowerSchedulingData {
  allDorms():MowerDormState[]{return [...this.dorms,...this.groupDorms]}
  recoveryDorm(bed:MowerDormState,name:string):boolean {if(this.groupDorms.includes(bed)){const owner=this.operators[this.plan[bed.position[0]]?.[bed.position[1]]??''],cover=this.operators[name];if(!owner||!cover||cover.room.startsWith('dorm'))return false;const groups=owner.multiGroup?mowerRestingBindingGroups(this,owner,this.pendingGroupTransitions):[owner.group];if(owner.multiGroup&&!groups.length)groups.push(owner.group);return !mowerSharedReplacements(owner,groups).includes('Free')&&groups.some(group=>mowerSameGroupPrimaryReplacement(this,owner,name,group))}if(!this.dorms.includes(bed))return false;const [room,index]=bed.position,native=this.plan[room]?.[index];return native==='Free'||bed.autoFree&&name!==native&&(!this.operators[native??'']?.multiGroup||this.effectiveFreeSlot(bed))}
  restMoodComplete(name:string):boolean {const op=this.operators[name],mood=mowerDormCandidateMood(this,name);return !!op&&op.restMoodLimit&&mood!==undefined&&(mood>=op.upperLimit||this.alpha&&!op.currentRoom&&op.restMoodReleaseLimit===op.upperLimit)}
- freeRoomExcluded(name:string):boolean {const op=this.operators[name];return this.alpha&&this.freeRoom&&this.freeRoomExclusions.includes(name)&&!!op&&!op.workaholic&&!this.freeBlacklist.includes(name)&&!this.restMoodComplete(name)}
+ freeRoomExcluded(name:string):boolean {const op=this.operators[name];return this.alpha&&this.freeRoomExclusions.includes(name)&&!!op&&!op.workaholic&&!this.freeBlacklist.includes(name)}
  replacementExhausted(name:string,owner?:MowerOperatorState):boolean{
   const op=this.operators[name]
   if(op?.workaholic||owner?.room.startsWith('dorm'))return false
@@ -136,10 +136,6 @@ export class MowerSchedulingData {
    if(ordinary.size===1&&ordinary.has(name))return false
   }
   return !!op&&hasRestingMood(op,this.nowMicros)&&restingMood(op,this.nowMicros)<=op.lowerLimit
- }
- updateStandbyLowPriority(op:MowerOperatorState,returnedToPost=false):void {
-  if(!this.standbyNames.includes(op.name)||returnedToPost)op.standbyLowPriority=false
-  else if(restingMood(op,this.nowMicros)<op.lowerLimit+(op.upperLimit-op.lowerLimit)*this.policy.restingThreshold*this.policy.rescueThreshold)op.standbyLowPriority=true
  }
  idleRestChecked(name:string):boolean {const op=this.operators[name],checked=op?.idleRestCheck;return !!op&&!op.currentRoom&&!!checked&&checked[0]>=op.upperLimit&&checked[1]===op.mood&&checked[2]===op.timeStampMicros}
  stopIdleDormSearch():void {if(!this.idleDormSearchExhausted){this.idleDormSearchExhausted=true;this.idleDormSearchStoppedAtMicros=this.nowMicros}}

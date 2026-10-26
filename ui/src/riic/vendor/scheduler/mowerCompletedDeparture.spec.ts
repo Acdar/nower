@@ -72,7 +72,7 @@ describe('confirmed ordinary dorm departure keeps measured morale', () => {
   it('replaces a predicted full mood with the departure observation', () => {
     const f = fixture(), op = f.source.data.operators.A!
     op.moodIsPrediction = true
-    f.source.data.dorms[0]!.timeMicros = toMowerMicros(1)
+    f.source.data.dorms[0]!.timeMicros = f.source.data.nowMicros
     finish(f)
     expect(op.currentRoom).toBe('')
     expect(op.timeStampMicros).toBe(toMowerMicros(1))
@@ -135,9 +135,38 @@ describe('confirmed ordinary dorm departure keeps measured morale', () => {
     expect(f.state.bedOccupants[room + '_4']).toBe('B')
   })
 
+  it.each([
+    { evidence: 'prediction', freeRoom: true },
+    { evidence: 'below-limit', freeRoom: true },
+    { evidence: 'prediction', freeRoom: false },
+    { evidence: 'below-limit', freeRoom: false },
+  ])('keeps unfinished residents and rebuilds recovery tasks: %j', ({ evidence, freeRoom }) => {
+    const f = fixture(11), op = f.source.data.operators.A!
+    f.source.data.freeRoom = freeRoom
+    if (evidence === 'prediction') { op.mood = 12; op.moodIsPrediction = true }
+    finish(f)
+    expect(op.isResting()).toBe(true)
+    expect(f.state.bedOccupants[room + '_3']).toBe('A')
+    expect(f.source.data.operators.B!.isResting()).toBe(true)
+    expect(f.source.data.groupShiftState.g).toBe(true)
+    const releases = f.source.queue.tasks.filter(task => task.type === T.RELEASE_DORM && task.metadata === 'A')
+    if (freeRoom) {
+      // An unknown prediction triggers a real room read: 11 mood needs 0.25 hours.
+      const deadline = toMowerMicros(evidence === 'prediction' ? 1.25 : 2)
+      expect(f.source.data.dorms[0]!.timeMicros).toBe(deadline)
+      expect(releases.map(task => task.timeMicros)).toEqual([deadline])
+      expect(op.moodIsPrediction).toBe(false)
+    } else {
+      expect(releases).toEqual([])
+      expect(f.source.queue.tasks.some(task => task.type === T.SHIFT_ON
+        && task.plan.room_1_1?.[0] === 'A' && task.plan.room_1_2?.[0] === 'B'
+        && task.timeMicros === toMowerMicros(5))).toBe(true)
+    }
+  })
+
   it('invalidates below-limit morale after the physical departure', () => {
     const f = fixture(11), op = f.source.data.operators.A!
-    f.source.data.dorms[0]!.timeMicros = toMowerMicros(1)
+    f.task.type = T.SELF_CORRECTION
     finish(f)
     expect(op.currentRoom).toBe('')
     expect(op.timeStampMicros).toBeUndefined()
@@ -337,6 +366,8 @@ describe('group full-rest execution confirmation', () => {
 
   it('retains an unobserved full-rest member and admits no repeat on unchanged observations', () => {
     const f = fixture(24, 24)
+    // 本场景不触发独立填人及读房，后续观测只由显式进驻提供。
+    f.state.config.freeBlacklist = f.source.data.freeBlacklist = ['Incoming']
     f.source.data.operators.B!.restInFull = true
     f.source.data.operators.B!.currentRoom = ''
     f.source.data.operators.B!.currentIndex = -1
@@ -351,9 +382,17 @@ describe('group full-rest execution confirmation', () => {
     expect(task.timeMicros).toBe(toMowerMicros(1))
     expect(task.executionFailure).toBeDefined()
     const failure = task.executionFailure
-    settleRoster(f.state, rates)
-    expect(task.executionFailure).toBe(failure)
-    expect(f.state.occupants.room_1_2_0).toBe('S')
+    const observedAt = f.source.data.operators.A!.timeStampMicros
+    const traceLength = f.source.trace.length
+    for (let i = 0; i < 3; i++) {
+      settleRoster(f.state, rates)
+      expect(task.executionFailure).toBe(failure)
+      expect(task.timeMicros).toBe(toMowerMicros(1))
+      expect(f.source.data.operators.A!.timeStampMicros).toBe(observedAt)
+      expect(f.source.data.operators.B!.timeStampMicros).toBeUndefined()
+      expect(f.source.trace).toHaveLength(traceLength)
+      expect(f.state.occupants.room_1_2_0).toBe('S')
+    }
     // A separate physical arrangement supplies the previously missing observation.
     f.state.morale.B = 24
     const admission = new MowerTask({ time: f.state.time, type: T.RE_ORDER, plan: { [room]: ['K1', 'K2', 'K3', 'A', 'B'] } })
@@ -368,6 +407,33 @@ describe('group full-rest execution confirmation', () => {
     expect(f.source.queue.tasks).not.toContain(task)
     expect(task.executionFailure).toBeUndefined()
     expect(f.source.data.operators.B!.currentRoom).toBe('room_1_2')
+  })
+
+  it('admits a retained return after independent dorm filling supplies a new room observation', () => {
+    const f = fixture(24, 24), data = f.source.data
+    Object.assign(data.operators.B!, { restInFull: true, currentRoom: '', currentIndex: -1, timeStampMicros: undefined })
+    delete f.state.bedOccupants[room + '_4']
+    data.dorms[1]!.reset()
+    const task = new MowerTask({ time: 1, type: T.SHIFT_ON, plan: { room_1_1: ['A'], room_1_2: ['B'] } })
+    task.backupShiftActive = true
+    f.source.queue.tasks = [task]
+
+    settleRoster(f.state, rates)
+
+    expect(task.executionFailure).toBeDefined()
+    expect(task.executionFailure!.snapshot.observations.A).toEqual([room, 3, 0])
+    expect(f.source.trace.some(entry => entry.type === 'FILL_DORM')).toBe(true)
+    expect(f.state.bedOccupants[room + '_4']).toBe('Incoming')
+    expect(data.operators.A!.timeStampMicros).toBe(toMowerMicros(1))
+
+    settleRoster(f.state, rates)
+
+    expect(f.source.queue.tasks).toContain(task)
+    expect(task.executionFailure).toBeUndefined()
+    expect(task.executionRetained).toBe(true)
+    expect(task.timeMicros).toBe(toMowerMicros(1))
+    expect(data.operators.B!.timeStampMicros).toBeUndefined()
+    expect(f.state.occupants.room_1_2_0).toBe('S')
   })
 })
 

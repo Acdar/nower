@@ -1,11 +1,12 @@
+import {mowerDormCandidateMood} from './mowerSchedulingMood'
 import {mowerCoveredRecoveryPending} from './mowerBackupDepartureRecovery'
-import {mowerDormTaskReservations,mowerDormCandidateMood} from './mowerAlphaCandidates'
 import {mowerAssignDormGroup} from './mowerDormAssignment'
 import {projectMowerArrangements} from './mowerObservations'
+import {mowerGroupRecoveryWorkers,mowerRecoveryMoodComplete} from './mowerGroupRecovery'
+import {mowerDormTaskReservations} from './mowerAlphaCandidates'
 import {normalizeMowerSharedArrangement,mowerSameGroupPrimaryReplacement,mowerArrangementGroupTransitions} from './mowerSharedGroups'
 import {admitMowerDerivedTasks} from './mowerTaskDerivation'
 import {mowerActiveUrgentRecoveryNames} from './mowerUrgentRecovery'
-import {mowerGroupRecoveryWorkers,mowerRecoveryMoodComplete} from './mowerGroupRecovery'
 // Port of default agent_get_mood correction and prefer_resting_replacements.
 // Source: c6bdbb292fe7fcd84c6dfb66154a12a1a9bc5b88 (MIT, Copyright 2021 Nano).
 import {mowerReplacementCandidates,type MowerOperatorState} from './mowerOperatorState'
@@ -29,7 +30,9 @@ function completeMowerDepartedRecovery(data:MowerSchedulingData,plan:MowerTaskPl
  const projected=projectMowerArrangements(data,[plan])
  const missing=[...names].filter(name=>{
   const op=projected.operators[name]!
-  if(op.workaholic||op.room.startsWith('dorm')||op.currentRoom||projected.restMoodComplete(name))return false
+  if(op.workaholic||op.room.startsWith('dorm')||op.currentRoom)return false
+  if(projected.freeRoomExcluded(name))return true
+  if(projected.restMoodComplete(name))return false
   const mood=mowerDormCandidateMood(projected,name)
   return mood===undefined||mood<op.upperLimit
  })
@@ -45,6 +48,7 @@ function completeMowerDepartedRecovery(data:MowerSchedulingData,plan:MowerTaskPl
 }
 export function mowerNotValid(data:MowerSchedulingData,op:MowerOperatorState):boolean {
  if(!op.isHigh())return false
+ if(data.alpha&&op.isResting()){const mood=mowerDormCandidateMood(data,op.name);if(mood!==undefined&&mood<op.upperLimit)return false}
  if(mowerCoveredRecoveryPending(data,op))return false
  if(op.workaholic)return op.currentRoom!==op.room||op.currentIndex!==op.index
  if(!op.room.startsWith('dorm')&&op.isResting())return op.mood===-1||op.mood===24
@@ -61,7 +65,7 @@ export function preferMowerRestingReplacements(data:MowerSchedulingData,plan:Mow
  const ends=new Map(data.allDorms().filter(b=>b.name).map(b=>[b.name,b.timeMicros])),resting=new Set<string>(),groups=new Set<string>()
  for(const op of Object.values(data.operators)){
   if(!op.isHigh()||op.workaholic||op.room.startsWith('dorm')||!op.isResting()&&!mowerCoveredRecoveryPending(data,op))continue
-  const end=ends.get(op.name),unfinished=end!==undefined?end>data.nowMicros:op.mood>=0&&op.mood<op.upperLimit
+  const end=ends.get(op.name),mood=data.alpha?mowerDormCandidateMood(data,op.name):op.mood,unfinished=end!==undefined?end>data.nowMicros:mood!==undefined&&mood>=0&&mood<op.upperLimit
   if(unfinished){resting.add(op.name);if(op.group&&(!data.alpha||data.isGroupShiftAnchor(op)))groups.add(op.group)}
  }
  for(const group of groups){
@@ -139,11 +143,12 @@ export function mowerCorrectionPlan(data:MowerSchedulingData,skipDorm=false,expl
  }
  for(const [room,names] of Object.entries(plan))if(skipDorm&&room.startsWith('dorm')&&names.every(n=>n==='Free'||n==='Current'))delete plan[room]
  for(const op of Object.values(data.operators))if(data.busyRestingNames.has(op.name)&&op.room==='train')delete plan.train
+ for(const [room,row] of Object.entries(plan))row.forEach((_,index)=>{if(explicitSlots.has(alphaPosition(room,index)))row[index]='Current'})
  preferMowerRestingReplacements(data,plan)
  if(data.alpha){
   alphaCorrectGroupDorms(data,plan)
   for(const [room,names] of Object.entries(plan))if(room.startsWith('dorm')){
-   names.forEach((name,index)=>{if(data.restMoodComplete(name)&&data.currentOperator(room,index)?.name!==name)names[index]='Current'})
+   names.forEach((name,index)=>{if(data.restMoodComplete(name)&&!data.freeRoomExcluded(name)&&data.currentOperator(room,index)?.name!==name)names[index]='Current'})
    if(names.every(n=>n==='Current'))delete plan[room]
   }
   // Explicit backup positions retain physical occupancy through correction.

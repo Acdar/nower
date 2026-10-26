@@ -83,7 +83,8 @@ mower_a = Analysis(
     ]
     + add_data,
     hiddenimports=(
-        (["tinify"] if _tinify_installed else [])
+        ["quickjs", "_quickjs"]
+        + (["tinify"] if _tinify_installed else [])
         + collect_submodules("psutil")
         + [
             "arknights_mower.utils.instance_supervisor",

@@ -50,6 +50,11 @@ if __name__ == "__main__" and sys.argv[1:2] == ["--maa-check-worker"]:
     worker_main(sys.argv[2])
     sys.exit()
 
+if __name__ == "__main__" and sys.argv[1:] == ["--preview"]:
+    from arknights_mower.utils.desktop_preview import run_preview
+
+    sys.exit(run_preview())
+
 # Linux 版独立包运行期需要宿主提供 GTK/WebKit2 原生库与 typelib，PyInstaller 只把
 # pywebview 的 Python 依赖打进包。这份提示在窗口后端初始化失败时展示，直接给出
 # 三个发行版的安装命令，避免用户对着裸 ImportError 无从下手。
@@ -374,6 +379,10 @@ def webview_window(
         width, height = default_desktop_window_size()
     launch_mode = load_window_launch_mode() if shell_enabled else "normal"
     startup_mode = load_window_mode() if launch_mode == "last" else launch_mode
+    # WinForms calibrates its normal frame after shown. Cocoa uses our native
+    # adapter to maximize without fullscreen. Keep both invisible until ready;
+    # GTK and Qt support a maximized first map directly.
+    startup_hidden = startup_mode == "maximized" and backend in ("winforms", "cocoa")
     # Guard the initial window setup and teardown; pywebview can emit transient
     # resize/restore events in both phases.
     mode_ready = False
@@ -383,6 +392,8 @@ def webview_window(
     # notification cannot leave their normal-size persistence blocked.
     startup_maximize_pending = windows_native and startup_mode == "maximized"
     normal_size_lock = Lock()
+    startup_mode_lock = Lock()
+    windows_layout_ready = not windows_native
 
     window_url = append_query_param(url, "instance_name", instance_name)
     window_url = (
@@ -458,7 +469,12 @@ def webview_window(
         height=height,
         min_size=min_size,
         resizable=True,
+        hidden=startup_hidden,
+        maximized=startup_mode == "maximized" and not startup_hidden,
         frameless=shell_enabled,
+        # Preserve page link drag/drop. easy_drag=False separately disables
+        # whole-page window dragging.
+        draggable=True,
         easy_drag=False,
         shadow=True,
         background_color=window_background_color(theme),
@@ -495,31 +511,48 @@ def webview_window(
         window.events.restored += lambda: remember_mode("normal")
     else:
         bridge.on_mode_changed = remember_mode
+
+    def restore_startup_mode():
+        nonlocal mode_ready, startup_maximize_pending, startup_hidden
+        if mode_ready or closing or not windows_layout_ready:
+            return
+        if not bridge.wait_until_ready():
+            return
+        with startup_mode_lock:
+            if mode_ready or closing:
+                return
+            mode_ready = True
+        if startup_hidden:
+            if not bridge.maximize():
+                startup_maximize_pending = False
+            if not closing:
+                window.show()
+            startup_hidden = False
+        # A native notification may have been published before mode_ready.
+        # Confirm the current state once startup can persist it.
+        state = bridge.get_window_state()
+        if state["native_state_confirmed"] and state["state"] in (
+            "normal",
+            "maximized",
+        ):
+            remember_mode(state["state"])
+
     if windows_native:
         from arknights_mower.utils.windows_frameless import (
             install_windows_frameless_resize,
         )
 
+        def on_windows_layout_ready():
+            nonlocal windows_layout_ready
+            windows_layout_ready = True
+            restore_startup_mode()
+
         install_windows_frameless_resize(
             window,
             WindowSize(width, height),
             min_size,
+            on_ready=on_windows_layout_ready,
         )
-
-    def restore_startup_mode():
-        nonlocal mode_ready, startup_maximize_pending
-        if mode_ready or closing:
-            return
-        if not bridge.wait_until_ready():
-            return
-        if mode_ready or closing:
-            return
-        # Windows registers this after its client-layout hook. Other backends
-        # wait for their native input and state adapter before applying the mode.
-        mode_ready = True
-        if startup_mode == "maximized":
-            if not bridge.maximize():
-                startup_maximize_pending = False
 
     window.events.loaded += restore_startup_mode
     bridge.on_ready = restore_startup_mode
@@ -540,6 +573,12 @@ def webview_window(
                 continue
             if msg == "title":
                 window.set_title(window_title(instance_name, port))
+                continue
+            if msg == "show":
+                if startup_hidden:
+                    continue  # Startup reveals the window after restoring its mode.
+                window.restore()
+                window.show()
                 continue
             if msg == "file":
                 result = window.create_file_dialog(
@@ -875,6 +914,7 @@ def _run_desktop():
         close_mp_logging,
         close_screenshot_store,
         init_file_logging,
+        logger,
         start_mp_listener,
     )
 
@@ -897,9 +937,52 @@ def _run_desktop():
         _splash = (splash_process, splash_queue)
         splash_queue.put({"type": "text", "data": "加载配置文件"})
     from arknights_mower.utils import config
+    from arknights_mower.utils.config_backup import LocalConfigError, backup_lock
+    from arknights_mower.utils.config_profiles import (
+        ProfileConflict,
+        check_generation,
+        current_generation,
+    )
     from arknights_mower.utils.network import is_port_in_use
 
-    conf = config.conf
+    with backup_lock:
+        conf = config.conf
+        try:
+            startup_generation = current_generation()
+        except (LocalConfigError, OSError):
+            startup_generation = None
+        resume_mode = os.environ.pop("MOWER_RESUME_MODE", "")
+        if (
+            os.environ.pop("MOWER_UPDATE_REPLAN", "") == "1"
+            and os.environ.get("MOWER_RESTART_JOB")
+            and os.environ.get("MOWER_RESUME_RUN") == "1"
+        ):
+            resume_mode = "3"
+        resume_run = (
+            bool(os.environ.get("MOWER_RESTART_JOB"))
+            and os.environ.get("MOWER_RESUME_RUN") == "1"
+        )
+        resume = (
+            resume_mode in ("0", "1", "3")
+            or resume_run
+            or (
+                not os.environ.get("MOWER_RESTART_JOB")
+                and resume_mode != "preserve"
+                and conf.start_automatically
+            )
+        )
+        start_type = (
+            resume_mode
+            if resume_mode in ("0", "1", "3")
+            else "2"
+            if resume_run
+            else "0"
+        )
+        auto_resource = (
+            config.updates_enabled
+            and conf.resource_update.enable
+            and conf.resource_update.auto_update
+        )
     tray = conf.webview.tray or background or managed
     keep_running = tray or sys.platform == "darwin"
     # Keep the single file writer on every platform. macOS uses a pipe instead
@@ -963,23 +1046,6 @@ def _run_desktop():
     from arknights_mower.utils import crash_recovery
     from arknights_mower.utils.instance_supervisor import child_ready
 
-    resume_mode = os.environ.pop("MOWER_RESUME_MODE", "")
-    resume_run = (
-        bool(os.environ.get("MOWER_RESTART_JOB"))
-        and os.environ.get("MOWER_RESUME_RUN") == "1"
-    )
-    resume = (
-        resume_mode in ("0", "1")
-        or resume_run
-        or (
-            not os.environ.get("MOWER_RESTART_JOB")
-            and resume_mode != "preserve"
-            and conf.start_automatically
-        )
-    )
-    start_type = (
-        resume_mode if resume_mode in ("0", "1") else "2" if resume_run else "0"
-    )
     child_ready(registration, desired_running=resume, start_type=start_type)
     crash_notice = crash_recovery.status()
     if crash_recovery.notice_path() is not None:
@@ -1068,18 +1134,19 @@ def _run_desktop():
     if config.updates_enabled:
         request_auto_check()
 
-    auto_resource = (
-        config.updates_enabled
-        and conf.resource_update.enable
-        and conf.resource_update.auto_update
-    )
-
     def startup_cancelled():
-        return (
+        if (
             registration.shutdown_requested()
             or shutdown.closing
             or config.stop_mower.is_set()
-        )
+        ):
+            return True
+        try:
+            check_generation(startup_generation, allow_legacy=False)
+        except (ProfileConflict, LocalConfigError, OSError) as exc:
+            logger.warning("启动时自动操作已取消：%s", exc)
+            return True
+        return False
 
     def resume_after_update():
         while not startup_cancelled() and runtime.active_job():
@@ -1087,31 +1154,33 @@ def _run_desktop():
         if startup_cancelled():
             return
         with server.app.test_request_context(
-            method="POST", headers={"token": runtime_token}
+            method="POST", headers={"token": runtime_token}, json={"background": True}
         ):
             if auto_resource:
                 try:
                     info = server.get_resource_version()
-                    if info.get("update_available") is True and not startup_cancelled():
-                        server.install_resource()
+                    if info.get("update_available") is True:
+                        with backup_lock:
+                            if startup_cancelled():
+                                return
+                            server.install_resource()
                 except Exception:
-                    from arknights_mower.utils.log import logger
-
                     logger.exception("启动时自动更新资源失败")
                 # A cached page or manual request can already own the install.
                 if server.resource_update.running():
                     server.resource_update.thread.join()
-        if resume and not crash_notice["active"] and not startup_cancelled():
-            with server.app.test_request_context(
-                method="GET", headers={"token": runtime_token}
-            ):
-                if resume_mode in ("0", "1"):
-                    server.start(resume_mode, automatic=True)
-                else:
-                    server.start(
-                        "2" if resume_run else "0",
-                        automatic=True,
-                    )
+        with backup_lock:
+            if resume and not crash_notice["active"] and not startup_cancelled():
+                with server.app.test_request_context(
+                    method="GET", headers={"token": runtime_token}
+                ):
+                    if resume_mode in ("0", "1", "3"):
+                        server.start(resume_mode, automatic=True)
+                    else:
+                        server.start(
+                            "2" if resume_run else "0",
+                            automatic=True,
+                        )
 
     if resume and not crash_notice["active"] or auto_resource:
         Thread(target=resume_after_update, daemon=True).start()
@@ -1179,6 +1248,14 @@ def _run_desktop():
                     import webbrowser
 
                     webbrowser.open(url)
+                elif msg == "show":
+                    if config.webview_process and config.webview_process.is_alive():
+                        try:
+                            config.parent_conn.send("show")
+                            continue
+                        except (EOFError, OSError):
+                            pass
+                    open_window()
             if "exit" in messages:
                 shutdown.request("tray")
                 break

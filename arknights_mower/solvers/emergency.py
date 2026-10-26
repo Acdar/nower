@@ -698,6 +698,11 @@ class EmergencyRecoveryMixin:
             and not data._can_standby(op)
             and (not scheduling_mood_reaches(self.op_data, name, target))
         }
+        need.update(
+            op.name
+            for op in data.operators.values()
+            if op.is_resting() and data.is_free_room_excluded(op.name)
+        )
         capacity = sum(len(row) for row in layout.values())
         spare = max(0, capacity - len(need))
         reserved, _ = dorm_task_reservations(data, self.tasks)
@@ -928,6 +933,14 @@ class EmergencyRecoveryMixin:
     def _emergency_filter_tasks(self):
         if not self._emergency_frozen():
             return
+        self.tasks[:] = [
+            task
+            for task in self.tasks
+            if not getattr(task, "mood_control_event", None)
+            or task.retains_execution
+            or getattr(task, "mood_physical_started", False)
+        ]
+        self._mood_control_cache = None
         fia_targets = set(self.emergency_state.get("fia_targets", ()))
         fia = self.op_data.operators.get("菲亚梅塔")
         fia_rooms = {
@@ -1356,6 +1369,9 @@ class EmergencyRecoveryMixin:
                 ready.add(name)
                 members.discard(name)
                 op.depletion_rate = 0
+            elif op.is_resting() and data.is_free_room_excluded(name):
+                ready.add(name)
+                members.discard(name)
             elif op.is_resting():
                 members.add(name)
                 plan.setdefault(
@@ -1365,7 +1381,9 @@ class EmergencyRecoveryMixin:
         members = {
             name
             for name in members
-            if name in data.operators and data.operators[name].is_resting()
+            if name in data.operators
+            and data.operators[name].is_resting()
+            and not data.is_free_room_excluded(name)
         }
         changed = ready != set(state.get("ready_members", ())) or members != set(
             state.get("release_members", ())
@@ -1378,7 +1396,10 @@ class EmergencyRecoveryMixin:
                 continue
             for room, row in list(task.plan.items()):
                 task.plan[room] = [
-                    "Current" if name in ready | members else name for name in row
+                    "Current"
+                    if name in ready | members and not data.is_free_room_excluded(name)
+                    else name
+                    for name in row
                 ]
                 if all(name == "Current" for name in task.plan[room]):
                     del task.plan[room]

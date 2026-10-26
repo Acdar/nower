@@ -1389,8 +1389,10 @@ class Worker:
             "stopping", "保存任务状态并关闭同一安装目录下的 Mower 实例与共享 OCR 进程"
         )
         self.original = instances(self.state)
-        if not any(r["kind"] == "instance" for r in self.original):
-            raise ValueError("未找到可恢复的实例，请从桌面启动器打开 Mower 后重试")
+        if not any(r["kind"] in {"instance", "manager"} for r in self.original):
+            raise ValueError(
+                "未找到可恢复的应用，请从桌面启动器或多开管理器打开 Mower 后重试"
+            )
         write_json(self.work / "instances-before.json", self.original)
         for record in self.original:
             write_json(
@@ -1599,8 +1601,10 @@ class Worker:
             env = launch_environment(record, self.job["id"], self.job["background"])
             if record["kind"] == "instance" and record.get("running"):
                 env["MOWER_RESUME_MODE"] = "0"
+                env["MOWER_UPDATE_REPLAN"] = "1"
             else:
                 env.pop("MOWER_RESUME_MODE", None)
+                env.pop("MOWER_UPDATE_REPLAN", None)
             if self.job.get("tool_path"):
                 env["PATH"] = self.job["tool_path"]
             with (self.work / "restart.log").open("ab") as log:

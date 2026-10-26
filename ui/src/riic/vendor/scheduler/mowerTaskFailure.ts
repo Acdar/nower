@@ -7,6 +7,7 @@ import type {RuntimeState} from './rosterRuntime'
 import type {MowerSchedulingData} from './mowerSchedulingData'
 import type {MowerTask,MowerTaskQueue} from './mowerTaskQueue'
 import {mowerArrangementGroupTransitions,mowerRestingBindingGroups,mowerSharedReplacements} from './mowerSharedGroups'
+import {mowerBackupRetentionFingerprint} from './mowerBackupRetention'
 
 export interface MowerTaskFailureSnapshot {
  intent:string
@@ -14,6 +15,7 @@ export interface MowerTaskFailureSnapshot {
 }
 
 function snapshot(state:RuntimeState,data:MowerSchedulingData,task:MowerTask,rooms:readonly string[]):MowerTaskFailureSnapshot {
+ if(task.backupRetentionWait)return {intent:JSON.stringify([task.plan,task.metadata,mowerBackupRetentionFingerprint(data,state.mowerSource?.queue.tasks.filter(other=>other!==task)??[],task.backupRetentionWait.names,state.mowerShiftModel?.select?.(data))]),observations:{}}
  const names=new Set(Object.values(task.plan).flat())
  if(task.type===T.EXHAUST_OFF)mowerReplacementDependencyNames(data,task.metadata.split(',')).forEach(name=>names.add(name))
  const reservations=mowerReplacementReservations(data,state.mowerSource?.queue.tasks.filter(other=>other!==task)??[])
@@ -28,10 +30,11 @@ function snapshot(state:RuntimeState,data:MowerSchedulingData,task:MowerTask,roo
  const correctionGroups=task.derivedCorrection&&task.type===T.SELF_CORRECTION?new Set(Object.entries(task.plan).flatMap(([room,row])=>row.flatMap((name,index)=>name==='Current'?[]:[name,data.plan[room]?.[index]]).flatMap(name=>{const op=name?data.operators[name]:undefined;return op?[op.group,...op.groupBindings.map(binding=>binding.group)]:[]})).filter(Boolean)):new Set<string>()
  return {
   intent:JSON.stringify({plan:task.plan,metadata:task.metadata,
+   backupRetentionAdmissions:task.backupRetentionAdmissions.map(name=>[name,data.freeRoomExcluded(name),data.operators[name]?.room]),
    correctionGroups:[...correctionGroups].sort().map(group=>[group,data.groupIsResting(group)]),
    effectivePlan:Object.fromEntries(rooms.map(room=>[room,state.config.mowerSourcePlan?.[room]])),
    products:Object.fromEntries(rooms.map(room=>[room,state.mowerFacilityProducts?.[room]??null])),
-   conditions:data.planConditions,shared,
+   shared,
    eligibility:[...names].sort().map(name=>[name,data.busyRestingNames.has(name),data.excludedCandidates.has(name),reservations.reservedNames.has(name)]),
    reservedSlots:[...reservations.reservedSlots].filter(slot=>rooms.includes(slot.split('\0')[0]!)).sort(),
   }),
@@ -51,6 +54,7 @@ export function resumeMowerFailedTasks(state:RuntimeState,data:MowerSchedulingDa
  for(const task of queue.tasks){
   const failure=task.executionFailure
   if(!failure)continue
+  if(task.workingReplacementCheck)continue
   if((failure.reason.startsWith('组员尚未确认回满心情')||failure.reason.startsWith('需要回满的主班心情尚未满足要求'))&&prepareMowerCorrectionRecovery(data,task,queue.tasks)){
    delete task.executionFailure;task.coordinationDependencyWait=false;task.executionRetained=false;changed=true
    continue

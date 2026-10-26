@@ -207,15 +207,19 @@ def _handle_maintenance(info: MaintenanceInfo, scheduler, now=None):
         _stop_for_major_update(info)
         return True
 
-    flash_probe_at = min(info.end, info.start + timedelta(minutes=5))
-    if info.is_flash_update and info.announcement_id not in _flash_probe_ids:
+    flash_probe_at = min(info.end, info.start + timedelta(minutes=2))
+    flash_probe_pending = False
+    if info.is_flash_update:
+        if info.announcement_id in _flash_probe_ids:
+            return False
         probe_reference = max(now, flash_probe_at)
         if _has_recent_task(scheduler, probe_reference):
-            _flash_probe_ids.add(info.announcement_id)
             if now >= flash_probe_at:
-                logger.info("闪断更新已进行 5 分钟且有近期任务，尝试进入游戏一次")
+                _flash_probe_ids.add(info.announcement_id)
+                logger.info("闪断更新已进行 2 分钟且有近期任务，尝试进入游戏一次")
                 return False
             resume_at = flash_probe_at
+            flash_probe_pending = True
         else:
             resume_at = info.end
     else:
@@ -236,12 +240,14 @@ def _handle_maintenance(info: MaintenanceInfo, scheduler, now=None):
     scheduler.handle_idle_action(remaining_time)
     # 服务器维护期间 mower 完全空闲，同样走休眠收口点，让 /status 显示休眠
     scheduler._idle_sleep(remaining_time, allow_wakeup=False)
+    if flash_probe_pending:
+        _flash_probe_ids.add(info.announcement_id)
     logger.info("时间开始流动了……DIO大人贴心为你重启时间！")
     return False
 
 
 def _wait_before_early_login_retry(now=None):
-    """Retry early entry every five minutes until the announced maintenance end."""
+    """Wait out a failed flash probe or retry early downtime entry in five minutes."""
     now = now or datetime.now()
     info = NewsChecker.get_maintenance()
     if (
@@ -251,7 +257,7 @@ def _wait_before_early_login_retry(now=None):
         and now < info.end
     ):
         delay = (info.end - now).total_seconds()
-        logger.warning("闪断更新第 5 分钟试探未成功，等待公告结束后恢复")
+        logger.warning("闪断更新提前尝试未成功，等待公告结束后恢复")
         try:
             csleep(delay)
         except MowerExit:
@@ -431,7 +437,15 @@ def simulate(saved):
     具体调用方法可见各个函数的参数说明
     """
     logger.info(f"正在使用全局配置空间: {path.global_space}")
-    tasks = saved.get("tasks", []) if saved else []
+    tasks = (
+        [
+            task
+            for task in saved.get("tasks", [])
+            if not getattr(task, "mood_control_event", None)
+        ]
+        if saved
+        else []
+    )
     connection_retries = 1
     global base_scheduler
     if config.stop_mower.is_set():
@@ -452,6 +466,7 @@ def simulate(saved):
                 or bool(saved.get("_process_crash_recovery"))
                 or bool(saved.get("initial_mood_pending", False))
                 or config.conf.automatic_rescue_enable
+                or config.conf.test_mood_calculation
                 or bool(saved and saved.get("automatic_rescue_state"))
             )
             base_scheduler._initial_staffing_pending = (
@@ -462,6 +477,11 @@ def simulate(saved):
             base_scheduler._initial_mood_refresh_rooms = set(
                 saved.get("initial_mood_refresh_rooms", ()) if saved else ()
             ) | set(saved.get("initial_mood_probe_layout", {}) if saved else {})
+            if config.conf.test_mood_calculation:
+                # 重启及首次启用都先核实实际驻员，计算快照不能替代启动实读。
+                base_scheduler._initial_mood_refresh_rooms.update(
+                    room for room in base_room_list if not room.startswith("gaming")
+                )
             success = True
         except RECOVERABLE_DEVICE_ERRORS as exc:
             try:
@@ -539,6 +559,15 @@ def simulate(saved):
                 base_scheduler.op_data.operators[k].dorm_recovery_fixed = getattr(
                     v, "dorm_recovery_fixed", ()
                 )
+            if saved.get("calculated_mood") is not None:
+                from arknights_mower.utils.calculated_mood import CalculatedMood
+
+                restored_mood = CalculatedMood()
+                restored_mood.__dict__.update(copy.deepcopy(saved["calculated_mood"]))
+                base_scheduler.op_data.mood_model = restored_mood.restore()
+            if base_scheduler.op_data.mood_calculation_enabled:
+                for operator in base_scheduler.op_data.operators.values():
+                    operator._mood_model = base_scheduler.op_data.mood_model
             base_scheduler.op_data.restore_group_shift_state(
                 saved.get("group_shift_state"),
                 saved.get("group_recovery_full_members"),
@@ -624,6 +653,12 @@ def simulate(saved):
             base_scheduler.daily_report = saved["daily_report"]
             base_scheduler.daily_skland = saved["daily_skland"]
             base_scheduler.daily_mail = saved["daily_mail"]
+            base_scheduler.daily_event_sign_in = saved.get(
+                "daily_event_sign_in", get_server_time().date() - timedelta(days=1)
+            )
+            base_scheduler.daily_event_sign_in_attempt = saved.get(
+                "daily_event_sign_in_attempt"
+            )
             base_scheduler.task_count = saved["task_count"]
             if len(base_scheduler.op_data.backup_plans) > 0 and not saved.get(
                 "_process_crash_recovery"
@@ -647,6 +682,7 @@ def simulate(saved):
         ]
     if (
         config.conf.automatic_rescue_enable
+        or config.conf.test_mood_calculation
         or isinstance(base_scheduler.emergency_state, dict)
         or bool(saved and saved.get("initial_mood_pending"))
     ):
@@ -656,9 +692,9 @@ def simulate(saved):
             task for task in base_scheduler.tasks if task.meta_data != RESUME_META
         ]
         if not (saved and saved.get("initial_mood_pending")):
-            base_scheduler._initial_mood_refresh_rooms = {
-                room for room in base_scheduler.op_data.plan if room in base_room_list
-            }
+            base_scheduler._initial_mood_refresh_rooms.update(
+                {room for room in base_scheduler.op_data.plan if room in base_room_list}
+            )
         base_scheduler.tasks.insert(0, SchedulerTask(time=datetime.now()))
     while True:
         try:
@@ -747,6 +783,8 @@ def simulate(saved):
                     ):
                         if base_scheduler.mail_plan_solver():
                             base_scheduler.daily_mail = get_server_time().date()
+
+                    base_scheduler.event_sign_in_plan_solver()
 
                     if config.conf.recruit_enable:
                         base_scheduler.recruit_plan_solver()

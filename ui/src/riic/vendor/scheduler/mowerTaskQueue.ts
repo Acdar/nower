@@ -33,13 +33,23 @@ export class MowerTask {
  executionRetained=false
  /** Only observation-derived corrections may be rebuilt before physical execution. */
  derivedCorrection=false
+ initialStaffing=false
+ workingReplacementCheck?:{room:string;index:number;owner:string;cover:string}
+ workingReplacementSource?:string
  correctionSkipDorm=false
  get retainsExecution():boolean{return !!this.executionFailure||this.executionRetained}
  previewReturnVeto?:{conditions:number[];names:string[]}
+ backupRetentionWait?:{names:string[]}
+ backupRetentionReleasedNames:string[]=[]
+ backupRetentionAdmissions:string[]=[]
+ backupRetentionEmptySlots:Record<string,string>={}
  groupShiftTransitions:Record<string,boolean>={}
  /** Once room execution begins, remaining rooms retain the confirmed shift intent. */
  arrangementStarted=false
  productShiftLocked=false
+ moodControlObserved=false
+ moodControlEvent?:{fingerprint:string;timeMicros:number}
+ moodControlEvidence?:import('./mowerPredictivePlanning').MowerPredictiveEvidence
  ordinaryCoordination=false
  exhaustSupport=false
  coordinationRequestNames:string[]=[]

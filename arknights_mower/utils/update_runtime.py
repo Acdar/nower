@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -294,6 +294,19 @@ def submission_lock(directory):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+@contextmanager
+def manager_maintenance_lock(directory=None):
+    """Keep software replacement separate from native manager MAA maintenance."""
+    with ExitStack() as cleanup:
+        try:
+            cleanup.enter_context(
+                submission_lock(Path(directory or state_dir()) / "manager-maintenance")
+            )
+        except LockBusyError as exc:
+            raise LockBusyError("多开管理器正在维护 MAA，请完成后再更新 Mower") from exc
+        yield
+
+
 def registration_key(record):
     """Stable identity for matching an instance's registration across a restart.
 
@@ -551,6 +564,7 @@ def hidden_console_options():
 def launch_environment(record, job_id="", background=False):
     env = os.environ.copy()
     env.pop("MOWER_RECOVERY_RUN", None)
+    env.pop("MOWER_UPDATE_REPLAN", None)
     # A frozen child must initialize its own bootloader/runtime, including after
     # replacement of the bundle. System subprocesses must not inherit private libs.
     env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"

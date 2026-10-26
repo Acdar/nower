@@ -1,15 +1,18 @@
 """Small WinForms adaptation that restores OS-owned frameless window behaviour.
 
 pywebview 5.1 sets ``FormBorderStyle.None`` for frameless windows, which removes
-the native resize frame and the caption styles. This module keeps the window
-border and caption visually absent, but restores the standard sizing and caption
-styles, and returns native non-client hit-test codes at the window edges.
+the native resize frame and the caption styles. This module keeps the caption
+visually absent while DWM draws the thin outer border and rounded corners. It
+restores the standard sizing and caption styles, and returns native non-client
+hit-test codes at the window edges.
 Windows still owns the resize loop, the minimize/maximize/snap transitions, DPI
 handling, cursor feedback, and multi-monitor interaction.
 """
 
 import ctypes
+from collections.abc import Callable
 from ctypes import wintypes
+from threading import Lock
 from typing import Any
 
 from arknights_mower.utils.log import logger
@@ -217,28 +220,50 @@ def install_windows_frameless_resize(
     window: Any,
     initial_size: WindowSize,
     min_size: WindowSize,
+    *,
+    on_ready: Callable[[], None] | None = None,
 ) -> bool:
+    """Attempt frame calibration and loaded layout refresh before signaling ready."""
     if not is_windows():
         return False
-    layout_refreshed = False
+    setup_lock = Lock()
+    frame_setup_finished = False
+    page_loaded = False
+    layout_started = False
 
     def install_after_show() -> None:
+        nonlocal frame_setup_finished
         try:
             _install_hook(window, initial_size, min_size)
         except Exception:
             logger.exception("Failed to install Windows frameless resize support")
+        finally:
+            with setup_lock:
+                frame_setup_finished = True
+        finish_setup()
 
-    def refresh_after_load() -> None:
-        nonlocal layout_refreshed
-        if layout_refreshed:
-            return
+    def finish_setup() -> None:
+        nonlocal layout_started
+        # pywebview runs shown and loaded handlers on different threads. The
+        # layout refresh must consume the calibrated frame before signaling ready.
+        with setup_lock:
+            if not frame_setup_finished or not page_loaded or layout_started:
+                return
+            layout_started = True
         try:
             _refresh_webview_layout(window)
-            layout_refreshed = True
         except Exception:
             logger.exception(
                 "Failed to refresh the WebView layout after startup sizing"
             )
+        if on_ready is not None:
+            on_ready()
+
+    def refresh_after_load() -> None:
+        nonlocal page_loaded
+        with setup_lock:
+            page_loaded = True
+        finish_setup()
 
     window.events.shown += install_after_show
     window.events.loaded += refresh_after_load
@@ -614,12 +639,12 @@ def _install_hook(
         raise ctypes.WinError(ctypes.get_last_error())
 
     # SWP_FRAMECHANGED rebuilds the non-client frame. Apply the final DWM
-    # policy afterwards: one system-owned outer corner and no painted border.
+    # policy afterwards so DWM owns the outer corner and thin window border.
     _apply_dwm_window_chrome(hwnd)
 
 
 def _apply_dwm_window_chrome(hwnd: int) -> None:
-    """Let DWM clip one real outer corner without painting another frame."""
+    """Let DWM draw the native rounded corner and system window border."""
     try:
         dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
         set_attribute = dwmapi.DwmSetWindowAttribute
@@ -632,7 +657,7 @@ def _apply_dwm_window_chrome(hwnd: int) -> None:
         set_attribute.restype = ctypes.c_long
         attributes = (
             (33, wintypes.DWORD(2)),  # DWMWA_WINDOW_CORNER_PREFERENCE: ROUND
-            (34, wintypes.DWORD(0xFFFFFFFE)),  # DWMWA_BORDER_COLOR: COLOR_NONE
+            (34, wintypes.DWORD(0xFFFFFFFF)),  # DWMWA_BORDER_COLOR: COLOR_DEFAULT
         )
         for attribute, value in attributes:
             result = set_attribute(
@@ -643,7 +668,7 @@ def _apply_dwm_window_chrome(hwnd: int) -> None:
             )
             if result:
                 logger.debug(
-                    "DWM frame color attribute %s is not supported (HRESULT %#x)",
+                    "DWM window chrome attribute %s is not supported (HRESULT %#x)",
                     attribute,
                     result & 0xFFFFFFFF,
                 )

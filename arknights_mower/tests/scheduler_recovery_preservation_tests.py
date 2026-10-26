@@ -13,7 +13,11 @@ from arknights_mower.utils import config, scheduler_task
 from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.device import recovery
 from arknights_mower.utils.operators import Operators
-from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
+from arknights_mower.utils.scheduler_task import (
+    MANUAL_TASK_TYPES,
+    SchedulerTask,
+    TaskTypes,
+)
 
 CRITICAL_TYPES = {
     TaskTypes.SKILL_UPGRADE,
@@ -28,7 +32,7 @@ FUTURE_TYPES = {
     TaskTypes.DEPOT,
     TaskTypes.CLUE,
     TaskTypes.WORKSHOP,
-}
+} | MANUAL_TASK_TYPES
 MANUAL_TYPES = (
     TaskTypes.FURNITURE,
     TaskTypes.DEPOT,
@@ -59,6 +63,7 @@ def scheduler(monkeypatch):
     solver.emergency_state = None
     solver.error = False
     solver.op_data = SimpleNamespace(
+        mood_calculation_enabled=False,
         plan={},
         operators={},
         dorm=[],
@@ -71,6 +76,8 @@ def scheduler(monkeypatch):
     solver.device = Mock()
     solver.recog = Mock()
     solver.party_time = solver.free_clue = solver.credit_fight = None
+    solver.daily_event_sign_in = Clock.current.date() - timedelta(days=1)
+    solver.daily_event_sign_in_attempt = None
     solver.scene = Mock(return_value=base_schedule.Scene.INFRA_MAIN)
     solver.find = Mock(return_value=True)
     solver.check_current_focus = Mock()
@@ -161,6 +168,11 @@ def test_depot_mastery_dispatch_keeps_source_release_available(
     monkeypatch.setattr(main, "refresh_resource_at_boundary", Mock())
     monkeypatch.setattr(main.NewsChecker, "get_maintenance", Mock(return_value=None))
     monkeypatch.setattr(main, "_apply_version_update_resting_threshold", Mock())
+    monkeypatch.setattr(
+        main,
+        "_resume_device_dispatch",
+        Mock(side_effect=AssertionError("unexpected device recovery during dispatch")),
+    )
     depot = tmp_path / "depotresult.csv"
     depot.touch()
     monkeypatch.setattr(main, "get_path", lambda value: depot)

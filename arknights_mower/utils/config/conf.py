@@ -8,6 +8,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
@@ -26,6 +27,12 @@ from arknights_mower.utils.performance import (
     default_performance_mode,
     default_performance_profile,
 )
+
+
+def validate_drone_count_limit(value):
+    limit = TypeAdapter(int).validate_python(value)
+    return max(20, limit)
+
 
 DEFAULT_LAUNCH_COMMAND = (
     "input keyevent KEYCODE_WAKEUP; "
@@ -399,8 +406,10 @@ class RegularTaskPart(ConfModel):
 
     check_mail_enable: bool = True
     "领取邮件奖励"
-    mail_skip_clear_read: bool = False
+    mail_skip_clear_read: bool = True
     "领取邮件后跳过清除已读邮件"
+    event_sign_in_enable: bool = False
+    "活动签到"
     maa_enable: bool = True
     "日常任务（兼容旧字段）"
     stage_plan_enable: bool = True
@@ -549,11 +558,17 @@ class RIICPart(ConfModel):
     )
     "选人界面稳定帧采样间隔（秒）"
     selection_transition_timeout: float = Field(default=2.5, ge=1, le=20)
-    "选人界面操作反馈超时（秒）"
+    "基建操作反馈超时（秒）"
     low_frame_rate_mode: bool = False
     "旧版低帧率适配兼容字段；档位决定实际选人策略"
     drone_count_limit: int = 100
     "无人机使用阈值"
+
+    @field_validator("drone_count_limit")
+    @classmethod
+    def normalize_drone_count_limit(cls, value):
+        return validate_drone_count_limit(value)
+
     drone_room: str = ""
     "无人机使用房间"
     drone_interval: float = 3
@@ -615,6 +630,8 @@ class RIICPart(ConfModel):
                 raise ValueError("宿舍隔离分组内不能重复填写干员")
         return groups
 
+    test_mood_calculation: bool = False
+    "使用共用技能规则计算心情，并预测调控普通基建轮班"
     group_rest_in_full_on_mood_gap: bool = True
     "组内高优先干员预计恢复时间差过大时，等待整组回满"
     group_mood_gap_threshold_minutes: int = Field(default=60, ge=1, le=1440)
@@ -717,7 +734,7 @@ class SimulatorPart(ConfModel):
         "老板键延迟"
 
     class CustomScreenshotConf(ConfModel):
-        command: str = "adb -s 127.0.0.1:5555 shell screencap -p 2>/dev/null"
+        command: str = "adb exec-out screencap -p"
         "截图命令"
         enable: bool = False
         "是否启用自定义截图"
@@ -867,7 +884,7 @@ class MaaRewardPart(ConfModel):
     maa_mining: bool = False
     "领取限时开采许可的每日合成玉奖励"
     maa_specialaccess: bool = False
-    "领取五周年赠送月卡奖励"
+    "领取赠送月卡奖励"
 
 
 # 旧配置文件及旧前端提交的字段在校验层统一迁移；新旧并存时以新键为准。
@@ -890,11 +907,32 @@ class Conf(
     MaaRewardPart,
     AIAgentPart,
 ):
-    updates_enabled: StrictBool = True
-    "多开管理器保存的更新授权；单开不受此设置限制"
+    extra_settings_visible: StrictBool = False
+    "多开管理器启动的实例是否允许使用更新与维护设置"
+
+    @model_validator(mode="before")
+    @classmethod
+    def merge_update_permission(cls, data):
+        if not isinstance(data, dict) or "updates_enabled" not in data:
+            return data
+        data = dict(data)
+        legacy = data.pop("updates_enabled")
+        if type(legacy) is not bool:
+            raise ValueError("旧版允许更新开关必须是布尔值")
+        if (
+            "extra_settings_visible" in data
+            and type(data["extra_settings_visible"]) is not bool
+        ):
+            raise ValueError("更新与维护开关必须是布尔值")
+        data["extra_settings_visible"] = legacy
+        return data
+
+    @property
+    def updates_enabled(self) -> bool:
+        return self.extra_settings_visible
 
     def updates_enabled_for_launch(self, *, managed: bool) -> bool:
-        return not managed or self.updates_enabled
+        return not managed or self.extra_settings_visible
 
     @model_validator(mode="after")
     def migrate_device_profile(self):

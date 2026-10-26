@@ -1,3 +1,4 @@
+import {MOWER_MOOD_CONTROL_VERSION} from '../scheduler/mowerPredictiveMoodControl'
 import { eligibleSingleRecoveryTargets, hasSingleRecoverySkill } from '../engine/singleRecoveryEligibility'
 import {createSimulationActivityMonitor, type SimulationActivity} from './simulationActivity'
 import {mowerCoordinationRates} from './mowerCoordinationRates'
@@ -25,6 +26,7 @@ import type {CompiledSchedule} from '../scheduler/types'
 import {compiledScheduleToRuntimeConfig} from '../scheduler/scheduleAdapter'
 import {normalizeMowerRecoveryBeds} from '../scheduler/mowerRecoveryBeds'
 import {advanceRoster,createRosterRuntime,currentMoraleDerivatives,MORALE_EPSILON,nextRosterEventHours,nextRosterActionHours,settleRoster,moraleDerivative,type RuntimeState,type RuntimeRates,type RuntimeEvent} from '../scheduler/rosterRuntime'
+import { MORALE_SKILL_THRESHOLDS, retainedRecoveryTarget } from '../engine/moraleThresholds'
 
 export interface ScheduleSimulationProgress {
  phase:'warmup'|'sampling'; elapsedHours:number; totalHours:number; warmupHours:number
@@ -62,7 +64,7 @@ export interface ScheduleSegment {start:number;end:number;occupants:Record<strin
 export interface ScheduleSimulationReport {
  schemaVersion:1; engine:'mower-morale-v1'; success:boolean; elapsedHours:number; observedHours:number
  inputs:{schedule:CompiledSchedule;options:ScheduleSimulationOptions}
- assumptions:{schedulingModel?:'mower-default'|'mower-alpha';sampleHours:number;warmupHours:number;maxStepHours:number;warmupModel:'continuous'|'hourly';restingThreshold:number;operationDurationHours:0;dormAtmosphere:string;singleRecoveryTarget:string}
+ assumptions:{moodControlStrategyVersion:string;predictiveMoodControl:boolean;schedulingModel?:'mower-default'|'mower-alpha';sampleHours:number;warmupHours:number;maxStepHours:number;warmupModel:'continuous'|'hourly';restingThreshold:number;operationDurationHours:0;dormAtmosphere:string;singleRecoveryTarget:string}
  production?:ProductionReport
  operators:SimulatedOperator[];rooms:SimulatedRoom[];events:RuntimeEvent[];segments:ScheduleSegment[]
  diagnostics:{code:string;message:string}[]
@@ -138,7 +140,7 @@ export function simulateSchedule(schedule:CompiledSchedule,options:ScheduleSimul
  const warmupModel=options.warmupModel??'continuous'
  if(!['continuous','hourly'].includes(warmupModel))throw new Error('Invalid warmup model')
  const report:ScheduleSimulationReport={schemaVersion:1,engine:'mower-morale-v1',success:false,elapsedHours:0,observedHours:0,
-  assumptions:{schedulingModel,sampleHours,warmupHours,maxStepHours,warmupModel,restingThreshold:schedule.assumptions.restingThreshold??.65,operationDurationHours:0,dormAtmosphere:'各宿舍默认等级上限；可逐室覆盖',singleRecoveryTarget:'先检查单回资格；禁止自身和菲亚梅塔，单回技能持有者仅在唯一待恢复候选时合格；有效普通目标保持至失效，重选按最低心情和槽位顺序'},
+  assumptions:{moodControlStrategyVersion:MOWER_MOOD_CONTROL_VERSION,predictiveMoodControl:schedule.assumptions.predictiveMoodControl??false,schedulingModel,sampleHours,warmupHours,maxStepHours,warmupModel,restingThreshold:schedule.assumptions.restingThreshold??.65,operationDurationHours:0,dormAtmosphere:'各宿舍默认等级上限；可逐室覆盖',singleRecoveryTarget:'先检查单回资格；禁止自身和菲亚梅塔，单回技能持有者仅在唯一待恢复候选时合格；有效普通目标保持至失效，重选按最低心情和槽位顺序'},
   inputs:{schedule:structuredClone(schedule),options:structuredClone({...options,observeInterval:undefined})},operators:[],rooms:[],events:[],segments:[],diagnostics:[]}
  const diagnostic=(code:string,message:string)=>{if(!report.diagnostics.some(d=>d.code===code&&d.message===message))report.diagnostics.push({code,message})}
  if(options.production?.inventoryMode==='finite')diagnostic('FINITE_INVENTORY_MODEL','使用预设初始库存；从预热开始连续扣料、收取和交付，采样时不重置。无外源收入或自动补货；缺料停止相应生产或交付。回收站随机材料未计入物品库存。')
@@ -216,7 +218,7 @@ export function simulateSchedule(schedule:CompiledSchedule,options:ScheduleSimul
   const rateMoodBand=(value:number|undefined)=>{
    if(value===undefined)return -1
    let band=Number(value>0)|Number(value>=24-EPS)<<1|Number(value<=12)<<2|Number(value<=18)<<3|Number(value<=20)<<4
-   for(const [index,threshold] of [4,8,12,16,18,20].entries())if(Math.abs(value-threshold)<EPS)band|=1<<(index+5)
+   for(const [index,threshold] of MORALE_SKILL_THRESHOLDS.entries())if(Math.abs(value-threshold)<EPS)band|=1<<(index+5)
    return band
   }
   const trackOccupancyMap=<T extends string|number>(map:Record<string,T>):Record<string,T>=>new Proxy(map,{
@@ -248,7 +250,7 @@ export function simulateSchedule(schedule:CompiledSchedule,options:ScheduleSimul
   // Strict mood thresholds use the directional limit in an evaluation copy, never alter physical mood.
   for(const [id,m] of Object.entries(c.operatorMorale)){
    const direction=restingIds.has(id)?1:-Math.sign(options.consumptionOverrides?.[id]??work[id]??0)
-     if([4,8,12,16,18,20].some(x=>Math.abs(m-x)<EPS)){c.operatorMorale[id]=m+direction*EPS*2;atBoundary=true}
+     if(MORALE_SKILL_THRESHOLDS.some(x=>Math.abs(m-x)<EPS)){c.operatorMorale[id]=m+direction*EPS*2;atBoundary=true}
   }
   if(atBoundary)work=currentMoraleRates(c).rates
    cachedWork={...work,...options.consumptionOverrides};cachedRecovery={}
@@ -271,11 +273,9 @@ export function simulateSchedule(schedule:CompiledSchedule,options:ScheduleSimul
     if(target)automaticRecoveryTargets.delete(id)
     else{
      const previous=automaticRecoveryTargets.get(id)
-     if(previous?.room===room.roomId&&candidates.includes(previous.target)
-       &&previous.providerPosition===position(id)&&previous.targetPosition===position(previous.target))target=previous.target
-     else{
+     target=retainedRecoveryTarget(candidates,previous,room.roomId,id,position,other=>morale.get(other)!)
+     if(target!==previous?.target||previous?.providerPosition!==position(id)||previous?.targetPosition!==position(target??'')){
       // Stable sorting keeps slot order only when eligible residents have equal morale.
-      target=candidates.sort((a,b)=>morale.get(a)!-morale.get(b)!)[0]
       if(target)automaticRecoveryTargets.set(id,{room:room.roomId,target,providerPosition:position(id),targetPosition:position(target)})
       else automaticRecoveryTargets.delete(id)
      }
@@ -299,7 +299,7 @@ export function simulateSchedule(schedule:CompiledSchedule,options:ScheduleSimul
    }
   }
  }
-  const rates:RuntimeRates={workRate:id=>{updateRates();return cachedWork[id]??0},recoveryRate:id=>{updateRates();return cachedRecovery[id]??0},snapshotRates:()=>{updateRates();return {work:cachedWork,recovery:cachedRecovery}},thresholds:()=>[4,8,12,16,18,20]}
+  const rates:RuntimeRates={workRate:id=>{updateRates();return cachedWork[id]??0},recoveryRate:id=>{updateRates();return cachedRecovery[id]??0},snapshotRates:()=>{updateRates();return {work:cachedWork,recovery:cachedRecovery}},thresholds:()=>[...MORALE_SKILL_THRESHOLDS]}
   rates.forecastRates=projected=>{
    const config=projectScheduleState(schedule,projected,currentProducts())
    config.operatorRecords=operatorRecords;Object.assign(config.efficiencyResources,options.efficiencyResources)

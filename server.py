@@ -9,7 +9,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
+from contextlib import contextmanager
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
@@ -35,7 +37,7 @@ from arknights_mower.utils.config.plan_advanced import (
     export_advanced_settings,
 )
 from arknights_mower.utils.config_backup import MAX_BACKUP_BYTES, backup_lock
-from arknights_mower.utils.csv_utils import parse_cell_num, read_dicts
+from arknights_mower.utils.csv_utils import EmptyDataError, parse_cell_num, read_dicts
 from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.diagnostics import (
     archive_window,
@@ -59,8 +61,12 @@ from arknights_mower.utils.path import get_path, resolve_config_path
 from arknights_mower.utils.resource_pkg import register_resource_reload
 from arknights_mower.utils.resource_update_job import ResourceUpdateJob
 from arknights_mower.utils.update_runtime import active_job
+from arknights_mower.utils.web_auth import check_token, require_token
 from arknights_mower.views.config_backup import config_backup_bp
+from arknights_mower.views.config_profiles import config_profiles_bp
 from arknights_mower.views.db_admin import db_admin_bp
+from arknights_mower.views.gui import gui_bp
+from arknights_mower.views.instances import instances_bp, reject_instance_management
 from arknights_mower.views.mastery import mastery_bp
 from arknights_mower.views.network import network_bp
 from arknights_mower.views.process_control import process_control_bp
@@ -120,6 +126,8 @@ if token := config.conf.webview.token:
     app.token = token
 
 mower_thread = None
+chat_active_requests = 0
+configuration_test_active_requests = 0
 log_stream = LogStream()
 scheduled_start_lock = RLock()
 scheduled_start_timer = None
@@ -198,14 +206,22 @@ def _cancel_scheduled_start():
         scheduled_start_at = None
 
 
-def _run_scheduled_start(timer):
+def _run_scheduled_start(timer, generation):
     global scheduled_start_timer, scheduled_start_at
+    from arknights_mower.utils.config_backup import LocalConfigError
+    from arknights_mower.utils.config_profiles import ProfileConflict, check_generation
+
     with backup_lock:
         with scheduled_start_lock:
             if scheduled_start_timer is not timer:
                 return
             scheduled_start_timer = None
             scheduled_start_at = None
+        try:
+            check_generation(generation, allow_legacy=False)
+        except (ProfileConflict, LocalConfigError) as exc:
+            logger.warning("预约启动已取消：%s", exc)
+            return
         if _start_mower("2"):
             logger.info("预约时间已到，Mower 开始执行")
         else:
@@ -214,13 +230,16 @@ def _run_scheduled_start(timer):
 
 def _schedule_start(delay_seconds):
     global scheduled_start_timer, scheduled_start_at
-    with scheduled_start_lock:
+    from arknights_mower.utils.config_profiles import current_generation
+
+    with backup_lock, scheduled_start_lock:
+        generation = current_generation()
         if scheduled_start_timer is not None:
             scheduled_start_timer.cancel()
         scheduled_start_at = datetime.datetime.now().astimezone() + datetime.timedelta(
             seconds=delay_seconds
         )
-        timer = Timer(delay_seconds, lambda: _run_scheduled_start(timer))
+        timer = Timer(delay_seconds, lambda: _run_scheduled_start(timer, generation))
         timer.daemon = True
         scheduled_start_timer = timer
         timer.start()
@@ -677,16 +696,6 @@ def _watch_shared_resource_changes():
 Thread(target=_watch_shared_resource_changes, daemon=True).start()
 
 
-def require_token(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if hasattr(app, "token") and request.headers.get("token", "") != app.token:
-            abort(403)
-        return f(*args, **kwargs)
-
-    return decorated_function
-
-
 def require_ai_token(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -855,6 +864,15 @@ def vary_frontend_response(response):
 
 @app.before_request
 def authorize_instance_updates():
+    from arknights_mower.utils import managed_device
+
+    if managed_device.operation_blocked(request.path, request.method, config.conf):
+        check_token()
+        return {
+            "ok": False,
+            "error": "manager_owned_setting",
+            "message": "请在多开管理器中操作，或开启该实例的额外设置",
+        }, 403
     if app.config["UPDATES_ENABLED"]:
         return None
     if (
@@ -869,6 +887,7 @@ def authorize_instance_updates():
         or request.path in {"/resource/install", "/resource/status"}
         or (request.path == "/resource-version" and request.args.get("local") != "1")
     ):
+        check_token()
         return {
             "ok": False,
             "error": "updates_disabled",
@@ -878,12 +897,33 @@ def authorize_instance_updates():
 
 @app.before_request
 def serialize_configuration_requests():
+    if request.path == "/instances" or request.path.startswith("/instances/"):
+        return reject_instance_management()
     # Export/restore must not interleave with form saves, plan edits or startup.
+    changes_configuration = request.method in {"POST", "PUT", "PATCH", "DELETE"} or (
+        request.path.startswith("/start/")
+        or request.path
+        in {
+            "/scheduled-start",
+            "/stop",
+            "/stop-maa",
+            "/check-maa",
+            "/report/restore-trading-history",
+            "/test-email",
+            "/test-custom-screenshot",
+            "/check-skland",
+            "/check-skland-sign",
+            "/cultivate-fetch",
+            "/depot/readdepot",
+        }
+    )
     if (
-        request.path
+        changes_configuration
+        or request.path
         in {
             "/conf",
             "/plan",
+            "/rescue-plan",
             "/plan/restore-running",
             "/import",
             "/sss-copilot",
@@ -891,12 +931,48 @@ def serialize_configuration_requests():
             "/software-update/settings",
         }
         or request.path.startswith(
-            ("/config-backup/", "/weekly-plans", "/mastery-", "/workshop-", "/start/")
+            (
+                "/config-backup/",
+                "/config-profiles",
+                "/weekly-plans",
+                "/mastery-",
+                "/workshop-",
+                "/start/",
+                "/device/",
+            )
         )
         or request.path == "/scheduled-start"
     ):
         backup_lock.acquire()
         g.configuration_locked = True
+    # GUI preferences are independent of saved profiles.
+    if changes_configuration and request.path not in {
+        "/gui/appearance",
+        "/gui/sidebar",
+        "/gui/log-background",
+    }:
+        check_token()
+        from arknights_mower.utils.config_backup import LocalConfigError
+        from arknights_mower.utils.config_profiles import (
+            ProfileConflict,
+            check_generation,
+        )
+
+        try:
+            check_generation(request.headers.get("X-Mower-Config-Generation"))
+        except ProfileConflict as exc:
+            return {
+                "ok": False,
+                "error": exc.code,
+                "code": exc.code,
+                "message": "当前配置已切换，请刷新页面后再操作",
+            }, 409
+        except LocalConfigError:
+            return {
+                "ok": False,
+                "error": "configuration_unavailable",
+                "message": "无法读取已保存配置，请检查配置目录后刷新页面",
+            }, 503
     if request.path == "/conf" or (
         request.path.startswith("/device/")
         and request.path != "/device/performance-test"
@@ -913,6 +989,13 @@ def release_configuration_lock(error):
         lock.release()
     if g.pop("configuration_locked", False):
         backup_lock.release()
+
+
+@app.after_request
+def disable_instance_management_caching(response):
+    if request.path == "/instances" or request.path.startswith("/instances/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/<path:path>")
@@ -1089,6 +1172,9 @@ def device_status():
     from arknights_mower.__main__ import device_control
 
     status = device_control.settings_status()
+    from arknights_mower.utils.managed_device import enabled
+
+    status["manager_owned"] = enabled()
     status["active"] = status["active"] or bool(
         mower_thread and mower_thread.is_alive()
     )
@@ -1150,6 +1236,20 @@ def device_preflight():
             "error": "invalid_configuration",
             "message": "设备配置或游戏包无效",
         }, 400
+    from arknights_mower.utils import managed_device
+
+    if managed_device.enabled():
+        try:
+            proposed = config.conf.updated({"device": device})
+        except (ValidationError, ValueError) as exc:
+            return {"error": "invalid_configuration", "message": str(exc)}, 400
+        if managed_device.changed(config.conf, proposed) or (
+            confirmed is not None and confirmed != config.conf.device.game_package
+        ):
+            return {
+                "error": "manager_owned_setting",
+                "message": "设备连接与性能设置只能在多开管理器中修改",
+            }, 403
     if mower_thread and mower_thread.is_alive():
         return {
             **device_control.settings_status(),
@@ -1321,6 +1421,17 @@ def device_boss_key():
     from arknights_mower.utils.device.window import trigger_simulator_boss_key
 
     payload = request.get_json(silent=True) or {}
+    from arknights_mower.utils.managed_device import enabled
+
+    if (
+        enabled()
+        and payload.get("hotkey", config.conf.device.simulator_hotkey)
+        != config.conf.device.simulator_hotkey
+    ):
+        return {
+            "error": "manager_owned_setting",
+            "message": "请在多开管理器中设置模拟器老板键",
+        }, 403
     hotkey = (
         payload.get("hotkey")
         or getattr(config.conf.device, "simulator_hotkey", "")
@@ -1354,6 +1465,13 @@ def load_config():
         )
 
         data["runtime_platform"] = "android" if is_android_runtime() else __system__
+        from arknights_mower.utils.managed_device import enabled
+
+        data["manager_owned_device"] = enabled()
+        if enabled():
+            data["manager_inherited_settings"] = sorted(
+                config.manager_inherited_settings
+            )
 
         performance = effective_performance_profile(
             config.conf,
@@ -1374,11 +1492,53 @@ def load_config():
                 "message": "配置必须是 JSON 对象",
             }, 400
         req = dict(payload)
+        req.pop("manager_inherited_settings", None)
+        from arknights_mower.utils import managed_device
+
+        if managed_device.enabled() and "start_automatically" in req:
+            if req["start_automatically"] != config.conf.start_automatically:
+                return {
+                    "error": "manager_owned_setting",
+                    "message": "请在多开管理器中修改启动后自动开始任务设置",
+                }, 403
+            req.pop("start_automatically")
+        if managed_device.enabled() and "extra_settings_visible" in req:
+            if req["extra_settings_visible"] != config.conf.extra_settings_visible:
+                return {
+                    "error": "manager_owned_setting",
+                    "message": "请在实例退出后通过多开管理器修改更新与维护开关",
+                }, 403
+            req.pop("extra_settings_visible")
+        protected = managed_device.protected_settings(config.conf)
+        managed_window = isinstance(req.get("webview"), dict) and (
+            {"port", "token"} & req["webview"].keys()
+        )
+        if managed_device.enabled() and (set(req) & set(protected) or managed_window):
+            try:
+                proposed = config.conf.updated(req)
+            except (ValidationError, ValueError) as exc:
+                return {"error": "invalid_configuration", "message": str(exc)}, 400
+            if any(
+                getattr(config.conf, key) != getattr(proposed, key) for key in protected
+            ) or (
+                proposed.webview.port != config.conf.webview.port
+                or proposed.webview.token != config.conf.webview.token
+            ):
+                return {
+                    "error": "manager_owned_setting",
+                    "message": "请通过多开管理器修改受管理的设置，或开启该实例的额外设置",
+                }, 403
+            # Legacy full forms may echo these values; they do not own them.
+            for key in protected:
+                req.pop(key, None)
+            if managed_window:
+                req["webview"].pop("port", None)
+                req["webview"].pop("token", None)
         if "updates_enabled" in req:
             if req["updates_enabled"] != config.conf.updates_enabled:
                 return {
                     "error": "manager_owned_setting",
-                    "message": "请在实例退出后通过多开管理器修改允许更新开关",
+                    "message": "请在实例退出后通过多开管理器修改更新与维护开关",
                 }, 403
             req.pop("updates_enabled")
         if "ai_assistant_enabled" in req:
@@ -1480,9 +1640,12 @@ def load_plan_from_json():
     else:
         from arknights_mower.utils.workshop_config import workshop_lock
 
-        plan = config.PlanModel(**request.json)
-        # 校验随排班保存的设置；网页配置保存仍负责更新运行配置。
-        apply_advanced_settings(config.conf, plan.advanced_settings)
+        try:
+            plan = config.PlanModel(**request.json)
+            # 校验随排班保存的设置；网页配置保存仍负责更新运行配置。
+            apply_advanced_settings(config.conf, plan.advanced_settings)
+        except (ValidationError, ValueError) as exc:
+            return {"error": "invalid_configuration", "message": str(exc)}, 400
         with workshop_lock:
             previous_plan = config.plan
             config.plan = plan
@@ -1642,6 +1805,7 @@ def item_list():
 
 
 @app.route("/depot/readdepot")
+@require_token
 def read_depot():
     from datetime import datetime as _dt
 
@@ -1834,7 +1998,19 @@ def _describe_task(task, facilities: dict | None = None) -> str:
     return f"{type_name} {body}" if type_name else body
 
 
+def runtime_deployment():
+    from arknights_mower.utils.performance import is_android_runtime
+    from arknights_mower.utils.update_runtime import frozen
+
+    if is_android_runtime() or frozen():
+        return "release"
+    if app.extensions.get("software_update_provider") is not None:
+        return None
+    return "source"
+
+
 @app.route("/status")
+@require_token
 def get_status():
     from arknights_mower.utils import crash_recovery
 
@@ -1842,6 +2018,7 @@ def get_status():
     with scheduled_start_lock:
         start_at = scheduled_start_at.isoformat() if scheduled_start_at else None
     response = {
+        "deployment": runtime_deployment(),
         "updates_enabled": app.config["UPDATES_ENABLED"],
         "ai_assistant_enabled": app.config["AI_ASSISTANT_ENABLED"],
         "desktop_startup_handled": bool(app.config.get("DESKTOP_STARTUP_HANDLED")),
@@ -2031,16 +2208,10 @@ def _start_mower(
         )
         if start_type == "1":
             saved_state["tasks"] = []
-        # 测试宿舍在首次扫描后直接收敛副表；旧宿舍保留可选重载流程。
-        try:
-            pass
-        except Exception:
-            # 导入链很长（__main__ → solvers → utils → ...），任何一个包缺失都会抛在
-            # 这里。不先落日志的话，界面上只会表现为「点了开始执行没反应、日志空白」，
-            # 例如打包版少了一个可选依赖 tinify 时的 ModuleNotFoundError。
-            logger.exception("导入 mower 主流程失败，无法开始执行")
-            raise
+        elif start_type == "3":
+            from arknights_mower.utils.scheduler_task import replan_update_tasks
 
+            saved_state = replan_update_tasks(saved_state)
         mower_thread = Thread(
             target=_run_mower_worker,
             args=(saved_state,),
@@ -2316,9 +2487,9 @@ def diagnostic_errors():
     return {"events": error_events(get_path("@app/screenshot"))}
 
 
-def _send_diagnostic_bundle(center, archive_id=None):
+def _send_diagnostic_bundle(center, archive_id=None, **options):
     bundle = export_bundle(
-        get_path("@app/log"), get_path("@app/screenshot"), center, archive_id
+        get_path("@app/log"), get_path("@app/screenshot"), center, archive_id, **options
     )
     response = send_file(
         bundle,
@@ -2342,7 +2513,29 @@ def diagnostic_export():
         center = datetime.datetime.fromtimestamp(timestamp / 1000)
     except (OverflowError, OSError, ValueError):
         return {"error": "请选择有效的导出时间"}, 400
-    return _send_diagnostic_bundle(center)
+    options = {}
+    if "start" in request.args or "end" in request.args:
+        start_ms = request.args.get("start", type=int)
+        end_ms = request.args.get("end", type=int)
+        if (
+            start_ms is None
+            or end_ms is None
+            or start_ms < 0
+            or end_ms <= start_ms
+            or end_ms > (time.time() + 3600) * 1000
+            or end_ms - start_ms > 7 * 24 * 3600 * 1000
+        ):
+            return {"error": "请选择有效的起止时间，单次最多导出 7 天"}, 400
+        try:
+            options["start"] = datetime.datetime.fromtimestamp(start_ms / 1000)
+            options["end"] = datetime.datetime.fromtimestamp(end_ms / 1000)
+        except (OverflowError, OSError, ValueError):
+            return {"error": "请选择有效的导出起止时间"}, 400
+    screenshots = request.args.get("screenshots", "1")
+    if screenshots not in ("0", "1"):
+        return {"error": "请选择是否包含截图"}, 400
+    options["include_screenshots"] = screenshots == "1"
+    return _send_diagnostic_bundle(center, **options)
 
 
 @app.route("/diagnostics/errors/<archive_id>/logs")
@@ -2625,6 +2818,7 @@ def resource_update_manual():
 @app.route("/dialog/save/img", methods=["POST"])
 @require_token
 def save_file_dialog():
+    request.max_form_memory_size = MAX_PLAN_IMPORT_BYTES
     img = request.files["img"]
 
     from PIL import Image
@@ -3592,12 +3786,17 @@ def install_resource():
             return {"ok": False, "message": "Mower 软件更新或进程操作正在进行中"}, 409
         try:
             job = resource_update.start(_request_title_refresh)
+            thread = resource_update.thread
+            installed_job = resource_update.job
         except ValueError as error:
             return {"ok": False, "message": str(error)}, 409
     if (request.get_json(silent=True) or {}).get("background") is True:
         return {"ok": True, "job": job}
-    resource_update.thread.join()
-    job = resource_update.snapshot()
+    # The tracked job blocks activation while synchronous clients wait.
+    if g.pop("configuration_locked", False):
+        backup_lock.release()
+    thread.join()
+    job = dict(installed_job)
     return {
         "ok": job["status"] == "success",
         "message": job["message"],
@@ -3627,13 +3826,14 @@ def date2str(target: datetime.date):
 
 
 @app.route("/report/getReportData")
+@require_token
 def get_report_data():
     record_path = get_path("@app/tmp/report.csv")
     try:
         format_data = []
         if os.path.exists(record_path) is False:
             logger.debug("基报不存在")
-            return False
+            return []
         data = read_dicts(record_path, encoding="gbk")
         for row in data:
             row["赤金"] = parse_cell_num(row["赤金"])
@@ -3687,68 +3887,42 @@ def get_report_data():
                 )
         logger.debug(format_data)
         return format_data
+    except EmptyDataError:
+        return []
     except PermissionError:
         logger.info("report.csv正在被占用")
+        return {"error": "report.csv 正在被其他程序占用，请关闭后刷新"}, 503
 
 
 @app.route("/report/getOrundumData")
+@require_token
 def get_orundum_data():
     record_path = get_path("@app/tmp/report.csv")
     try:
         format_data = []
         if os.path.exists(record_path) is False:
             logger.debug("基报不存在")
-            return False
+            return []
         data = read_dicts(record_path, encoding="gbk")
-        earliest_date = datetime.datetime.now()
-
-        begin_make_orundum = (earliest_date + datetime.timedelta(days=1)).date()
         for item in data:
-            # 脏数据（读取失败为 None）保留行但置空，避免被当作 0 污染累计总量
             item["合成玉"] = parse_cell_num(item["合成玉"])
             item["合成玉订单数量"] = parse_cell_num(item["合成玉订单数量"])
             if item["合成玉"] is None:
                 logger.debug("合成玉读取失败：{}".format(item.get("Unnamed: 0")))
-        if len(data) >= 15:
-            for i in range(len(data) - 1, -1, -1):
-                if 0 < i < len(data) - 15:
-                    data.pop(i)
-                else:
-                    logger.debug("合成玉{}".format(data[i]["合成玉"]))
-                    if data[i]["合成玉"] is not None and data[i]["合成玉"] > 0:
-                        begin_make_orundum = str2date(data[i]["Unnamed: 0"])
-        else:
-            for item in data:
-                if item["合成玉"] is not None and item["合成玉"] > 0:
-                    begin_make_orundum = str2date(item["Unnamed: 0"])
-        if begin_make_orundum > earliest_date.date():
-            return format_data
         total_orundum = 0
         for item in data:
-            if item["合成玉"] is None:
-                # 脏行保留、累计值断开，与赤金等字段的 null 表现一致
-                format_data.append(
-                    {
-                        "日期": date2str(
-                            str2date(item["Unnamed: 0"]) - datetime.timedelta(days=1)
-                        ),
-                        "合成玉": None,
-                        "合成玉订单数量": None,
-                        "抽数": None,
-                        "累计制造合成玉": None,
-                    }
-                )
-                continue
-            total_orundum = total_orundum + item["合成玉"]
+            amount = item["合成玉"]
+            if amount is not None:
+                total_orundum += amount
             format_data.append(
                 {
                     "日期": date2str(
                         str2date(item["Unnamed: 0"]) - datetime.timedelta(days=1)
                     ),
-                    "合成玉": item["合成玉"],
+                    "合成玉": amount,
                     "合成玉订单数量": item["合成玉订单数量"],
-                    "抽数": round((item["合成玉"] / 600), 1),
-                    "累计制造合成玉": total_orundum,
+                    "抽数": round(amount / 600, 1) if amount is not None else None,
+                    "累计制造合成玉": total_orundum if amount is not None else None,
                 }
             )
 
@@ -3769,8 +3943,26 @@ def get_orundum_data():
                 )
         logger.debug(format_data)
         return format_data
+    except EmptyDataError:
+        return []
     except PermissionError:
         logger.info("report.csv正在被占用")
+        return {"error": "report.csv 正在被其他程序占用，请关闭后刷新"}, 503
+
+
+@contextmanager
+def configuration_test_request():
+    global configuration_test_active_requests
+
+    with backup_lock:
+        configuration_test_active_requests += 1
+    if g.pop("configuration_locked", False):
+        backup_lock.release()
+    try:
+        yield
+    finally:
+        with backup_lock:
+            configuration_test_active_requests -= 1
 
 
 @app.route("/test-email")
@@ -3791,30 +3983,30 @@ def test_email():
 @app.route("/test-custom-screenshot")
 @require_token
 def test_custom_screenshot():
-    import base64
-    import subprocess
-
-    import cv2
-    import numpy as np
-
     command = config.conf.custom_screenshot.command
+    with configuration_test_request():
+        import base64
+        import subprocess
 
-    start = time.time()
-    data = subprocess.check_output(
-        command,
-        shell=True,
-        creationflags=subprocess.CREATE_NO_WINDOW if __system__ == "windows" else 0,
-    )
-    end = time.time()
-    elapsed = int((end - start) * 1000)
+        import cv2
+        import numpy as np
 
-    data = np.frombuffer(data, np.uint8)
-    data = cv2.imdecode(data, cv2.IMREAD_COLOR)
-    _, data = cv2.imencode(".jpg", data, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-    data = base64.b64encode(data)
-    data = data.decode("ascii")
+        start = time.time()
+        data = subprocess.check_output(
+            command,
+            shell=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if __system__ == "windows" else 0,
+        )
+        end = time.time()
+        elapsed = int((end - start) * 1000)
 
-    return {"elapsed": elapsed, "screenshot": data}
+        data = np.frombuffer(data, np.uint8)
+        data = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        _, data = cv2.imencode(".jpg", data, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+        data = base64.b64encode(data)
+        data = data.decode("ascii")
+
+        return {"elapsed": elapsed, "screenshot": data}
 
 
 @app.route("/test-serverJang-push")
@@ -3854,7 +4046,8 @@ def test_skland():
 def test_skland_sign():
     from arknights_mower.solvers.skland import SKLand
 
-    return SKLand().test_sign()
+    with configuration_test_request():
+        return SKLand().test_sign()
 
 
 @app.route("/mastery-recommendation-debug")
@@ -3934,6 +4127,7 @@ def mastery_recommendation_debug():
 
 
 @app.route("/mastery-recommendation")
+@require_token
 def mastery_recommendation():
     from arknights_mower.utils.mastery_recommendation import get_mastery_recommendations
 
@@ -4366,8 +4560,27 @@ def submit_feedback():
     )
 
 
+@contextmanager
+def configuration_chat_request(generation):
+    global chat_active_requests
+    from arknights_mower.utils.config_profiles import check_generation
+
+    # Admission and profile activation share the same serialization boundary.
+    with backup_lock:
+        check_generation(generation)
+        chat_active_requests += 1
+    try:
+        yield
+    finally:
+        with backup_lock:
+            chat_active_requests -= 1
+
+
 @sock.route("/ws/chat")
 def ws_chat(ws):
+    from arknights_mower.utils.config_backup import LocalConfigError
+    from arknights_mower.utils.config_profiles import ProfileConflict
+
     if not _authorize_websocket(ws):
         return
     if not app.config["AI_ASSISTANT_ENABLED"]:
@@ -4400,23 +4613,38 @@ def ws_chat(ws):
                 if not isinstance(user_input, str) or len(user_input) > 4000:
                     ws.send(json.dumps({"error": "消息过长或格式无效"}))
                     continue
-                context.append({"role": "user", "content": user_input})
-                context = context[-20:]
-                logger.debug(f"收到llm请求：{user_input}")
-                # 用流式生成器
-                from arknights_mower.agent.agent import ask_llm
+                with configuration_chat_request(req.get("generation")):
+                    context.append({"role": "user", "content": user_input})
+                    context = context[-20:]
+                    logger.debug(f"收到llm请求：{user_input}")
+                    # 用流式生成器
+                    from arknights_mower.agent.agent import ask_llm
 
-                for reply in ask_llm(
-                    user_input,
-                    context=context[:-1],
-                    api_key=config.conf.resolved_ai_key,
-                ):
-                    ws.send(json.dumps({"reply": reply}))
-                    last_reply = reply
-                if last_reply:
-                    context.append({"role": "assistant", "content": reply})
-                ws.send(json.dumps({"done": True}))
+                    for reply in ask_llm(
+                        user_input,
+                        context=context[:-1],
+                        api_key=config.conf.resolved_ai_key,
+                    ):
+                        ws.send(json.dumps({"reply": reply}))
+                        last_reply = reply
+                    if last_reply:
+                        context.append({"role": "assistant", "content": reply})
+                    ws.send(json.dumps({"done": True}))
         except (ConnectionClosed, OSError):
+            break
+        except (ProfileConflict, LocalConfigError) as exc:
+            try:
+                ws.send(
+                    json.dumps(
+                        {
+                            "error": str(exc),
+                            "code": getattr(exc, "code", "configuration_unavailable"),
+                        }
+                    )
+                )
+                ws.close(reason=4409, message="Configuration unavailable")
+            except (ConnectionClosed, OSError):
+                pass
             break
         except Exception as e:
             logger.exception(f"WebSocket处理错误：{str(e)}")
@@ -4431,17 +4659,64 @@ app.register_blueprint(task_bp)
 app.register_blueprint(db_admin_bp)
 app.register_blueprint(software_update_bp)
 app.register_blueprint(network_bp)
+
+
+def _recycling_reports_running():
+    module = sys.modules.get("arknights_mower.utils.recycling_report")
+    return bool(module and module.running())
+
+
+def _configuration_recovery_pending():
+    from arknights_mower.utils import crash_recovery
+
+    return crash_recovery.status()["automatic"]
+
+
 app.register_blueprint(config_backup_bp)
 app.config["CONFIG_BACKUP_MAINTENANCE_LOCK"] = maa_maintenance_lock
+app.config["CONFIGURATION_ACTIVATED"] = lambda: _stop_mower()
 app.config["CONFIG_BACKUP_BUSY"] = lambda: bool(
     (mower_thread and mower_thread.is_alive())
+    or chat_active_requests > 0
+    or configuration_test_active_requests > 0
+    or _recycling_reports_running()
+    or _configuration_recovery_pending()
     or active_job()
     or _job_running(maa_update_job)
     or _job_running(maa_resource_update_job)
     or resource_update.running()
 )
+
+
+@contextmanager
+def configuration_profile_locks():
+    from arknights_mower.__main__ import device_control
+
+    with maa_maintenance_lock, maa_check_lock, device_control.configuration_lock:
+        yield
+
+
+def configuration_profiles_busy():
+    from arknights_mower.__main__ import device_control
+
+    _collect_maa_check_result()
+    return bool(
+        shutdown.closing
+        or app.config["CONFIG_BACKUP_BUSY"]()
+        or device_control.active
+        or _performance_test_status()["status"] == "running"
+        or maa_check_job["status"] == "running"
+    )
+
+
+app.config["CONFIG_PROFILES_LOCKS"] = configuration_profile_locks
+app.config["CONFIG_PROFILES_BUSY"] = configuration_profiles_busy
+app.register_blueprint(config_profiles_bp)
 app.register_blueprint(process_control_bp)
 app.register_blueprint(ui_state_bp)
+app.register_blueprint(gui_bp)
+app.config["WEB_UI_ORIGIN_ALLOWED"] = same_origin_allowed
+app.register_blueprint(instances_bp)
 
 # Flask CLI handles Ctrl+C itself; atexit enters the same process-owned close.
 register_shutdown(shutdown)

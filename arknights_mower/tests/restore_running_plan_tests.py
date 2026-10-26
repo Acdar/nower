@@ -30,6 +30,44 @@ def restore(client):
     return client.post("/plan/restore-running", headers={"token": "restore-test"})
 
 
+@pytest.mark.parametrize("limit", [0, 10, 19])
+def test_restore_normalizes_legacy_drone_limit(client, monkeypatch, limit):
+    source = {"advanced_settings": {"drone_count_limit": limit}}
+    monkeypatch.setattr(server, "mower_thread", SimpleNamespace(is_alive=lambda: True))
+    monkeypatch.setattr(
+        mower_main, "base_scheduler", SimpleNamespace(source_plan=source)
+    )
+    response = restore(client)
+    assert response.status_code == 200
+    assert config.conf.drone_count_limit == 20
+    assert config.plan.advanced_settings["drone_count_limit"] == 20
+    assert safe_load(config.conf_path.read_text())["drone_count_limit"] == 20
+    assert (
+        json.loads(config.plan_path.read_text())["advanced_settings"][
+            "drone_count_limit"
+        ]
+        == 20
+    )
+    assert source["advanced_settings"]["drone_count_limit"] == limit
+
+
+@pytest.mark.parametrize("token", [None, "wrong"])
+def test_restore_rejects_unauthorized_requests_before_access(
+    client, monkeypatch, token
+):
+    class ForbiddenThread:
+        def is_alive(self):
+            pytest.fail("未授权请求访问运行排班")
+
+    monkeypatch.setattr(server, "mower_thread", ForbiddenThread())
+    response = client.post(
+        "/plan/restore-running", headers={"token": token} if token else {}
+    )
+    assert response.status_code == 403
+    assert not config.plan_path.exists()
+    assert not config.conf_path.exists()
+
+
 def test_runtime_plan_keeps_independent_startup_snapshot(monkeypatch):
     configured = config.PlanModel(plan1={"central": {"plans": [{"agent": "阿米娅"}]}})
     monkeypatch.setattr(config, "plan", configured)
@@ -43,17 +81,21 @@ def test_runtime_plan_keeps_independent_startup_snapshot(monkeypatch):
 
 def test_startup_snapshot_captures_actual_advanced_settings(monkeypatch):
     configured = config.PlanModel(advanced_settings={"drone_count_limit": 20})
-    startup_conf = config.Conf(drone_count_limit=150, drone_interval=2)
+    startup_conf = config.Conf(
+        drone_count_limit=150, drone_interval=2, test_mood_calculation=True
+    )
     monkeypatch.setattr(config, "plan", configured)
     monkeypatch.setattr(config, "conf", startup_conf)
 
     _, snapshot = build_global_plan(include_source=True)
     startup_conf.drone_count_limit = 20
     startup_conf.product_switching.waiting_seconds = 5
+    startup_conf.test_mood_calculation = False
 
     assert set(snapshot["advanced_settings"]) == set(ADVANCED_SETTING_KEYS)
     assert snapshot["advanced_settings"]["drone_count_limit"] == 150
     assert snapshot["advanced_settings"]["drone_interval"] == 2
+    assert snapshot["advanced_settings"]["test_mood_calculation"] is True
     assert snapshot["advanced_settings"]["product_switching"]["waiting_seconds"] == 2
     assert configured.advanced_settings == {"drone_count_limit": 20}
 
@@ -65,7 +107,12 @@ def test_restore_running_plan_uses_startup_snapshot(client, monkeypatch):
             {"name": "运行副表", "plan": {}, "conf": {}, "task": {}, "trigger": {}}
         ],
         advanced_settings=export_advanced_settings(
-            config.Conf(drone_count_limit=150, drone_interval=2, free_room=True)
+            config.Conf(
+                drone_count_limit=150,
+                drone_interval=2,
+                free_room=True,
+                test_mood_calculation=True,
+            )
         ),
     )
     edited = config.PlanModel(
@@ -92,9 +139,11 @@ def test_restore_running_plan_uses_startup_snapshot(client, monkeypatch):
     assert config.conf.drone_count_limit == 150
     assert config.conf.drone_interval == 2
     assert config.conf.free_room is True
+    assert config.conf.test_mood_calculation is True
     assert config.conf.account == "current account"
     assert config.conf.drone_room == "room_3_3"
     assert safe_load(config.conf_path.read_text())["drone_count_limit"] == 150
+    assert safe_load(config.conf_path.read_text())["test_mood_calculation"] is True
     assert (
         json.loads(config.plan_path.read_text())["advanced_settings"]
         == startup.advanced_settings

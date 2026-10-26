@@ -1,4 +1,4 @@
-"""用实测工作消耗与宿舍恢复记录近似估算召回后的续航。"""
+"""按所选心情来源估算召回后的工作消耗与宿舍恢复速率。"""
 
 from datetime import datetime, timedelta
 from math import isfinite
@@ -13,6 +13,7 @@ def _observed(op, now):
         op.time_stamp is not None
         and op.time_stamp <= now
         and not getattr(op, "mood_is_prediction", False)
+        and not getattr(op, "working_mood_unconfirmed", False)
         and isinstance(op.mood, (int, float))
         and isfinite(op.mood)
         and 0 <= op.mood <= 24
@@ -24,6 +25,7 @@ def observe_work_rate(op, mood, room, index, now, *, preserve=False):
     op.recall_work_rate_checked = True
     if (
         preserve
+        or not getattr(op, "work_rate_sample_eligible", True)
         or not op.is_working()
         or (op.current_room, op.current_index) != (room, index)
         or not _observed(op, now)
@@ -36,6 +38,7 @@ def observe_work_rate(op, mood, room, index, now, *, preserve=False):
     rate = (op.mood - mood) * 3600 / (now - op.time_stamp).total_seconds()
     if _positive(rate):
         op.recall_work_rate = (rate, now)
+        return rate
 
 
 def _bed_role(data, op, *, projected=False):
@@ -134,8 +137,19 @@ def observe_recovery_rate(data, bed, *, now=None):
 
 
 def estimated_recall_rates(original, admitted, now=None):
-    """只返回有实测依据的近似速率，不写回实际心情、期限或缓存。"""
+    """返回模型阵容速率或实测近似速率，不写回实际心情与期限。"""
     now = now or datetime.now()
+    if getattr(original, "mood_calculation_enabled", False):
+        work, recovery = {}, {}
+        for name, projected in admitted.operators.items():
+            rate = admitted.calculated_mood_rate(name, now)
+            if not isinstance(rate, (int, float)) or not isfinite(rate):
+                continue
+            if projected.is_working() and rate >= 0:
+                work[name] = rate
+            elif projected.is_resting() and rate < 0:
+                recovery[name] = -rate
+        return work, recovery
     samples = {
         role: sample
         for role, sample in getattr(original, "recall_recovery_rates", {}).items()
