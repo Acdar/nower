@@ -1144,10 +1144,11 @@ async function db_delete(keys) {
 
 .home-container--mobile .log-bg {
   inset: auto 0 64px;
-  height: 46%;
+  height: 62%;
   background-size: contain;
   background-position: center bottom;
   transform: none;
+  opacity: 1;
   -webkit-mask-image: none;
   mask-image: none;
 }
