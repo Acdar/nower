@@ -1,7 +1,9 @@
 """Regression tests for the existing native window state and normal bounds."""
 
 import os
+import time
 import unittest
+from threading import Thread
 from unittest import mock
 
 from arknights_mower.utils import window_shell
@@ -79,6 +81,18 @@ class TestWindowsLiveState(unittest.TestCase):
 class TestPageLoadReadiness(unittest.TestCase):
     """Native window events can arrive before the page they are meant for."""
 
+    def _publisher(self, bridge):
+        bridge._worker = Thread(target=bridge._publish_native_changes, daemon=True)
+        bridge._worker.start()
+        self.addCleanup(bridge.dispose)
+
+    def _wait_for_delivery(self, win, count=1):
+        deadline = time.monotonic() + 5
+        while win.evaluate_js.call_count < count:
+            if time.monotonic() >= deadline:
+                self.fail("window state was never delivered")
+            time.sleep(0.01)
+
     def test_state_is_cached_while_the_page_is_still_loading(self):
         win = mock.Mock()
         win.events.loaded.is_set.return_value = False
@@ -94,20 +108,19 @@ class TestPageLoadReadiness(unittest.TestCase):
         win = mock.Mock()
         win.events.loaded.is_set.return_value = False
         bridge = window_shell.WindowShellBridge(win, system="linux")
+        self._publisher(bridge)
         bridge._on_resized(1200, 700)
-        bridge._publish_state()
+        time.sleep(0.1)
         win.evaluate_js.assert_not_called()
         # pywebview runs the loaded callbacks before it marks that event as set,
-        # so this callback must not re-ask the event it represents.
+        # so this callback must publish the readiness it represents.
         bridge._on_loaded()
-        bridge._publish_state()
-        win.evaluate_js.assert_called_once()
+        self._wait_for_delivery(win)
         script = win.evaluate_js.call_args.args[0]
         self.assertIn(window_shell.WINDOW_SHELL_EVENT, script)
         self.assertIn('"width": 1200', script)
         bridge._on_restored()
-        bridge._publish_state()
-        self.assertEqual(win.evaluate_js.call_count, 2)
+        self._wait_for_delivery(win, 2)
 
     def test_attach_asks_for_a_delivery_once_the_page_loads(self):
         # pywebview Event objects add handlers through __iadd__, which only
@@ -126,5 +139,11 @@ class TestPageLoadReadiness(unittest.TestCase):
 
         win = Window()
         bridge = window_shell.WindowShellBridge(win, system="linux")
-        bridge._publish_state()
+        self._publisher(bridge)
+        bridge._on_restored()
+        deadline = time.monotonic() + 5
+        while win.script is None:
+            if time.monotonic() >= deadline:
+                self.fail("window state was never delivered")
+            time.sleep(0.01)
         self.assertIn(window_shell.WINDOW_SHELL_EVENT, win.script)

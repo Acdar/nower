@@ -119,7 +119,7 @@ def exit_if_webview_backend_missing():
 # 若当成立即写回配置，下次打开就缩成一团——下限钳制挡住这些残留事件。
 MIN_WINDOW_SIZE = 100
 # 仅在 gui.yml 缺失或内容损坏（极小/零/非数字）时兜底，避免坏尺寸被读进创建
-# 并再次持久化。窗口尺寸唯一落在 GUI 进程专属的 gui.yml，不再进共享的 conf.yml。
+# 并再次持久化。窗口尺寸落在实例 gui.yml，与界面偏好共用锁后更新。
 DEFAULT_WINDOW_SIZE = (1450, 850)
 
 
@@ -365,6 +365,7 @@ def webview_window(
         return
     windows_native = backend == "winforms"
     shell_enabled = backend in SUPPORTED_BACKENDS
+    managed = os.environ.get("MOWER_MANAGED") == "1"
     theme = config.conf.theme
     ratio = load_window_ratio()
     if ratio:
@@ -383,9 +384,14 @@ def webview_window(
     startup_maximize_pending = windows_native and startup_mode == "maximized"
     normal_size_lock = Lock()
 
-    url = append_query_param(url, "window_shell", "1") if shell_enabled else url
-    url = append_query_param(url, "window_theme", theme)
-    url = append_query_param(url, "mower_version", title_version())
+    window_url = append_query_param(url, "instance_name", instance_name)
+    window_url = (
+        append_query_param(window_url, "window_shell", "1")
+        if shell_enabled
+        else window_url
+    )
+    window_url = append_query_param(window_url, "window_theme", theme)
+    window_url = append_query_param(window_url, "mower_version", title_version())
 
     def current_dpi_scale() -> float:
         # 窗口所在显示器 DPI 缩放（1.0 / 1.25 / 1.5 ...）。resized 回调给的是物理
@@ -445,9 +451,9 @@ def webview_window(
     min_size = desktop_window_min_size()
     window = webview.create_window(
         window_title(instance_name, port),
-        url,
+        window_url,
         text_select=True,
-        confirm_close=not tray,
+        confirm_close=not (tray or managed),
         width=width,
         height=height,
         min_size=min_size,
@@ -461,8 +467,9 @@ def webview_window(
     bridge = attach_window_shell(
         window,
         initial_size=WindowSize(width, height),
-        tray_enabled=tray,
+        tray_enabled=tray and not managed,
         backend=backend,
+        managed=managed,
     )
 
     def on_closing():
@@ -945,7 +952,6 @@ def _run_desktop():
     )
     url = f"http://127.0.0.1:{port}"
     url += f"?token={runtime_token}"
-    url = append_query_param(url, "instance_name", instance_name)
     start_http_server(server.app, host, port)
     ready_deadline = monotonic() + 15
     while not is_port_in_use(port):
@@ -965,9 +971,16 @@ def _run_desktop():
     resume = (
         resume_mode in ("0", "1")
         or resume_run
-        or (resume_mode != "preserve" and conf.start_automatically)
+        or (
+            not os.environ.get("MOWER_RESTART_JOB")
+            and resume_mode != "preserve"
+            and conf.start_automatically
+        )
     )
-    child_ready(registration, desired_running=resume)
+    start_type = (
+        resume_mode if resume_mode in ("0", "1") else "2" if resume_run else "0"
+    )
+    child_ready(registration, desired_running=resume, start_type=start_type)
     crash_notice = crash_recovery.status()
     if crash_recovery.notice_path() is not None:
         recovery = crash_recovery.AutomaticRecovery(
@@ -1114,7 +1127,7 @@ def _run_desktop():
                     sleep(0.5)
                     continue
                 with server.app.test_request_context(headers={"token": runtime_token}):
-                    stopped = server.stop() == "true"
+                    stopped = server.stop(user_requested=False) == "true"
                 if stopped and registration.shutdown_requested():
                     shutdown.request("runtime_request")
                     break

@@ -2396,9 +2396,7 @@ class TestTrainGateReadThenJudge(unittest.TestCase):
 
 
 class TestScanDispatchMastery(unittest.TestCase):
-    """#74 第3段：扫描 = 唯一周期派发点——`_auto_schedule_mastery_after_scan` 对材料
-    足够的 idle 计划入队「开始训练」SKILL_UPGRADE（plan_key 指定计划，无逻辑标记）。
-    """
+    """材料确认后只为首个就绪计划派发开始任务，已有训练时保留原任务。"""
 
     def _solver(self):
         solver = base_schedule.BaseSchedulerSolver()
@@ -2440,7 +2438,7 @@ class TestScanDispatchMastery(unittest.TestCase):
         self.assertLessEqual(task.time, datetime.now() + timedelta(seconds=1))
 
     @patch.object(base_schedule.BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_dispatch_scan_start_tasks_skips_non_idle_and_unconfirmed(self):
+    def test_dispatch_scan_start_tasks_skips_when_other_skill_is_training(self):
         solver = self._solver()
         idle_ok = self._idle_plan(pid=3, char_id="char_a", skill_index=1)
         idle_no_material = self._idle_plan(pid=4, char_id="char_b", skill_index=1)
@@ -2455,8 +2453,7 @@ class TestScanDispatchMastery(unittest.TestCase):
             base_schedule.BaseSchedulerSolver._dispatch_scan_start_tasks(
                 solver, [{"char_id": "char_a", "skill_index": 1}]
             )
-        self.assertEqual(len(solver.tasks), 1, "只入队 idle 且材料足够的计划")
-        self.assertEqual(solver.tasks[0].plan_key, "3")
+        self.assertEqual(solver.tasks, [], "其他技能正在训练时不派发开始任务")
 
     @patch.object(base_schedule.BaseSchedulerSolver, "__init__", lambda x: None)
     def test_dispatch_scan_start_tasks_dedup_same_plan(self):
@@ -2476,16 +2473,12 @@ class TestScanDispatchMastery(unittest.TestCase):
         self.assertEqual(len(upgrades), 1)
 
     @patch.object(base_schedule.BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_dispatch_scan_start_tasks_one_task_per_skill(self):
-        # 存量库同一 (干员, 技能) 有多行（insert_plan 无去重）→ 每个键只派第一条 idle
-        # 行：旧实现按行派发，7 行数据会发 7 条一模一样的「开始训练」，只有一条能真跑
-        # （实测 `scheduled=1` 却打出「已为 7 个……安排开始训练」）。
+    def test_dispatch_scan_start_tasks_only_first_skill_despite_duplicate_rows(self):
         solver = self._solver()
         rows = [
             self._idle_plan(pid=1, char_id="char_a", skill_index=1),
             self._idle_plan(pid=2, char_id="char_a", skill_index=1),
             self._idle_plan(pid=3, char_id="char_a", skill_index=1),
-            # 同一时刻另一个技能的任务必须保留（按时间判重会把这条吞掉）
             self._idle_plan(pid=4, char_id="char_b", skill_index=1),
         ]
         with (
@@ -2501,11 +2494,11 @@ class TestScanDispatchMastery(unittest.TestCase):
             )
         self.assertEqual(
             [t.plan_key for t in solver.tasks],
-            ["1", "4"],
-            "同键只派第一条 idle 行，不同技能各自保留",
+            ["1"],
+            "重复行及其他技能均不增加开始任务",
         )
         self.assertTrue(
-            any("已为 2 个" in c.args[0] for c in info.call_args_list),
+            any("已为 1 个" in c.args[0] for c in info.call_args_list),
             "日志里的 N 要与实际入队数一致",
         )
 
@@ -3318,6 +3311,84 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         self.assertEqual(taps, [confirm_at])
         solver.sleep.assert_called_once_with(88.0)
 
+    def make_order_with_retained_selection(self, submitted_agent="但书"):
+        solver, room, _ = self.make_solver()
+        solver.task.time -= timedelta(minutes=5)
+        state = {"page": "selection", "physical": "旧干员"}
+        observations = []
+        confirmations = []
+
+        def read_room(*_args, **_kwargs):
+            self.assertNotEqual(state["page"], "connecting")
+            observations.append(state["physical"])
+            return [{"agent": state["physical"]}]
+
+        def find(name, **_kwargs):
+            if name == "connecting" and state["page"] == "connecting":
+                return (100, 100)
+            if name == "confirm_blue" and state["page"] == "selection":
+                return (1768, 1015)
+            if name == "room_detail" and state["page"] == "details":
+                return (100, 100)
+            return None
+
+        def tap(*_args, **_kwargs):
+            if state["page"] == "details":
+                state["page"] = "selection"
+                return
+            self.assertEqual(state["page"], "selection")
+            confirmations.append(state["physical"])
+            state.update(page="connecting", physical=submitted_agent)
+
+        def finish_submission():
+            self.assertEqual(state["page"], "connecting")
+            state["page"] = "selection"
+            return True
+
+        solver.get_agent_from_room.side_effect = read_room
+        solver.find.side_effect = find
+        solver.tap = MagicMock(side_effect=tap)
+        solver.sleep = MagicMock()
+        solver.waiting_solver = MagicMock(side_effect=finish_submission)
+        solver.back.side_effect = lambda *_args, **_kwargs: state.update(page="details")
+        solver.tap_confirm = BaseSchedulerSolver.tap_confirm.__get__(solver)
+        return solver, room, observations, confirmations
+
+    def test_submitted_order_still_showing_selection_is_verified_in_room(self):
+        solver, room, observations, confirmations = (
+            self.make_order_with_retained_selection()
+        )
+
+        with patch.object(base_schedule, "save_exception"):
+            original = solver.agent_arrange_room({}, room, solver.task.plan)
+
+        self.assertEqual(original, {room: ["旧干员"]})
+        self.assertEqual(observations, ["旧干员", "但书"])
+        self.assertEqual(confirmations, ["旧干员"])
+        self.assertEqual(solver.task.plan, {})
+        self.assertTrue(solver.task.run_order_restore_pending)
+        solver.waiting_solver.assert_called_once_with()
+        solver.choose_agent.assert_called_once()
+
+    def test_submission_feedback_without_matching_roster_retains_restoration(self):
+        for actual in ("旧干员", None):
+            with self.subTest(actual=actual):
+                solver, room, observations, confirmations = (
+                    self.make_order_with_retained_selection(actual)
+                )
+                with patch.object(base_schedule, "save_exception"):
+                    with self.assertRaisesRegex(Exception, "检测到安排干员未成功"):
+                        solver.agent_arrange_room({}, room, solver.task.plan)
+
+                self.assertEqual(observations, ["旧干员", actual])
+                self.assertEqual(confirmations, ["旧干员"])
+                self.assertEqual(solver.task.plan, {room: ["但书"]})
+                self.assertEqual(
+                    solver.task.run_order_original_roster, {room: ["旧干员"]}
+                )
+                self.assertTrue(solver.task.run_order_restore_pending)
+                solver.choose_agent.assert_called_once()
+
     def test_two_slot_task_runs_after_extra_target_is_removed(self):
         solver, room, _ = self.make_solver(target="乌尔比安")
         solver.task.type = TaskTypes.SHIFT_ON
@@ -3361,7 +3432,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
                 solver.back.assert_called_once()
                 self.assertIn(room, solver.task.plan)
 
-    def test_invalid_countdown_retains_order_without_claiming_a_miss(self):
+    def test_outside_countdown_reports_miss_before_selection(self):
         for remaining in (0, -1, 660, 900):
             with self.subTest(remaining=remaining):
                 solver, room, _ = self.make_solver()
@@ -3375,15 +3446,15 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
                     patch.object(base_schedule, "send_message") as notify,
                     patch.object(base_schedule, "save_exception"),
                 ):
-                    with self.assertRaises(base_schedule.RoomArrangementDeferred):
+                    with self.assertRaises(base_schedule.RunOrderMissed):
                         solver.agent_arrange_room({}, room, solver.task.plan)
                 self.assertEqual(solver.task.time, original_time)
                 self.assertEqual(solver.task.plan, original_plan)
                 self.assertEqual(solver.tasks, [solver.task])
                 solver.choose_agent.assert_not_called()
                 solver.tap_confirm.assert_not_called()
-                solver.reset_room_time.assert_not_called()
-                notify.assert_not_called()
+                solver.reset_room_time.assert_called_once_with(room)
+                notify.assert_called_once_with("检测到漏单！", level="WARNING")
 
     def test_adjusted_order_can_continue_with_out_of_range_countdown(self):
         solver, room, events = self.make_solver()
@@ -3397,7 +3468,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         self.assertEqual(solver.turn_on_room_detail.call_count, 1)
         solver.reset_room_time.assert_not_called()
 
-    def test_resumed_window_failure_rechecks_countdown_before_selection(self):
+    def test_resumed_arrangement_rechecks_countdown_before_selection(self):
         solver, room, events = self.make_solver()
         solver.task.arrangement_retry_room = room
         solver.task.arrangement_retry_count = 1
@@ -3642,7 +3713,7 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
         solver.get_order_remaining_time.assert_called_once_with()
 
     @patch.object(BaseSchedulerSolver, "__init__", lambda x: None)
-    def test_changed_countdown_checks_actual_order_without_claiming_a_miss(self):
+    def test_changed_countdown_reports_miss_and_restores_original_roster(self):
         room = "room_1_1"
         task = SchedulerTask(
             time=datetime.now(),
@@ -3668,11 +3739,12 @@ class TestRunOrderCountdownTiming(unittest.TestCase):
             patch.object(base_schedule, "save_exception") as save_exception,
             patch.object(base_schedule, "send_message") as send_message,
         ):
-            solver.agent_arrange(task.plan)
+            with self.assertRaises(base_schedule.RunOrderMissed):
+                solver.agent_arrange(task.plan)
 
-        error.assert_not_called()
-        save_exception.assert_not_called()
-        send_message.assert_not_called()
+        error.assert_called_once()
+        save_exception.assert_called_once()
+        send_message.assert_called_once_with("检测到漏单！", level="WARNING")
         solver.accept_order.assert_called_once_with()
         self.assertEqual(solver.agent_arrange_room.call_count, 2)
 

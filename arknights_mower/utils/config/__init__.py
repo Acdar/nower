@@ -18,11 +18,12 @@ from arknights_mower.utils.config.plan import (
     PlanModel,
     has_retired_dorm_options,
     migrate_legacy_dorm_order,
+    parse_plan_document,
     retire_rescue_backups,
 )
 from arknights_mower.utils.log import frontend_log_queue, logger
 from arknights_mower.utils.network_settings import apply_http_proxy
-from arknights_mower.utils.path import get_path
+from arknights_mower.utils.path import get_path, move_file
 
 # Compatibility alias; log delivery does not depend on configuration loading.
 log_queue = frontend_log_queue
@@ -33,9 +34,12 @@ apply_http_proxy()
 # 在启动时搬一次——不搬会静默生成默认配置、把老配置弄丢。
 conf_path = get_path("@app/config/conf.yml")
 plan_path = get_path("@app/config/plan.json")
+rescue_plan_path = get_path("@app/config/rescue_plan.json")
 app_state_path = get_path("@app/config/state.json")
 weekly_plans_path = get_path("@app/config/weekly_plans.yml")
 gui_path = get_path("@app/config/gui.yml")
+growth_plan_path = get_path("@app/config/growth_plan.json")
+workshop_preset_path = get_path("@app/config/workshop_preset.json")
 
 _LEGACY_CONF_PATH = get_path("@app/conf.yml")
 _LEGACY_PLAN_PATH = get_path("@app/plan.json")
@@ -49,6 +53,8 @@ _CONFIG_PATH_PAIRS = (
     (_LEGACY_APP_STATE_PATH, app_state_path),
     (_LEGACY_WEEKLY_PLANS_PATH, weekly_plans_path),
     (_LEGACY_GUI_PATH, gui_path),
+    (get_path("@app/tmp/growth_plan.json"), growth_plan_path),
+    (get_path("@app/tmp/workshop_preset.json"), workshop_preset_path),
 )
 
 
@@ -97,23 +103,27 @@ def atomic_write(path, writer, replace_retries=3):
 
 
 def migrate_app_config_paths():
-    """新路径缺失且旧路径存在 → os.replace 搬过去；两边都在 → 不动。
+    """新路径缺失且旧路径存在 → 搬过去；两边都在 → 不动。
 
-    os.replace 失败（Windows 上 AV/另一进程瞬时锁住旧文件，或双进程并发首次迁移
-    的 TOCTOU）时检查目标是否已由另一进程迁移；否则中止启动，防止生成默认配置遮蔽旧文件。
+    跨卷时（如 @app/tmp 是指向其他磁盘的 junction）move_file 退回复制后替换，
+    因为 os.replace 无法跨卷。搬移失败（Windows 上 AV/另一进程瞬时锁住旧文件，
+    或双进程并发首次迁移的 TOCTOU）时检查目标是否已就绪；否则中止启动，
+    防止生成默认配置遮蔽旧文件。
     """
     for old, new in _CONFIG_PATH_PAIRS:
         if new.exists() or not old.exists():
             continue
         try:
-            new.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(old, new)
-        except (FileNotFoundError, PermissionError) as exc:
+            move_file(old, new)
+        except OSError as exc:
             if not new.is_file():
                 raise OSError(
                     f"迁移配置 {old} → {new} 失败；已停止启动以保留原配置，请检查目录权限或文件占用"
                 ) from exc
-            logger.info("配置已由另一进程迁移：%s", new)
+            if old.exists():
+                logger.info("目标配置已就绪，旧文件未能删除：%s", new)
+            else:
+                logger.info("配置已由另一进程迁移：%s", new)
 
 
 migrate_app_config_paths()
@@ -133,6 +143,44 @@ def save_conf():
         )
 
     atomic_write(conf_path, dump)
+
+
+def save_rescue_plan():
+    atomic_write(
+        rescue_plan_path,
+        lambda stream: json.dump(
+            rescue_plan.model_dump(exclude_none=True),
+            stream,
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+
+
+def _load_rescue_plan(raw):
+    global rescue_plan
+    if rescue_plan_path.is_file():
+        with rescue_plan_path.open("r", encoding="utf-8-sig") as stream:
+            rescue_plan = parse_plan_document(json.load(stream))
+    else:
+        rescue_plan = PlanModel(**raw.get("automatic_rescue_plan", {}))
+        # 先提交独立排班，成功后才能清除旧全局字段。
+        save_rescue_plan()
+    if "automatic_rescue_plan" in raw:
+        # 其他旧字段仍由各自的迁移入口处理，不能在此提前清除。
+        atomic_write(
+            conf_path,
+            lambda stream: yaml.dump(
+                {
+                    key: value
+                    for key, value in raw.items()
+                    if key != "automatic_rescue_plan"
+                },
+                stream,
+                Dumper=CoreDumper,
+                allow_unicode=True,
+            ),
+        )
 
 
 _legacy_dorm_order = ""
@@ -169,6 +217,7 @@ def load_conf():
             and os.environ.get("MOWER_ANDROID") != "1"
             else Conf()
         )
+        _load_rescue_plan({})
         save_conf()
         return
     with conf_path.open("r", encoding="utf-8") as f:
@@ -185,6 +234,7 @@ def load_conf():
         & raw.keys()
     )
     conf = Conf(**raw)
+    _load_rescue_plan(raw)
 
 
 conf: Conf

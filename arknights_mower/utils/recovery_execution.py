@@ -1,15 +1,13 @@
-"""实际换人前的心情要求及独立恢复期限。"""
+"""共享替班召回判断与初始化驻员准入。"""
 
 from datetime import timedelta
 
-from arknights_mower.utils import config
 from arknights_mower.utils.dorm_candidates import (
     dorm_candidate_mood,
     scheduling_mood_observation,
 )
 from arknights_mower.utils.group_recovery import (
     completed_mood_limit_release,
-    group_recovery_deadline,
     observed_recovery_deadline,
     recovery_mood_complete,
 )
@@ -45,182 +43,26 @@ def recovery_ready_for_arrangement(data, name, *, sampled_after, now):
     )
 
 
-def required_recovery_members(data, task, *, now=None):
-    required = set()
-    urgent = getattr(task, "exhaust_support", False) and not getattr(
-        task, "ordinary_coordination", False
-    )
-    explicit = set(getattr(task, "backup_explicit_slots", ()))
-    for room, row in task.plan.items():
-        for index, name in enumerate(row):
-            if (room, index) in explicit:
-                continue
-            op = data.operators.get(name)
-            if op is None or room.startswith("dorm"):
-                continue
-            if not getattr(op, "rest_in_full", False) and not getattr(op, "group", ""):
-                continue
-            if (op.room, op.index) != (room, index) or op.is_working():
-                continue
-            if (
-                getattr(task, "initial_staffing", False)
-                and not op.rest_in_full
-                and not getattr(task, "derived_correction_started", False)
-                and not getattr(task, "group_shift_expected", {})
-                and name not in getattr(task, "initial_staffing_returns", ())
-                and not op.current_room
-                and not data.group_is_resting(op.group)
-                and (mood := dorm_candidate_mood(data, name, now)) is not None
-                and mood > op.lower_limit
-            ):
-                # 初始化空闲主班首次上岗不等于休息后的回班。
-                continue
-            if op.rest_in_full and not op.workaholic:
-                required.add(name)
-            if op.group:
-                required.update(
-                    member
-                    for member in group_recovery_deadline(data, op.group, now=now)[0]
-                    if not urgent or data.operators[member].rest_in_full
-                )
-    targets = (
-        task.release_dorm_targets() if hasattr(task, "release_dorm_targets") else {}
-    )
-    for name in targets:
-        op = data.operators.get(name)
-        if op is None or (
-            not getattr(op, "rest_in_full", False) and not getattr(op, "group", "")
-        ):
-            continue
-        if (op.current_room, op.current_index) != targets[name] or (
-            getattr(task, "strict_mood_limit", False)
-            and (
-                not data.has_rest_mood_limit(name)
-                or getattr(task, "mood_limit", None) not in (None, op.upper_limit)
-            )
-        ):
-            continue
-        if getattr(task, "strict_mood_limit", False):
-            # 个人上限离宿已预留操作时间，仍由清退入口核验床位与有效上限。
-            continue
-        group_required = (
-            group_recovery_deadline(data, op.group, now=now)[0] if op.group else ()
-        )
-        if op.rest_in_full and not op.workaholic or name in group_required:
-            required.add(name)
-    return required
-
-
-def pending_recovery_observations(data, names, *, now, sampled_after=None):
-    """已有恢复期限或本轮等待上限时，返回等待所依据的实读。"""
-    observations = {}
-    for name in names:
-        op = data.operators.get(name)
-        if (
-            op is None
-            or op.time_stamp is None
-            or sampled_after is not None
-            and op.time_stamp < sampled_after
-            or getattr(op, "mood_is_prediction", False)
-            or not 0 <= op.mood < op.upper_limit
-            or not op.is_resting()
-        ):
-            return None
-        due = recovery_observation_deadline(data, name, now=now)
-        if due is None or due <= now:
-            return None
-        observations[name] = op.time_stamp
-    return observations
-
-
-def recovery_observation_deadline(data, name, *, now):
-    """下一次核验不晚于已确认的组内等待上限，不延长原任务。"""
-    op = data.operators[name]
-    due = observed_recovery_deadline(data, name)
-    if (
-        not op.rest_in_full
-        and config.conf.group_mood_gap_max_extra_wait_hours > 0
-        and name in getattr(data, "group_recovery_full_members", {}).get(op.group, [])
-    ):
-        _, group_due = group_recovery_deadline(data, op.group, now=now)
-        if group_due is not None:
-            due = min(due, group_due) if due is not None else group_due
-    return due
-
-
-def independent_recovery_plan(data, task, unfinished):
-    """分离不共享干员或绑组的整房安排，已开始和副表整体安排保持原样。"""
-    from arknights_mower.utils.scheduler_task import TaskTypes
-
-    if task.type not in (
-        TaskTypes.SHIFT_ON,
-        TaskTypes.SELF_CORRECTION,
-        TaskTypes.RE_ORDER,
-    ):
-        return {}
-    if (
-        task.meta_data
-        or any(
-            getattr(task, flag, False)
-            for flag in (
-                "derived_correction_started",
-                "group_shift_expected",
-                "backup_shift_active",
-                "backup_explicit_slots",
-                "backup_refresh_rules",
-                "product_shift_locked",
-                "exhaust_support",
-                "ordinary_coordination",
-                "preferred_replacement_restore",
-                "dorm_recovery_restore",
-                "emergency_staffing",
-                "arrangement_retry_room",
-            )
-        )
-        or hasattr(task, "backup_shift_intent")
-        or hasattr(task, "backup_shift_conditions")
-    ):
-        return {}
-
-    def resources(names):
-        result = set()
-        for name in names:
-            op = data.operators.get(name)
-            if op is None:
-                continue
-            result.add(("operator", name))
-            groups = (
-                [binding["group"] for binding in op.group_bindings]
-                if op.multi_group
-                else [op.group]
-            )
-            result.update(("group", group) for group in groups if group)
-        return result
-
-    involved = {}
-    for room, row in task.plan.items():
-        names = set()
-        for index, name in enumerate(row):
-            if name == "Current":
-                continue
-            names.add(name)
-            occupant = data.get_current_operator(room, index)
-            if occupant is not None:
-                names.add(occupant.name)
-            slots = data.plan.get(room, [])
-            if index < len(slots):
-                names.add(slots[index].agent)
-        involved[room] = resources(names)
-    blocked, related = set(), resources(unfinished)
-    while True:
-        connected = {
-            room for room, names in involved.items() if names & related
-        } - blocked
-        if not connected:
-            break
-        blocked.update(connected)
-        for room in connected:
-            related.update(involved[room])
-    if not blocked:
-        return {}
-    return {room: list(row) for room, row in task.plan.items() if room not in blocked}
+def initial_idle_staffing_members(data, task, *, now=None):
+    """查询仍可首次上岗的初始化主班，续行只沿用已保存的首次准入。"""
+    if not getattr(task, "initial_staffing", False):
+        return set()
+    started = getattr(task, "derived_correction_started", False)
+    expected = getattr(task, "group_shift_expected", {})
+    admitted = getattr(task, "initial_staffing_idle_members", ())
+    returns = getattr(task, "initial_staffing_returns", ())
+    return {
+        name
+        for room, row in task.plan.items()
+        if not room.startswith("dorm")
+        for index, name in enumerate(row)
+        if (op := data.operators.get(name)) is not None
+        and (op.room, op.index) == (room, index)
+        and not op.rest_in_full
+        and (not started and not expected or name in admitted)
+        and name not in returns
+        and not op.current_room
+        and not data.group_is_resting(op.group)
+        and (mood := dorm_candidate_mood(data, name, now)) is not None
+        and mood > op.lower_limit
+    }

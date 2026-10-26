@@ -1,4 +1,4 @@
-"""已恢复主班保床，正常离宿保留整组恢复边界。"""
+"""已恢复主班让床和正常离宿保留整组回班边界。"""
 
 from datetime import timedelta
 
@@ -40,12 +40,15 @@ def prepare_group(solver, full_mood=24):
 
 @pytest.mark.parametrize("free_room", [False, True])
 @pytest.mark.parametrize("low_priority", [False, True])
-def test_completed_primary_keeps_group_beds_until_ordinary_return(
-    solver, free_room, low_priority
+@pytest.mark.parametrize("retained", [False, True])
+def test_completed_primary_yields_bed_without_changing_group_return(
+    solver, free_room, low_priority, retained
 ):
     data, names, return_task = prepare_group(solver)
     data.config.free_room = free_room
     data.operators[names[0]].resting_priority = "low" if low_priority else "high"
+    if retained:
+        data.config.free_room_exclusions.append(names[0])
     incoming = data.operators["陈"]
     incoming._current_room, incoming.current_index = "", -1
     incoming.mood = 5
@@ -53,7 +56,17 @@ def test_completed_primary_keeps_group_beds_until_ordinary_return(
 
     try_add_release_dorm({}, None, data, tasks)
 
-    assert tasks == [return_task]
+    assert return_task in tasks
+    fills = [task for task in tasks if task is not return_task]
+    if retained:
+        assert fills == []
+    else:
+        assert len(fills) == 1
+        assert set(fills[0].plan) == {"dormitory_1"}
+        projected = data.project_arrangements([fills[0].plan])
+        assert not projected.operators[names[0]].is_resting()
+        assert projected.operators[names[1]].is_resting()
+        assert projected.operators[incoming.name].is_resting()
     assert return_task.time == NOW + timedelta(hours=3)
     assert all(data.operators[name].is_resting() for name in names)
     assert incoming.current_room == ""
@@ -169,8 +182,9 @@ def test_ordinary_completed_departure_readback_preserves_group_return(
         "mismatch",
     ],
 )
+@pytest.mark.parametrize("temporary", [False, True])
 def test_unconfirmed_ordinary_departure_invalidates_old_measurement(
-    solver, unconfirmed
+    solver, unconfirmed, temporary
 ):
     data, names, _ = prepare_group(solver)
     operator = data.operators[names[0]]
@@ -189,13 +203,38 @@ def test_unconfirmed_ordinary_departure_invalidates_old_measurement(
         operator.time_stamp = None
     elif unconfirmed == "below_limit":
         operator.mood = operator.upper_limit - 0.1
-    elif unconfirmed == "mismatch":
+    expected = row.copy() if temporary and room in task.plan else None
+    if temporary and room in task.plan:
+        task.plan[room][operator.current_index] = "Free"
+    if unconfirmed == "mismatch":
         row[-1] = ""
     observed = [{"agent": name} for name in row]
     if unconfirmed == "partial":
         observed[-1]["observed"] = False
 
-    solver._reconcile_room_observation(room, observed)
+    solver._reconcile_room_observation(room, observed, expected_agents=expected)
 
     assert not operator.current_room
     assert operator.time_stamp is None
+
+
+@pytest.mark.parametrize("unconfirmed", ["occupied_tail", "partial"])
+def test_short_roster_requires_confirmed_empty_remaining_slots(solver, unconfirmed):
+    data, names, _ = prepare_group(solver)
+    operator = data.operators[names[0]]
+    room = operator.current_room
+    expected = data.get_current_room(room, True)[:2]
+    solver.task = SchedulerTask(
+        task_type=TaskTypes.FIAMMETTA, task_plan={room: expected.copy()}
+    )
+    observed = [{"agent": name} for name in expected + ["", "", ""]]
+    if unconfirmed == "occupied_tail":
+        observed[-1]["agent"] = "芬"
+    else:
+        observed[-1]["observed"] = False
+
+    solver._reconcile_room_observation(room, observed, expected_agents=expected)
+
+    assert not operator.current_room
+    assert operator.time_stamp is None
+    assert solver.task.plan == {room: expected}
