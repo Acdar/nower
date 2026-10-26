@@ -81,6 +81,9 @@ vi.mock('@/stores/plan', () => ({
   useRescuePlanStore: () => state.rescuePlan
 }))
 vi.mock('@/stores/resourceVersion', () => ({ useResourceVersionStore: () => state.resource }))
+vi.mock('@/stores/logBackground', () => ({
+  useLogBackgroundStore: () => ({ setTheme: vi.fn() })
+}))
 vi.mock('@/stores/gui', () => ({ useGuiStore: () => state.gui }))
 vi.mock('@/stores/updateNotice', () => ({
   useUpdateNoticeStore: () => ({

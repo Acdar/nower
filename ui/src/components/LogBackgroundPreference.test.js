@@ -137,7 +137,7 @@ describe('running log background preference', () => {
     reset.props.onClick()
     await flush()
     expect(page.find((target) => target.props.role === 'img').props.style.backgroundImage).toBe(
-      "url('/bg.webp')"
+      "url('/bg_light.webp')"
     )
     expect(reset.props.disabled).toBe(true)
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:custom-background')

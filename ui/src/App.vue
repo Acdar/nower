@@ -458,6 +458,7 @@ import { useGuiStore } from '@/stores/gui'
 import { usePlanStore, useRescuePlanStore } from '@/stores/plan'
 import { useUpdateNoticeStore } from '@/stores/updateNotice'
 import { useResourceVersionStore } from '@/stores/resourceVersion'
+import { useLogBackgroundStore } from '@/stores/logBackground'
 
 import { usewatermarkStore } from '@/stores/watermark'
 
@@ -478,6 +479,8 @@ const {
   adb
 } = storeToRefs(config_store)
 const theme = useResolvedTheme(themePreference)
+const logBackground = useLogBackgroundStore()
+watch(theme, (value) => logBackground.setTheme(value), { immediate: true })
 // Also applied to the page drawer, which teleports out of the provider element.
 const mowerCssVariables = computed(() =>
   theme.value === 'dark' ? mowerDarkCssVariables : mowerLightCssVariables

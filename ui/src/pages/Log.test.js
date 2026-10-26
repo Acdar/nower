@@ -423,14 +423,14 @@ describe('log page', () => {
   it('updates the mounted background immediately when shared settings change', async () => {
     const { find } = mountWorkspace()
     const layer = find((target) => target.props.class === 'log-bg')
-    expect(layer.props.style.backgroundImage).toBe("url('/bg.webp')")
+    expect(layer.props.style.backgroundImage).toBe("url('/bg_light.webp')")
     const background = useLogBackgroundStore()
     background.customUrl = 'blob:custom-image'
     await nextTick()
     expect(layer.props.style.backgroundImage).toBe("url('blob:custom-image')")
     background.customUrl = ''
     await nextTick()
-    expect(layer.props.style.backgroundImage).toBe("url('/bg.webp')")
+    expect(layer.props.style.backgroundImage).toBe("url('/bg_light.webp')")
   })
 
   it('keeps an empty queue compact without mounting task preparation or editors', () => {

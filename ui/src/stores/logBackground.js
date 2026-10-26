@@ -4,13 +4,21 @@ import axios from 'axios'
 
 const endpoint = `${import.meta.env.VITE_HTTP_URL || ''}/gui/log-background`
 export const MAX_BACKGROUND_BYTES = 8 * 1024 * 1024
+export const DEFAULT_BACKGROUND_URLS = {
+  light: '/bg_light.webp',
+  dark: '/bg_dark.webp'
+}
 
 export const useLogBackgroundStore = defineStore('log-background', () => {
+  const theme = ref('light')
   const customUrl = ref('')
   const loaded = ref(false)
   const busy = ref(false)
   const error = ref('')
-  const url = computed(() => customUrl.value || '/bg.webp')
+  const defaultUrl = computed(
+    () => DEFAULT_BACKGROUND_URLS[theme.value] || DEFAULT_BACKGROUND_URLS.light
+  )
+  const url = computed(() => customUrl.value || defaultUrl.value)
   let loading = null
   let disposed = false
 
@@ -109,5 +117,9 @@ export const useLogBackgroundStore = defineStore('log-background', () => {
     if (customUrl.value) URL.revokeObjectURL(customUrl.value)
   })
 
-  return { customUrl, url, loaded, busy, error, load, upload, reset }
+  function setTheme(value) {
+    theme.value = value === 'dark' ? 'dark' : 'light'
+  }
+
+  return { customUrl, url, theme, setTheme, loaded, busy, error, load, upload, reset }
 })

@@ -36,7 +36,7 @@ describe('running log background', () => {
     expect(await store.reset()).toBe(false)
     expect(axios.get).toHaveBeenCalledOnce()
     expect(axios.put).not.toHaveBeenCalled()
-    expect(store.url).toBe('/bg.webp')
+    expect(store.url).toBe('/bg_light.webp')
     initial.resolve(imageResponse())
     expect(await first).toBe(true)
     expect(await second).toBe(true)
@@ -64,7 +64,7 @@ describe('running log background', () => {
     expect(log.url).toBe('blob:background-2')
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:background-1')
     expect(await settings.reset()).toBe(true)
-    expect(log.url).toBe('/bg.webp')
+    expect(log.url).toBe('/bg_light.webp')
     expect(settings.customUrl).toBe('')
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:background-2')
     expect(await settings.reset()).toBe(false)
@@ -91,6 +91,20 @@ describe('running log background', () => {
     expect(store.url).toBe('blob:background-2')
   })
 
+  it('switches the default asset with the resolved theme but keeps a custom image', async () => {
+    const store = useLogBackgroundStore(createPinia())
+    await store.load()
+    expect(store.url).toBe('/bg_light.webp')
+    store.setTheme('dark')
+    expect(store.url).toBe('/bg_dark.webp')
+    await store.upload(picture())
+    expect(store.url).toBe('blob:background-1')
+    store.setTheme('light')
+    expect(store.url).toBe('blob:background-1')
+    await store.reset()
+    expect(store.url).toBe('/bg_light.webp')
+  })
+
   it('rejects unsupported or oversized uploads before sending them', async () => {
     const store = useLogBackgroundStore(createPinia())
     await store.load()
@@ -98,7 +112,7 @@ describe('running log background', () => {
     expect(await store.upload({ type: 'image/png', size: MAX_BACKGROUND_BYTES + 1 })).toBe(false)
     expect(store.error).toContain('8 MiB')
     expect(axios.put).not.toHaveBeenCalled()
-    expect(store.url).toBe('/bg.webp')
+    expect(store.url).toBe('/bg_light.webp')
   })
 
   it('can retry an initial failure and restore a persisted image in a new store', async () => {

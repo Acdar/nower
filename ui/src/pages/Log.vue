@@ -355,7 +355,15 @@ watch(
 )
 
 const bg_opacity = computed(() => {
-  return theme.value == 'light' ? 0.2 : 0.3
+  return theme.value == 'light' ? 0.28 : 0.38
+})
+
+const bg_transform = computed(() => {
+  return theme.value == 'light' ? 'scale(1.45)' : 'scale(1.35)'
+})
+
+const bg_origin = computed(() => {
+  return theme.value == 'light' ? '0% 60%' : '0% 26%'
 })
 
 function stop_maa() {
@@ -1110,19 +1118,38 @@ async function db_delete(keys) {
 }
 
 .log-bg {
-  position: fixed;
-  bottom: 0;
-  right: 5vw;
-  margin: 2em 0;
-  height: 75vh;
-  width: 90vw;
-  content: '';
+  position: absolute;
+  inset: 0;
   z-index: 0;
   opacity: v-bind(bg_opacity);
   background-repeat: no-repeat;
-  background-size: contain;
-  background-position: 100% 100%;
+  background-size: cover;
+  background-position: center;
+  transform: v-bind(bg_transform);
+  transform-origin: v-bind(bg_origin);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    rgb(0 0 0 / 60%) 0%,
+    rgb(0 0 0 / 60%) 30%,
+    rgb(0 0 0 / 100%) 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    rgb(0 0 0 / 60%) 0%,
+    rgb(0 0 0 / 60%) 30%,
+    rgb(0 0 0 / 100%) 100%
+  );
   pointer-events: none;
+}
+
+.home-container--mobile .log-bg {
+  inset: auto 0 64px;
+  height: 46%;
+  background-size: contain;
+  background-position: center bottom;
+  transform: none;
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 .db-admin-body {
