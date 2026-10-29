@@ -760,12 +760,29 @@ class InstanceController(ManagerTools):
         )
         return manager_changes, ordinary_changes, patch
 
+    @staticmethod
+    def _with_explicit_device_serial(configuration, serial):
+        profile = configuration.device
+        if serial is not None and (
+            profile.preset_id
+            in {"macos.bluestacks_air", "manual.other", "manual.physical"}
+            or (
+                profile.preset_id == "macos.mumu_pro"
+                and not profile.topology_fingerprint
+            )
+        ):
+            # A newly selected manual endpoint may equal the previous target's
+            # address, which Conf.updated clears when the binding changes.
+            return configuration.updated({"device": {"last_serial": serial}})
+        return configuration
+
     def update_device_settings(self, idx, changes, target, original, policy=None):
         from . import managed_device
         from .config import Conf
 
         self._validate_device_policy(policy)
         manager_changes, ordinary_changes, patch = self._device_changes(changes)
+        explicit_serial = patch.get("device", {}).get("last_serial")
         if not changes and policy is None:
             raise ValueError("请选择需要保存的设备配置")
         derived = managed_device.DERIVED_IDENTITY_FIELDS
@@ -837,7 +854,10 @@ class InstanceController(ManagerTools):
                 patch["device"]["last_serial"] = ""
                 for name in derived:
                     patch["device"].setdefault(name, "")
-            proposed = self._settings_snapshot(baseline.updated(patch))
+            selected = self._with_explicit_device_serial(
+                baseline.updated(patch), explicit_serial
+            )
+            proposed = self._settings_snapshot(selected)
             if submitted_identity:
                 ordinary_patch = copy.deepcopy(patch)
                 for key in derived:
@@ -974,7 +994,9 @@ class InstanceController(ManagerTools):
                     ),
                 )
             )
-            configuration = baseline.updated(patch)
+            configuration = self._with_explicit_device_serial(
+                baseline.updated(patch), patch.get("device", {}).get("last_serial")
+            )
         result = managed_device.discover(configuration)
         if not desired:
             result = managed_device.project_shared_candidates(
@@ -1084,7 +1106,24 @@ class InstanceController(ManagerTools):
         try:
             with self._operation():
                 instance = self._target_instance(idx, target)
-                settings = self._start_settings(instance, self._records())
+                records = self._records()
+                matches = self._matching(instance, records)
+                if matches:
+                    if runtime.active_job():
+                        raise ValueError("软件更新或进程操作期间无法打开实例窗口")
+                    if not all(r.get("managed") for r in matches):
+                        raise ValueError("该实例不是由多开管理器启动")
+                    if any(
+                        (runtime.state_dir() / "shutdown" / f"{r['id']}.json").exists()
+                        for r in matches
+                    ):
+                        raise ValueError("实例正在停止，无法打开窗口")
+                    ready = next((r for r in matches if r.get("ready")), None)
+                    if ready is None:
+                        raise ValueError("实例尚未就绪，请稍后打开窗口")
+                    runtime.send_instance_command(ready, "show")
+                    return {"ok": True}
+                settings = self._start_settings(instance, records)
                 self._connection_document()
                 frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
                 executable = Path(sys.executable).resolve().parent / (

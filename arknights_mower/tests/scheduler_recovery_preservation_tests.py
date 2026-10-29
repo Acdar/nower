@@ -104,6 +104,7 @@ def scheduler(monkeypatch):
     monkeypatch.setattr(
         scheduler_task.NewsChecker, "get_update_time", Mock(return_value=(None, None))
     )
+    monkeypatch.setattr(scheduler_task.NewsChecker, "get_maintenance", lambda: None)
     monkeypatch.setattr(main, "base_scheduler", solver)
     return SimpleNamespace(
         solver=solver, clock=Clock, module=base_schedule, main=main, io=forbidden_io
@@ -218,8 +219,9 @@ def test_depot_mastery_dispatch_keeps_source_release_available(
         solver.tasks.append(upgrade)
 
     solver.仓库扫描 = Mock(side_effect=scan)
-    solver.find_next_task = lambda task_type: next(
-        (task for task in solver.tasks if task.type == task_type), None
+    solver.find_next_task = lambda task_type=None: next(
+        (task for task in solver.tasks if task_type is None or task.type == task_type),
+        None,
     )
     dispatched = []
 

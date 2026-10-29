@@ -1,5 +1,12 @@
 # Software Update Contract
 
+<a id="github-file-download-fallback"></a>
+## GitHub File Download Fallback
+
+The shared `github_download.request_download` path tries direct GitHub first when the download proxy setting is empty, followed by `https://ghfast.top/`, `https://gh-proxy.com/`, `https://gh-proxy.org/` and `https://edgeone.gh-proxy.org/` in that order. The existing ghfast station remains first. The additional stations use the [GH-Proxy service](https://gh-proxy.com/docs/github-accelerator); the maintained [XIU2 download-source list](https://github.com/XIU2/UserScript/blob/7e93aceb592a613d499ed21b3e9886377e31fba0/GithubEnhanced-High-Speed-Download.user.js) attributes both alternate domains to gh-proxy.com. Connection failures, timeouts and HTTP 403, 429 or 5xx responses advance to the next candidate; other HTTP failures stop immediately. Each candidate is attempted at most once. Failed HTTP responses close before advancing, and the caller owns the successful response. Body-read failures remain the caller's responsibility.
+
+An explicit download proxy uses only that station. GitHub API calls and hosts outside the file-download allowlist retain their original URLs. The settings connection test uses this same download path, reports the selected fallback hostname and allows 105 seconds on the client for five candidates with the existing ten-second connect and read timeouts. These third-party stations are download providers, not an authenticity guarantee; existing per-caller validation remains applicable. Focused offline coverage is in [`network_settings_tests.py`](../../arknights_mower/tests/network_settings_tests.py).
+
 ## 1. Command Execution
 
 `Worker.run_command` executes fixed argument lists without a shell. Each command has a monotonic deadline and respects preparation cancellation. POSIX commands own a process group; Windows commands enter a dedicated Job before execution and keep their descendants inside that Job. The installer uses the standard library.
@@ -155,13 +162,14 @@ Persistent update preferences use the shared data root's
 SHA-256-derived key of the resolved update state directory, retaining installation
 and data-root separation while all its instances share the settings. This file
 stores channel, background mode, automatic checks and updates, source branch,
-source remote and remote history. On first read, an absent destination receives
-the former update-cache `settings.json` under a migration lock. When the cache
-and the configuration directory sit on different volumes, the file is copied
-into the configuration directory and the cache copy is removed only after the
-copy completes. An existing destination wins; migration errors propagate
-without overwriting the source. Update coordination, downloads and temporary
-workspaces remain in the cache.
+source remote and remote history. Background restart defaults to disabled when
+the preference is absent; an explicitly saved choice remains effective. On first
+read, an absent destination receives the former update-cache `settings.json`
+under a migration lock. When the cache and the configuration directory sit on
+different volumes, the file is copied into the configuration directory and the
+cache copy is removed only after the copy completes. An existing destination
+wins; migration errors propagate without overwriting the source. Update
+coordination, downloads and temporary workspaces remain in the cache.
 
 `tmp/` sits beside `config/` and `logs/` in the Mower data root. `MOWER_DATA_DIR` redirects this root; macOS frozen applications use their writable application data root rather than the signed `.app` bundle. Resource packages and MAA storage retain their existing contracts. Update rollback backups retain their existing locations and verification lifecycle.
 

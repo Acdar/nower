@@ -956,6 +956,7 @@ def serialize_configuration_requests():
     if changes_configuration and request.path not in {
         "/gui/appearance",
         "/gui/sidebar",
+        "/gui/depot",
         "/gui/log-background",
     }:
         check_token()
@@ -2877,28 +2878,154 @@ def import_from_image():
     return "排班已加载"
 
 
+@app.route("/maa-copilot", methods=["GET", "POST"])
+@require_token
+def maa_copilot_library():
+    from arknights_mower.utils.maa_copilot import (
+        MAX_SCRIPT_BYTES,
+        list_scripts,
+        store_script,
+    )
+
+    with backup_lock:
+        try:
+            if request.method == "GET":
+                return {"scripts": list_scripts()}
+            upload = request.files.get("copilot")
+            if upload is None:
+                return {"message": "没有收到作业文件"}, 400
+            return store_script(upload.read(MAX_SCRIPT_BYTES + 1))
+        except (ValueError, TypeError, RecursionError):
+            return {
+                "message": "作业格式无效或存储已满，请检查文件并清理不再使用的作业"
+            }, 400
+        except OSError:
+            return {"message": "作业读写失败，请检查目录权限"}, 500
+
+
+@app.delete("/maa-copilot/<script_id>")
+@require_token
+def delete_maa_copilot(script_id):
+    from arknights_mower.utils.maa_copilot import script_path
+
+    with backup_lock, maa_maintenance_lock:
+        if any(item.id == script_id for item in config.conf.copilot.scripts):
+            return {"message": "请先将作业移出执行队列"}, 409
+        if _maa_busy_response():
+            return {"message": "MAA 正在使用中，请等待任务结束后删除作业"}, 409
+        try:
+            script_path(script_id).unlink(missing_ok=True)
+        except ValueError:
+            return {"message": "作业标识无效"}, 400
+        except OSError:
+            return {"message": "删除作业失败，请检查目录权限"}, 500
+    return {"ok": True}
+
+
+@app.route("/maa-event-shop", methods=["GET"])
+@require_token
+def maa_event_shop_navigation():
+    from arknights_mower.utils.config.weekly_plan_loader import get_weekly_plan_manager
+    from arknights_mower.utils.maa_event_shop import activity_shops
+
+    with backup_lock:
+        try:
+            return {
+                "shops": activity_shops(
+                    get_weekly_plan_manager()._current_server_timestamp()
+                )
+            }
+        except (ValueError, OSError):
+            logger.exception("读取活动商店资源失败")
+            return {"message": "活动商店资源无效，请更新资源包"}, 400
+
+
+@app.route("/maa-paradox", methods=["GET", "POST"])
+@require_token
+def maa_paradox_library():
+    from arknights_mower.utils.maa_copilot import (
+        MAX_SCRIPT_BYTES,
+        list_scripts,
+        store_script,
+    )
+
+    with backup_lock:
+        try:
+            if request.method in ("GET", "HEAD"):
+                return {"scripts": list_scripts(paradox=True)}
+            upload = request.files.get("copilot")
+            if upload is None:
+                return {"message": "没有收到作业文件"}, 400
+            return store_script(upload.read(MAX_SCRIPT_BYTES + 1), paradox=True)
+        except (ValueError, TypeError, RecursionError):
+            return {
+                "message": "作业格式无效或存储已满，请检查文件并清理不再使用的作业"
+            }, 400
+        except OSError:
+            return {"message": "作业读写失败，请检查目录权限"}, 500
+
+
+@app.delete("/maa-paradox/<script_id>")
+@require_token
+def delete_maa_paradox(script_id):
+    from arknights_mower.utils.maa_copilot import script_path
+
+    with backup_lock, maa_maintenance_lock:
+        if any(item.id == script_id for item in config.conf.paradox.scripts):
+            return {"message": "请先将作业移出执行队列"}, 409
+        if _maa_busy_response():
+            return {"message": "MAA 正在使用中，请等待任务结束后删除作业"}, 409
+        try:
+            script_path(script_id, paradox=True).unlink(missing_ok=True)
+        except ValueError:
+            return {"message": "作业标识无效"}, 400
+        except OSError:
+            return {"message": "删除作业失败，请检查目录权限"}, 500
+    return {"ok": True}
+
+
 @app.route("/sss-copilot", methods=["GET", "POST"])
 @require_token
 def upload_sss_copilot():
-    copilot = get_path("@app/sss.json")
-    if request.method == "GET":
-        if copilot.is_file():
-            with copilot.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        else:
-            return {"exists": False}
-    else:
-        logger.debug("上传保全派驻作业：%s", request.files)
-        data = request.files["copilot"]
-        data.save(copilot)
-        data.seek(0)
-        data = json.load(data)
-    return {
-        "exists": True,
-        "title": data["doc"]["title"],
-        "details": data["doc"]["details"],
-        "operators": data["opers"],
-    }
+    from arknights_mower.utils.maa_copilot import (
+        MAX_SCRIPT_BYTES,
+        list_scripts,
+        store_script,
+    )
+
+    with backup_lock:
+        try:
+            if request.method == "GET":
+                return {"scripts": list_scripts(sss=True)}
+            upload = request.files.get("copilot")
+            if upload is None:
+                return {"message": "没有收到作业文件"}, 400
+            return store_script(upload.read(MAX_SCRIPT_BYTES + 1), sss=True)
+        except (ValueError, TypeError, RecursionError):
+            return {
+                "message": "保全作业格式无效或存储已满，请检查文件并清理不再使用的作业"
+            }, 400
+        except OSError:
+            return {"message": "作业读写失败，请检查目录权限"}, 500
+
+
+@app.delete("/sss-copilot/<script_id>")
+@require_token
+def delete_sss_copilot(script_id):
+    from arknights_mower.utils.maa_copilot import script_path
+
+    with backup_lock, maa_maintenance_lock:
+        if any(item.id == script_id for item in config.conf.sss.scripts):
+            return {"message": "请先将作业移出执行队列"}, 409
+        if _maa_busy_response():
+            return {"message": "MAA 正在使用中，请等待任务结束后删除作业"}, 409
+        try:
+            script_path(script_id, sss=True).unlink(missing_ok=True)
+        except ValueError:
+            return {"message": "作业标识无效"}, 400
+        except OSError:
+            return {"message": "删除作业失败，请检查目录权限"}, 500
+    return {"ok": True}
 
 
 @app.route("/resource-update/manual", methods=["POST"])
@@ -3716,6 +3843,27 @@ def getTradingHistory():
     from arknights_mower.solvers import record
 
     return record.get_trading_history(start_date, end_date)
+
+
+@app.get("/report/order-candles")
+@require_token
+def get_order_candles():
+    import sqlite3
+
+    from arknights_mower.solvers.order_candles import get_order_candles as query
+
+    try:
+        return query(
+            get_path("@app/tmp") / "data.db",
+            request.args.get("startDate"),
+            request.args.get("endDate"),
+            request.args.get("period", "4h"),
+        )
+    except (ValueError, OverflowError) as exc:
+        return {"error": str(exc)}, 400
+    except (sqlite3.Error, OSError):
+        logger.exception("订单价格记录读取失败")
+        return {"error": "订单价格记录读取失败，请检查数据库后重试"}, 503
 
 
 @app.route("/report/recycling_history")

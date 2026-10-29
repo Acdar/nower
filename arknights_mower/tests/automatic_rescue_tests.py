@@ -116,6 +116,9 @@ def pending_normal_order(solver, monkeypatch):
     from arknights_mower.utils import scheduler_task
 
     selection_harness(solver, monkeypatch)
+    solver.prepare_dorm_selection = (
+        base_schedule.BaseSchedulerSolver.prepare_dorm_selection.__get__(solver)
+    )
     solver.op_data.plan["room_1_1"].pop()
     setup_startup(solver)
     config.conf.automatic_rescue_enable = True
@@ -2029,7 +2032,7 @@ def test_pending_rescue_staffing_precedes_due_observation_and_specialized_planni
     solver.run_order_solver.assert_not_called()
     workshop.assert_not_called()
     assert any(t is task for t in solver.tasks)
-    assert state["next_read"] > task.time
+    assert state["next_read"] == NOW
 
 
 def test_regular_recovery_observes_only_unfinished_primary_dorms(solver):

@@ -122,6 +122,39 @@ def test_version_update_policy_change_does_not_wake_stopped_mower(next_skill):
     assert not config.wake_scheduler.is_set()
 
 
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize(
+    "edit",
+    [
+        {"resting_threshold": 0.35},
+        {"group_resting_thresholds": {"感知": 0.35, "副表组": 0.5}},
+        {"group_resting_thresholds": {}},
+    ],
+)
+def test_ordinary_threshold_edits_save_without_waking_scheduler(
+    next_skill, monkeypatch, running, edit
+):
+    import server
+    from arknights_mower import __main__ as mower_main
+
+    config.conf.group_resting_thresholds = {"感知": 0.65}
+    monkeypatch.setattr(mower_main, "base_scheduler", MagicMock() if running else None)
+    monkeypatch.setattr(server, "mower_thread", None)
+    monkeypatch.setattr(mower_main, "device_control", MagicMock(active=False))
+    config.wake_scheduler.clear()
+    try:
+        response = server.app.test_client().patch("/conf", json=edit)
+        assert response.status_code == 200
+        assert not config.wake_scheduler.is_set()
+        assert config.conf.group_resting_thresholds == edit.get(
+            "group_resting_thresholds", {"感知": 0.65}
+        )
+        assert config.conf.resting_threshold == edit.get("resting_threshold", 0.65)
+        assert config.conf.drone_interval == 3
+    finally:
+        config.wake_scheduler.clear()
+
+
 def test_edit_during_restore_uses_manual_revision_not_runtime_generation(next_skill):
     config.conf.workshop_settings = [manual_setting()]
     auto.update_workshop_config()

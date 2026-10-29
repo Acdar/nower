@@ -42,6 +42,7 @@ from ..utils.news_checker import NewsChecker
 # 赤金交易订单干员常量
 TRADE_ORDER_AGENTS = ["但书", "龙舌兰", "佩佩", "可露希尔"]
 DORMITORY_ROOMS = [f"dormitory_{index}" for index in range(1, 5)]
+_OPERATOR_SCALAR_TYPES = frozenset({type(None), bool, int, float, complex, str, bytes})
 MAX_BACKUP_VALIDATION_COMBINATIONS = 16384
 FACILITY_TYPE_IDS = {
     "贸易站": "trade",
@@ -256,6 +257,7 @@ def build_global_plan(
         ope_resting_priority=source_model.conf.ope_resting_priority,
         dorm_order=source_model.conf.dorm_order,
         resting_threshold=conf.resting_threshold,
+        group_resting_thresholds=conf.group_resting_thresholds,
         refresh_trading_config=source_model.conf.refresh_trading,
         refresh_drained=source_model.conf.refresh_drained,
         free_room=conf.free_room,
@@ -318,6 +320,7 @@ def build_global_plan(
                 "resting_priority_replacement", ""
             ),
             resting_threshold=conf.resting_threshold,
+            group_resting_thresholds=conf.group_resting_thresholds,
             refresh_trading_config=i["conf"]["refresh_trading"],
             refresh_drained=i["conf"]["refresh_drained"],
             free_room=conf.free_room,
@@ -453,13 +456,29 @@ class Operators:
             {**group, "trigger": get_logic_exp(copy.deepcopy(group["trigger"]))}
             for group in self.backup_groups
         ]
-        return select_backup_plans(
-            self.backup_plans,
-            groups,
-            lambda trigger: bool(self.evaluate_expression(str(trigger))),
-            current_group=self.backup_group,
-            current=self.plan_condition,
-        )
+        now = getattr(self, "_projection_now", None) or datetime.now()
+        missing = object()
+        clocks = [
+            (obj, getattr(obj, "_projection_now", missing))
+            for obj in (self, *self.operators.values())
+        ]
+        try:
+            # 分组条件和各副表条件共用同刻心情，沿用已有的投影查询缓存。
+            for obj, _ in clocks:
+                obj._projection_now = now
+            return select_backup_plans(
+                self.backup_plans,
+                groups,
+                lambda trigger: bool(self.evaluate_expression(str(trigger))),
+                current_group=self.backup_group,
+                current=self.plan_condition,
+            )
+        finally:
+            for obj, previous in clocks:
+                if previous is missing:
+                    del obj._projection_now
+                else:
+                    obj._projection_now = previous
 
     def swap_plan(self, condition, refresh=False, *, backup_group=None):
         from arknights_mower.utils.backup_validation import validate_backup_facilities
@@ -558,6 +577,7 @@ class Operators:
         self.operators = {}
         self.dorm = []
         self.group_dorm = []
+        planned_names = self.planned_operator_names()
         for room in self.plan.keys():
             for idx, data in enumerate(self.plan[room]):
                 if data.agent not in agent_list and data.agent != "Free":
@@ -593,7 +613,8 @@ class Operators:
                         "high",
                         operator_type="high",
                         group_bindings=data.bindings if data.group_bindings else None,
-                    )
+                    ),
+                    planned_names=planned_names,
                 )
         binding_members = {}
         for op in self.operators.values():
@@ -681,7 +702,9 @@ class Operators:
                             ):
                                 return f"替换组不可用高效组干员: 房间->{room}, 干员->{_replacement}"
                         else:
-                            self.add(Operator(_replacement, ""))
+                            self.add(
+                                Operator(_replacement, ""), planned_names=planned_names
+                            )
                     else:
                         if _replacement not in self.operators:
                             return f"菲亚梅塔替换不在高效组列: 房间->{room}, 干员->{_replacement}"
@@ -738,11 +761,11 @@ class Operators:
                     added.append(key)
         for name in self.config.free_room_exclusions:
             if name and name not in self.operators:
-                self.add(Operator(name, ""))
+                self.add(Operator(name, ""), planned_names=planned_names)
         if update:
             for key, value in self.shadow_copy.items():
                 if key not in self.operators:
-                    self.add(Operator(key, ""))
+                    self.add(Operator(key, ""), planned_names=planned_names)
         self.config.dorm_order = effective_dorm_order(self.config.dorm_order)
         room_order = [
             room for room in self.config.dorm_order if not room.endswith("_low")
@@ -842,7 +865,7 @@ class Operators:
         if update:
             self.displaced_dorms = self.restore_dorm_state(saved_dorms)
         # 应用心情上下限：个人设置优先，其次令夕模式、全体设置。
-        self.init_mood_limit()
+        self.init_mood_limit(planned_names=planned_names)
         for name in self.workaholic_agent:
             if name not in self.config.free_blacklist:
                 self.config.free_blacklist.append(name)
@@ -923,7 +946,7 @@ class Operators:
             self, getattr(self, "_projection_now", None), advance_clock=False
         )
         cached = getattr(self, "_projection_deadlines", None)
-        key = (name, target, max_hours)
+        key = (name, target, max_hours, now)
         if cached is not None and key in cached:
             due = cached[key]
             return max(now, due) if due is not None and now is not None else due
@@ -932,8 +955,14 @@ class Operators:
             cached[key] = due
         return due
 
-    def set_mood_limit(self, name, upper_limit=24, lower_limit=0):
-        if name in self.operators and self.is_planned_operator(name):
+    def set_mood_limit(
+        self, name, upper_limit=24, lower_limit=0, *, planned_names=None
+    ):
+        if name in self.operators and (
+            self.is_planned_operator(name)
+            if planned_names is None
+            else name in planned_names
+        ):
             self.operators[name].upper_limit = upper_limit
             self.operators[name].lower_limit = lower_limit
 
@@ -951,12 +980,24 @@ class Operators:
             for slot in slots
         )
 
-    def custom_mood_limits(self, name):
-        return (
-            self.config.custom_mood_limits(name)
-            if (self.is_planned_operator(name))
-            else None
+    def planned_operator_names(self):
+        names = set(self.emergency_dorm_agents)
+        for slots in self.plan.values():
+            for slot in slots:
+                names.add(slot.agent)
+                names.update(slot.all_replacements)
+        return names
+
+    def custom_mood_limits(self, name, *, planned_names=None):
+        limits = self.config.custom_mood_limits(name)
+        if limits is None:
+            return None
+        planned = (
+            self.is_planned_operator(name)
+            if planned_names is None
+            else name in planned_names
         )
+        return limits if planned else None
 
     def rest_mood_complete(self, name):
         from arknights_mower.utils.dorm_candidates import dorm_candidate_mood
@@ -1048,24 +1089,27 @@ class Operators:
             and checked[1:] == (op.mood, op.time_stamp)
         )
 
-    def apply_custom_mood_limits(self, operator):
-        limits = self.custom_mood_limits(operator.name)
+    def apply_custom_mood_limits(self, operator, *, planned_names=None):
+        limits = self.custom_mood_limits(operator.name, planned_names=planned_names)
         if limits is not None:
             self.set_mood_limit(
-                operator.name, lower_limit=limits["lower"], upper_limit=limits["upper"]
+                operator.name,
+                lower_limit=limits["lower"],
+                upper_limit=limits["upper"],
+                planned_names=planned_names,
             )
 
-    def apply_ling_xi_mood_limits(self):
+    def apply_ling_xi_mood_limits(self, *, planned_names=None):
         # 设置心情阈值 for 夕，令，
         if self.config.ling_xi == 1:
-            self.set_mood_limit("令", upper_limit=12)
-            self.set_mood_limit("夕", lower_limit=12)
+            self.set_mood_limit("令", upper_limit=12, planned_names=planned_names)
+            self.set_mood_limit("夕", lower_limit=12, planned_names=planned_names)
         elif self.config.ling_xi == 2:
-            self.set_mood_limit("夕", upper_limit=12)
-            self.set_mood_limit("令", lower_limit=12)
+            self.set_mood_limit("夕", upper_limit=12, planned_names=planned_names)
+            self.set_mood_limit("令", lower_limit=12, planned_names=planned_names)
         elif self.config.ling_xi in (0, 3):
-            self.set_mood_limit("夕")
-            self.set_mood_limit("令")
+            self.set_mood_limit("夕", planned_names=planned_names)
+            self.set_mood_limit("令", planned_names=planned_names)
         # 设置同组心情阈值
         finished = []
         for name in ["夕", "令"]:
@@ -1081,20 +1125,28 @@ class Operators:
                         group_name
                     ].room.startswith("dorm"):
                         if self.config.ling_xi in [1, 2]:
-                            self.set_mood_limit(group_name, lower_limit=12)
+                            self.set_mood_limit(
+                                group_name, lower_limit=12, planned_names=planned_names
+                            )
                         elif self.config.ling_xi in (0, 3):
-                            self.set_mood_limit(group_name, lower_limit=0)
+                            self.set_mood_limit(
+                                group_name, lower_limit=0, planned_names=planned_names
+                            )
                 finished.append(self.operators[name].group)
         for name, limits in self.config.operator_mood_limits.items():
             self.set_mood_limit(
-                name, lower_limit=limits["lower"], upper_limit=limits["upper"]
+                name,
+                lower_limit=limits["lower"],
+                upper_limit=limits["upper"],
+                planned_names=planned_names,
             )
 
-    def init_mood_limit(self):
+    def init_mood_limit(self, *, planned_names=None):
+        if planned_names is None:
+            planned_names = self.planned_operator_names()
         previous = getattr(self, "_applied_mood_limits", {})
         for op in self.operators.values():
             op.lower_limit, op.upper_limit = 0, 24
-        self.apply_ling_xi_mood_limits()
 
         # 设置铅踝心情阈值
         # 三种情况：
@@ -1109,14 +1161,18 @@ class Operators:
                 and self.operators[VERMEIL].operator_type == "high"
                 and self.operators[VERMEIL].room == self.operators[TOTTER].room
             ):
-                self.set_mood_limit(TOTTER, upper_limit=12, lower_limit=8)
+                self.set_mood_limit(
+                    TOTTER, upper_limit=12, lower_limit=8, planned_names=planned_names
+                )
             else:
-                self.set_mood_limit(TOTTER, upper_limit=24, lower_limit=20)
+                self.set_mood_limit(
+                    TOTTER, upper_limit=24, lower_limit=20, planned_names=planned_names
+                )
 
         for op in self.operators.values():
-            self.apply_custom_mood_limits(op)
+            self.apply_custom_mood_limits(op, planned_names=planned_names)
         # 按个人设置、令夕模式、全体设置的优先顺序收敛。
-        self.apply_ling_xi_mood_limits()
+        self.apply_ling_xi_mood_limits(planned_names=planned_names)
         # 已读倒计时指向旧上限，切表后按同一恢复速度换算到新上限。
         for bed in self.all_dorms():
             op = self.operators.get(bed.name)
@@ -1318,6 +1374,29 @@ class Operators:
                     transitions[op.group] = False
                 elif name in op.replacement:
                     transitions.setdefault(op.group, True)
+        # 全组切为零心情工作后没有触发成员；仅完整回岗安排能结束原休息状态。
+        for group, resting in getattr(self, "group_shift_state", {}).items():
+            if not resting or not self.is_workaholic_group(group):
+                continue
+            members = [
+                self.operators[name]
+                for name in self.shift_group_members(group)
+                if not self.operators[name].multi_group
+            ]
+            explicit_return = any(
+                not op.room.startswith("dorm")
+                and plan.get(op.room, [])[op.index : op.index + 1] == [op.name]
+                for op in members
+            )
+            if explicit_return and all(
+                plan.get(op.room, [])[op.index : op.index + 1] == [op.name]
+                or (
+                    plan.get(op.room, [])[op.index : op.index + 1] in ([], ["Current"])
+                    and (op.current_room, op.current_index) == (op.room, op.index)
+                )
+                for op in members
+            ):
+                transitions[group] = False
         return {**(group_transitions or {}), **transitions}
 
     def resting_binding_groups(self, operator, transitions=None):
@@ -1875,7 +1954,9 @@ class Operators:
                 preserve=preserve_depletion_rate or mood == 0,
             )
             agent.mood_is_prediction = False
-            agent.work_rate_sample_eligible = not preserve_depletion_rate and mood > 0
+            agent.work_rate_sample_eligible = (
+                not preserve_depletion_rate and 0 < mood < 24
+            )
             if learned_rate is not None:
                 agent.depletion_rate = learned_rate
                 logger.debug(f"更新 {agent.name} 心情掉率为：{agent.depletion_rate}")
@@ -2101,7 +2182,7 @@ class Operators:
                 return idx, dorm
         return None, None
 
-    def add(self, operator):
+    def add(self, operator, *, planned_names=None):
         if operator.name not in agent_list:
             return
         if self.config.is_resting_priority(operator.name):
@@ -2174,8 +2255,8 @@ class Operators:
             operator._projection_deadlines = getattr(
                 self, "_projection_deadlines", None
             )
-        self.apply_custom_mood_limits(operator)
-        self.apply_ling_xi_mood_limits()
+        self.apply_custom_mood_limits(operator, planned_names=planned_names)
+        self.apply_ling_xi_mood_limits(planned_names=planned_names)
         # 需要用尽心情干员逻辑
         if (
             operator.exhaust_require
@@ -2231,18 +2312,50 @@ class Operators:
             and not self._can_standby(op)
         )
 
+    def workaholic_follows_resting_group(self, op):
+        """零心情成员不触发换班，但仍等待普通工作主班所在组回班。"""
+        return bool(
+            op.workaholic
+            and op.group
+            and not op.multi_group
+            and not op.room.startswith("dorm")
+            and self.group_is_resting(op.group)
+            and any(
+                self.is_group_shift_anchor(self.operators[name])
+                for name in self.groups.get(op.group, ())
+            )
+        )
+
+    def is_workaholic_group(self, group):
+        """只含零心情固定工作主班的组无需继续等待普通恢复触发。"""
+        workers = [
+            self.operators[name]
+            for name in self.shift_group_members(group)
+            if not self.operators[name].room.startswith("dorm")
+            and not self.operators[name].multi_group
+        ]
+        return bool(workers) and all(op.workaholic for op in workers)
+
+    def resting_threshold_for(self, op):
+        override = getattr(self.config, "resting_threshold_override", None)
+        if override is not None:
+            return override
+        thresholds = getattr(self.config, "group_resting_thresholds", {})
+        if op.group and not op.multi_group:
+            return thresholds.get(op.group, self.config.resting_threshold)
+        return self.config.resting_threshold
+
     def rescue_mood_threshold(self, op):
         """按个人心情上下限换算现有急救阈值。"""
         return op.lower_limit + (op.upper_limit - op.lower_limit) * (
-            self.config.resting_threshold
+            self.resting_threshold_for(op)
             * (self.runtime_conf or config.conf).rescue_threshold
         )
 
     def resting_mood_threshold(self, op):
-        threshold = (
-            op.lower_limit
-            + (op.upper_limit - op.lower_limit) * self.config.resting_threshold
-        )
+        threshold = op.lower_limit + (
+            op.upper_limit - op.lower_limit
+        ) * self.resting_threshold_for(op)
         return (
             threshold
             if self.custom_mood_limits(op.name) is not None
@@ -3332,6 +3445,24 @@ class Dormitory:
 
 
 class Operator:
+    def __deepcopy__(self, memo):
+        """直接复用标量，隔离可变字段和扩展字段，并保留副本内部引用关系。"""
+        cloned = type(self).__new__(type(self))
+        memo[id(self)] = cloned
+        if id(self.__dict__) in memo:
+            cloned.__dict__ = memo[id(self.__dict__)]
+            return cloned
+        state = {}
+        memo[id(self.__dict__)] = state
+        cloned.__dict__ = state
+        for key, value in self.__dict__.items():
+            state[key] = (
+                value
+                if type(value) in _OPERATOR_SCALAR_TYPES
+                else copy.deepcopy(value, memo)
+            )
+        return cloned
+
     def __init__(
         self,
         name,
@@ -3620,7 +3751,7 @@ class Operator:
         ):
             now = now or getattr(self, "_projection_now", None) or datetime.now()
             cached = getattr(self, "_projection_deadlines", None)
-            key = (self.name, self.lower_limit, 240)
+            key = (self.name, self.lower_limit, 240, now)
             if cached is not None and key in cached:
                 deadline = cached[key]
             else:

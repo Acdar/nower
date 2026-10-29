@@ -19,6 +19,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import App from './App.vue'
 import { configProfilesKey } from '@/composables/configProfiles'
+import { themeSelectionKey } from '@/composables/themeSelection'
 import { routes } from './routes'
 
 const state = vi.hoisted(() => ({
@@ -184,6 +185,7 @@ vi.mock('naive-ui', async (original) => {
   })
   return {
     ...(await original()),
+    useDialog: () => ({ warning: vi.fn() }),
     useMessage: () => ({ loading: vi.fn(), success: vi.fn(), info: vi.fn(), error: vi.fn() }),
     useNotification: () => ({ create: vi.fn(() => ({ destroy: vi.fn() })) }),
     ...Object.fromEntries(
@@ -393,6 +395,15 @@ describe('desktop page startup', () => {
   it('shares the title-bar profile controller with settings actions', async () => {
     const component = await mount()
     expect(provide).toHaveBeenCalledWith(configProfilesKey, component.configProfiles)
+  })
+
+  it('shares theme selection with settings while retaining direct configuration updates', async () => {
+    const component = await mount()
+    expect(provide).toHaveBeenCalledWith(themeSelectionKey, component.setTheme)
+    component.setTheme('dark')
+    await nextTick()
+    expect(state.config.theme).toBe('dark')
+    expect(document.documentElement.dataset.mowerTheme).toBe('dark')
   })
 
   it('closes a managed window directly without saving or applying a standalone exit choice', async () => {
@@ -615,139 +626,70 @@ describe('desktop page startup', () => {
     expect(html).toContain('data-window-theme="light"')
     expect(document.documentElement.dataset.mowerTheme).toBe('light')
     expect(state.config.theme).toBe('system')
-    await component.setThemeWithTransition('dark')
+    state.config.theme = 'dark'
+    await nextTick()
     changed({ matches: false })
     expect(component.theme.value).toBe('dark')
     expect(state.config.theme).toBe('dark')
-    await component.setThemeWithTransition('system')
+    state.config.theme = 'system'
+    await nextTick()
     expect(component.theme.value).toBe('light')
     expect(state.config.theme).toBe('system')
     unmount()
     expect(media.removeEventListener).toHaveBeenCalledWith('change', changed)
   })
 
-  it('keeps the latest requested theme during quick switches without fading the app', async () => {
-    const component = await mount()
-    let finishFade
-    const provider = {
-      animate: vi.fn(() => ({
-        finished: new Promise((resolve) => (finishFade = resolve)),
-        cancel: vi.fn()
-      }))
-    }
-    document.querySelector = vi.fn(() => provider)
+  it('commits a theme change without enumerating or waiting for other page animations', async () => {
+    await mount()
+    document.getAnimations.mockImplementation(() => {
+      throw new Error('Theme changes must not enumerate page animations')
+    })
+    const root = document.documentElement
+    const flushStyles = vi.fn(() => 1000)
+    Object.defineProperty(root, 'offsetWidth', { get: flushStyles })
 
-    const first = component.setThemeWithTransition('dark')
-    const second = component.setThemeWithTransition('light')
-    finishFade?.()
-    await Promise.all([first, second])
-
-    expect(state.config.theme).toBe('light')
-    expect(provider.animate).not.toHaveBeenCalled()
-  })
-
-  it('switches atomically when reduced motion is requested', async () => {
-    const component = await mount()
-    window.matchMedia = vi.fn(() => ({ matches: true }))
-
-    await component.setThemeWithTransition('dark')
+    state.config.theme = 'dark'
+    expect(root.classList.contains('mower-theme-changing')).toBe(true)
+    await nextTick()
 
     expect(state.config.theme).toBe('dark')
-    expect(document.documentElement.classList.contains('mower-theme-changing')).toBe(false)
-    expect(document.documentElement.classList.contains('mower-theme-colours')).toBe(false)
+    expect(root.dataset.mowerTheme).toBe('dark')
+    expect(root.classList.contains('mower-theme-changing')).toBe(false)
+    expect(root.classList.contains('mower-theme-colours')).toBe(false)
+    expect(flushStyles).toHaveBeenCalledOnce()
+    expect(document.getAnimations).not.toHaveBeenCalled()
   })
 
-  it('keeps colour transitions until their actual completion and ignores other animations', async () => {
-    const component = await mount()
-    let finishColours
-    document.getAnimations.mockReturnValue([
-      {
-        transitionProperty: 'background-color',
-        finished: new Promise((resolve) => (finishColours = resolve))
-      },
-      { animationName: 'busy-spinner', finished: new Promise(() => {}) }
-    ])
-
-    const changing = component.setThemeWithTransition('dark')
-    await vi.waitFor(() => expect(document.getAnimations).toHaveBeenCalledOnce())
-    expect(document.documentElement.classList.contains('mower-theme-colours')).toBe(true)
-    expect(document.documentElement.classList.contains('mower-theme-changing')).toBe(false)
-    finishColours()
-    await changing
-    expect(document.documentElement.classList.contains('mower-theme-colours')).toBe(false)
-    expect(state.config.theme).toBe('dark')
-  })
-
-  it('keeps the latest colour transition active after an earlier transition completes', async () => {
-    const component = await mount()
-    let finishFirst
-    let finishLast
-    document.getAnimations
-      .mockReturnValueOnce([
-        {
-          transitionProperty: 'background-color',
-          finished: new Promise((resolve) => (finishFirst = resolve))
-        }
-      ])
-      .mockReturnValueOnce([
-        {
-          transitionProperty: 'background-color',
-          finished: new Promise((resolve) => (finishLast = resolve))
-        }
-      ])
-    const first = component.setThemeWithTransition('dark')
-    await vi.waitFor(() => expect(document.getAnimations).toHaveBeenCalledTimes(1))
-    const last = component.setThemeWithTransition('light')
-    await vi.waitFor(() => expect(document.getAnimations).toHaveBeenCalledTimes(2))
-
-    finishFirst()
-    await first
-    expect(document.documentElement.classList.contains('mower-theme-colours')).toBe(true)
-    finishLast()
-    await last
-    expect(document.documentElement.classList.contains('mower-theme-colours')).toBe(false)
-    expect(state.config.theme).toBe('light')
-  })
-
-  it('cancels active colour motion when reduced motion is requested for the same theme', async () => {
-    const component = await mount()
-    let finishColours
-    document.getAnimations.mockReturnValue([
-      {
-        transitionProperty: 'background-color',
-        finished: new Promise((resolve) => (finishColours = resolve))
-      }
-    ])
-    const first = component.setThemeWithTransition('dark')
-    await vi.waitFor(() => expect(document.getAnimations).toHaveBeenCalledOnce())
-    window.matchMedia = vi.fn(() => ({ matches: true }))
-    await component.setThemeWithTransition('dark')
-    expect(document.documentElement.classList.contains('mower-theme-colours')).toBe(false)
-    expect(document.documentElement.classList.contains('mower-theme-changing')).toBe(false)
-    finishColours()
-    await first
-  })
-
-  it('keeps an external theme assignment atomic while a control transition is active', async () => {
-    const component = await mount()
-    let finishColours
-    document.getAnimations.mockReturnValue([
-      {
-        transitionProperty: 'background-color',
-        finished: new Promise((resolve) => (finishColours = resolve))
-      }
-    ])
-    const first = component.setThemeWithTransition('dark')
-    await vi.waitFor(() => expect(document.getAnimations).toHaveBeenCalledOnce())
+  it('does not refresh styles for a repeated theme selection', async () => {
+    await mount()
+    const flushStyles = vi.fn(() => 1000)
+    Object.defineProperty(document.documentElement, 'offsetWidth', { get: flushStyles })
 
     state.config.theme = 'light'
-    expect(document.documentElement.classList.contains('mower-theme-colours')).toBe(false)
-    expect(document.documentElement.classList.contains('mower-theme-changing')).toBe(true)
     await nextTick()
-    expect(document.documentElement.classList.contains('mower-theme-changing')).toBe(false)
-    finishColours()
-    await first
-    expect(state.config.theme).toBe('light')
+    expect(flushStyles).not.toHaveBeenCalled()
+
+    state.config.theme = 'dark'
+    await nextTick()
+    expect(flushStyles).toHaveBeenCalledOnce()
+
+    state.config.theme = 'dark'
+    await nextTick()
+    expect(flushStyles).toHaveBeenCalledOnce()
+  })
+
+  it('restores ordinary transitions when unmounted before committing a theme change', async () => {
+    await mount()
+    const root = document.documentElement
+    state.config.theme = 'dark'
+    expect(root.classList.contains('mower-theme-changing')).toBe(true)
+
+    unmount()
+    await nextTick()
+
+    expect(root.classList.contains('mower-theme-changing')).toBe(false)
+    expect(root.dataset.mowerTheme).toBeUndefined()
+    expect(root.dataset.windowShellTheme).toBeUndefined()
   })
 
   it('finishes only the last update when theme bindings change repeatedly in one frame', async () => {
@@ -913,12 +855,12 @@ describe('desktop page startup', () => {
     return router
   }
 
-  it.each(['/task-settings', '/mowersettings?token=existing#interface'])(
+  it.each(['/settings', '/mowersettings?token=existing#interface'])(
     'collapses the main sidebar for a direct visit to %s and expands it when space allows',
     async (path) => {
       const router = await useAllSettingsRouter(path)
       const component = await mount()
-      expect(router.currentRoute.value.name).toBe('task-settings')
+      expect(router.currentRoute.value.name).toBe('settings')
       expect(component.sidebarCollapsed.value).toBe(true)
       expect(component.sidebarHidden.value).toBe(false)
       expect(component.mobileMenuOpen.value).toBe(false)
@@ -944,7 +886,7 @@ describe('desktop page startup', () => {
       const component = await mount()
       document.documentElement.style.zoom = String(zoom)
       component.expandSidebar()
-      await router.push('/task-settings')
+      await router.push('/settings')
       expect(component.sidebarCollapsed.value).toBe(collapsed)
       window.innerWidth = 1800
       document.documentElement.style.zoom = '1'
@@ -960,12 +902,12 @@ describe('desktop page startup', () => {
     const router = await useAllSettingsRouter()
     const component = await mount()
     component.expandSidebar()
-    await router.push('/task-settings')
+    await router.push('/settings')
     expect(component.sidebarCollapsed.value).toBe(true)
 
     component.toggleSidebar()
     expect(component.sidebarCollapsed.value).toBe(false)
-    await router.push('/task-settings?search=maa#task-maa')
+    await router.push('/settings?search=maa#task-maa')
     expect(component.sidebarCollapsed.value).toBe(false)
     component.actions_on_resize()
     expect(component.sidebarCollapsed.value).toBe(false)
@@ -985,7 +927,7 @@ describe('desktop page startup', () => {
       const component = await mount()
       component.sidebarCollapsed.value = collapsed
       component.userToggledSidebar.value = true
-      await router.push('/task-settings')
+      await router.push('/settings')
       expect(component.sidebarCollapsed.value).toBe(true)
       component.toggleSidebar()
       expect(component.sidebarCollapsed.value).toBe(false)
@@ -999,7 +941,7 @@ describe('desktop page startup', () => {
     const router = await useAllSettingsRouter()
     const component = await mount()
     expect(component.userToggledSidebar.value).toBe(false)
-    await router.push('/task-settings')
+    await router.push('/settings')
     component.toggleSidebar()
     await router.push('/')
     expect(component.userToggledSidebar.value).toBe(false)
@@ -1017,7 +959,7 @@ describe('desktop page startup', () => {
       expect(component.isMobileNav.value).toBe(true)
       component.mobileMenuOpen.value = open
       const collapsed = component.sidebarCollapsed.value
-      await router.push('/task-settings')
+      await router.push('/settings')
       expect(component.mobileMenuOpen.value).toBe(open)
       expect(component.sidebarCollapsed.value).toBe(collapsed)
       expect(component.sidebarHidden.value).toBe(false)
@@ -1418,7 +1360,7 @@ describe('desktop page startup', () => {
       () => new Promise((resolve) => (finishNavigation = resolve))
     )
     const opening = component.openDeviceConnection('settings')
-    expect(state.router.push).toHaveBeenCalledWith({ name: 'task-settings', hash: '#task-devices' })
+    expect(state.router.push).toHaveBeenCalledWith({ name: 'settings', hash: '#task-devices' })
     expect(component.deviceConnectionNavigation.request.value).toBeNull()
     finishNavigation()
     await opening
@@ -1454,7 +1396,7 @@ describe('desktop page startup', () => {
       history: createMemoryHistory(),
       routes: [
         { path: '/', name: 'log', component: { render: () => null } },
-        { path: '/task-settings', name: 'task-settings', component: { render: () => null } },
+        { path: '/settings', name: 'settings', component: { render: () => null } },
         { path: '/other', component: { render: () => null } }
       ]
     })
@@ -1474,10 +1416,10 @@ describe('desktop page startup', () => {
       history: createMemoryHistory(),
       routes: [
         { path: '/', name: 'log', component: { render: () => null } },
-        { path: '/task-settings', name: 'task-settings', component: { render: () => null } }
+        { path: '/settings', name: 'settings', component: { render: () => null } }
       ]
     })
-    await router.push({ name: 'task-settings', hash: '#task-devices' })
+    await router.push({ name: 'settings', hash: '#task-devices' })
     state.router = router
     const component = await mount()
 
@@ -1516,11 +1458,11 @@ describe('desktop page startup', () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
-        { path: '/task-settings', name: 'task-settings', component: taskPage },
+        { path: '/settings', name: 'settings', component: taskPage },
         { path: '/', name: 'log', component: ordinaryPage }
       ]
     })
-    await router.push('/task-settings')
+    await router.push('/settings')
     const node = (tag, text = '') => ({
       tag,
       text,
@@ -1576,7 +1518,7 @@ describe('desktop page startup', () => {
       expect(ordinaryMounts).toBe(1)
       const ordinaryElement = find('data-ordinary-page')
 
-      await router.push('/task-settings#task-daily')
+      await router.push('/settings#task-daily')
       await nextTick()
       expect(drafts).toHaveLength(1)
       expect(find('data-task-settings')).toBe(taskElement)

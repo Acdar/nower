@@ -650,7 +650,7 @@ describe('log page', () => {
     state.route.query = { profile: 'default' }
     mountWorkspace()
     expect(state.router.replace).toHaveBeenCalledExactlyOnceWith({
-      name: 'task-settings',
+      name: 'settings',
       query: { profile: 'default' },
       hash
     })
@@ -668,7 +668,7 @@ describe('log page', () => {
     state.route.hash = '#task-base'
     await nextTick()
     expect(state.router.replace).toHaveBeenCalledExactlyOnceWith({
-      name: 'task-settings',
+      name: 'settings',
       query: {},
       hash: '#task-base'
     })

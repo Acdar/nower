@@ -68,8 +68,33 @@ def appearance():
         "software_version_display": gui.load_software_version_display(),
         "software_version_language": gui.load_software_version_language(),
         "task_settings_layout": gui.load_task_settings_layout(),
+        "base_report_mode": gui.load_base_report_mode(),
         "watermark_visible": gui.load_watermark_visible(),
     }
+
+
+@gui_bp.get("/depot")
+def depot_preferences():
+    return {"depot": gui.load_depot()}
+
+
+@gui_bp.put("/depot")
+def save_depot_preferences():
+    data = _request_json()
+    if (
+        not isinstance(data, dict)
+        or "depot" not in data
+        or not data.keys() <= {"depot", "migrate"}
+    ):
+        return {"ok": False, "message": "缺少有效的仓库偏好"}, 400
+    try:
+        return {
+            "depot": gui.save_depot(data["depot"], migrate=data.get("migrate", False))
+        }
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}, 400
+    except (OSError, TimeoutError):
+        return {"ok": False, "message": "仓库偏好保存失败，请稍后重试"}, 503
 
 
 @gui_bp.put("/appearance")

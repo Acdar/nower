@@ -20,6 +20,7 @@ import WorkshopManualSettings from '@/components/WorkshopManualSettings.vue'
 import DailyMission from '@/components/DailyMission.vue'
 import Recruit from '@/components/Recruit.vue'
 import MaaReward from '@/components/MaaReward.vue'
+import MaaEventShop from '@/components/MaaEventShop.vue'
 import Clue from '@/components/Clue.vue'
 import MaaWeekly from '@/components/MaaWeekly.vue'
 import LongTasks from '@/components/LongTasks.vue'
@@ -196,7 +197,8 @@ const {
   leifeng_mode,
   item_list,
   workshop_manual_settings,
-  workshop_preset_warning
+  workshop_preset_warning,
+  save_mastery_screenshots
 } = storeToRefs(config_store)
 
 const { operators } = storeToRefs(plan_store)
@@ -612,6 +614,14 @@ const idleOptions = computed(() => [
               ><n-button type="primary">养成规划</n-button></SessionLink
             >
             <help-text>专精任务在养成规划中设置，加工材料在加工设置中管理。</help-text>
+            <n-space align="center" :wrap="false">
+              <n-switch v-model:value="save_mastery_screenshots" aria-label="保存专精收取截图" />
+              <span>保存专精收取截图</span>
+              <help-text>
+                保存首次等待、按钮出现和专精完成画面到 screenshot/mastery，单次最多 3 张，保留最近
+                100 张；关闭日常截图保存时仍生效。
+              </help-text>
+            </n-space>
           </div>
         </n-card>
       </div>
@@ -650,6 +660,12 @@ const idleOptions = computed(() => [
     <section data-task-editor="rewards">
       <div class="settings-card-grid">
         <MaaReward />
+      </div>
+    </section>
+
+    <section id="task-event-shop" data-task-editor="event-shop">
+      <div class="settings-card-grid">
+        <MaaEventShop />
       </div>
     </section>
 
@@ -942,10 +958,6 @@ const idleOptions = computed(() => [
 .task-waiting-scroll:focus-visible {
   outline: 2px solid var(--mower-primary);
   outline-offset: 2px;
-}
-
-.task-settings-panels :deep([data-task-editor='stage-plan'] .weekly-plan-editors .n-tab-pane) {
-  overflow-x: auto;
 }
 
 .task-settings-panels :deep([data-task-editor='long'] .n-grid) {

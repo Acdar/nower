@@ -1,5 +1,7 @@
 import axios, { AxiosError } from 'axios'
 import screenshot from './screenshot.svg?raw'
+import { DEFAULT_BASELINE_CONFIG, DEFAULT_VIEW_PREFS } from '../src/utils/depot_inventory.js'
+import { ORDER_PRICES, ORDER_TYPES } from '../src/utils/baseReport.js'
 import {
   BlobReader,
   BlobWriter,
@@ -36,7 +38,8 @@ function previewFieldGroup(key) {
   if (key.startsWith('automatic_rescue')) return 'rescue_plan'
   if (['start_automatically', 'performance_mode', 'screenshot_interval'].includes(key))
     return 'runtime'
-  if (key.startsWith('maa_rg_') || key === 'maa_long_task_type') return 'long'
+  if (key.startsWith('maa_rg_') || ['maa_long_task_type', 'sss', 'copilot'].includes(key))
+    return 'long'
   if (key.startsWith('maa_')) return 'maa'
   if (['check_mail_enable', 'event_sign_in_enable', 'report_enable', 'skland_enable'].includes(key))
     return 'daily'
@@ -77,7 +80,20 @@ export function createPreviewConfiguration(config, theme = 'light') {
   }
 }
 
+// 订单类型的逐日示例计数：数量少且可复现，与 ORDER_PRICES 折算出的金额相符。
+const previewTradingCounts = (offset) => ({
+  但书_2000: 2 + (offset % 2),
+  但书_2500: 2 + ((offset + 1) % 2),
+  漏单_1000: 1 + ((offset + 2) % 2),
+  漏单_1500: 1 + ((offset + 3) % 2),
+  漏单_2000: offset % 2,
+  龙舌兰: 1 + ((offset + 1) % 2),
+  佩佩: (offset + 1) % 2,
+  可露希尔: offset % 3 === 0 ? 1 : 0
+})
+
 // 基建报表示例：30 天产出，按日期生成稳定的起伏，不使用随机数。
+// 贸易订单每天都有记录，金额与单数由已知订单类型加未知订单折算，保证与订单分布图自洽。
 function previewBaseReport(today) {
   const end = new Date(`${today}T00:00:00`)
   const report = []
@@ -88,22 +104,106 @@ function previewBaseReport(today) {
     day.setDate(end.getDate() - offset)
     const date = day.toLocaleDateString('sv-SE')
     const wave = Math.sin(offset / 2.3)
-    const orders = 21 + Math.round(wave * 3)
     const gold = 70000 + Math.round(wave * 8000) + (offset % 4) * 1500
+    const counts = previewTradingCounts(offset)
+    let knownAmount = 0
+    let knownCount = 0
+    for (const type of ORDER_TYPES) {
+      knownAmount += counts[type] * ORDER_PRICES[type]
+      knownCount += counts[type]
+    }
+    const unknownAmount = 3000 * ((offset % 2) + 1)
+    const unknownCount = unknownAmount / 1500
+    const orders = knownCount + unknownCount
+    const amount = knownAmount + unknownAmount
     report.push({
       日期: date,
       赤金: gold,
       作战录像: 22000 + Math.round(Math.cos(offset / 3) * 4000),
-      龙门币订单: orders * 1000 + (offset % 3) * 1500,
+      龙门币订单: amount,
       龙门币订单数: orders,
-      每单获取龙门币: Math.round((orders * 1000 + (offset % 3) * 1500) / orders)
+      每单获取龙门币: Math.round(amount / orders)
     })
     orundum.push({ 日期: date, 合成玉: offset % 5 === 0 ? 0 : 160, 合成玉订单数量: 8 })
-    if (offset % 3 === 0) trading.push({ 日期: date, 龙舌兰: 1 + (offset % 2), 可露希尔: 1 })
+    trading.push({ 日期: date, ...counts })
   }
   // 示例里保留一天未读到赤金，演示缺失读数的显示。
   report[report.length - 6].赤金 = null
   return { report, orundum, trading }
+}
+
+// 离线预览可用 ?base_report_mode=stock 直接打开股票模式；Node 测试环境没有 location。
+function previewReportMode() {
+  if (typeof location === 'undefined') return 'standard'
+  return new URLSearchParams(location.search).get('base_report_mode') === 'stock'
+    ? 'stock'
+    : 'standard'
+}
+
+// 用同一批逐日示例订单生成带记录时间的样本，再按请求周期汇总。
+function previewOrderCandles(data, { startDate, endDate, period = '4h' }) {
+  const seconds = { '1h': 3600, '4h': 14400, day: 86400 }[period]
+  const parseDay = (date) => {
+    if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return NaN
+    const parsed = Date.parse(`${date}T04:00:00+08:00`)
+    return new Date(parsed + 14400000).toISOString().slice(0, 10) === date ? parsed / 1000 : NaN
+  }
+  const start = parseDay(startDate)
+  const end = parseDay(endDate) + 86400
+  if (
+    !seconds ||
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
+    end <= start ||
+    end - start > 366 * 86400
+  )
+    throw new Error('订单记录查询参数无效')
+  const candles = Array.from({ length: (end - start) / seconds }, (_, index) => {
+    const time = start + index * seconds
+    return {
+      start: time,
+      end: time + seconds,
+      label: new Date((time + 28800) * 1000)
+        .toISOString()
+        .slice(0, period === 'day' ? 10 : 16)
+        .replace('T', ' '),
+      open: null,
+      high: null,
+      low: null,
+      close: null,
+      mean: null,
+      count: 0,
+      amount: 0
+    }
+  })
+  for (const day of data.baseReport.trading) {
+    let slot = 0
+    for (const type of ORDER_TYPES) {
+      for (let index = 0; index < (day[type] || 0); index++) {
+        const time = parseDay(day['日期']) + slot++ * 4260
+        if (time < start || time >= end) continue
+        const bucket = candles[Math.floor((time - start) / seconds)]
+        const price = ORDER_PRICES[type]
+        bucket.open ??= price
+        bucket.high = bucket.high === null ? price : Math.max(bucket.high, price)
+        bucket.low = bucket.low === null ? price : Math.min(bucket.low, price)
+        bucket.close = price
+        bucket.count++
+        bucket.amount += price
+        bucket.mean = bucket.amount / bucket.count
+      }
+    }
+  }
+  return {
+    period,
+    startDate,
+    endDate,
+    timezone: 'Asia/Shanghai',
+    dayStartHour: 4,
+    candles,
+    recordedCount: candles.reduce((sum, row) => sum + row.count, 0),
+    amount: candles.reduce((sum, row) => sum + row.amount, 0)
+  }
 }
 
 export function createPreviewData(config) {
@@ -171,11 +271,13 @@ export function createPreviewData(config) {
     plan: { conf: { ling_xi: 1 }, plan1: {}, backup_plans: [], facility_levels: {} },
     layout: { screenshot_height: 180, task_height: 132 },
     sidebar: null,
+    depotPreferences: null,
     appearance: {
       software_version_display: 'version',
       software_version_language: 'en',
       watermark_visible: true,
-      task_settings_layout: 'checklist'
+      task_settings_layout: 'checklist',
+      base_report_mode: previewReportMode()
     }
   }
 }
@@ -293,6 +395,42 @@ export function createPreviewAdapter(data, requests = []) {
     return activate(config, id, incoming, selected)
   }
   let logBackground = null
+  // 养成规划示例数据按需加载，其他预览页面不必创建这部分示例对象。
+  let growthAdapter = null
+  let growthLoading = null
+  function loadGrowth() {
+    if (growthAdapter) return Promise.resolve(growthAdapter)
+    if (!growthLoading) {
+      growthLoading = Promise.all([import('./growthFixture.js'), import('./growthAdapter.js')])
+        .then(([{ createGrowthPreview }, { createGrowthAdapter }]) => {
+          growthAdapter = createGrowthAdapter(createGrowthPreview())
+          return growthAdapter
+        })
+        .catch((error) => {
+          growthLoading = null
+          throw error
+        })
+    }
+    return growthLoading
+  }
+  function isGrowthPath(target) {
+    return (
+      target === '/mastery-recommendation' ||
+      target.startsWith('/mastery-plan') ||
+      target === '/growth-plan' ||
+      target === '/mastery-t3-summary' ||
+      target === '/growth-survey' ||
+      target === '/growth-crafting-order' ||
+      target === '/mastery-route' ||
+      target === '/mastery-route/settings' ||
+      target === '/cultivate-fetch' ||
+      target === '/workshop-status' ||
+      target === '/workshop-auto-config' ||
+      target.startsWith('/workshop-operators') ||
+      target === '/growth-chip-farming' ||
+      target === '/operator'
+    )
+  }
   return async (config) => {
     const method = (config.method || 'get').toUpperCase()
     const requestUrl = new URL(config.url, 'http://mower-preview.invalid')
@@ -306,6 +444,37 @@ export function createPreviewAdapter(data, requests = []) {
     )
       fail(config, '网络设置请求缺少确认标识', 403)
     const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+    // 养成规划使用独立的示例数据与内存状态，先于通用配置校验处理。
+    // Axios 自定义适配器不会把 config.params 并进 url，这里手动合并查询参数。
+    if (isGrowthPath(path)) {
+      const growthQuery = new URLSearchParams(requestUrl.searchParams)
+      for (const [key, value] of Object.entries(config.params || {})) {
+        if (value !== undefined && value !== null) growthQuery.set(key, String(value))
+      }
+      const growthResult = (await loadGrowth()).handle({
+        method,
+        path,
+        query: growthQuery,
+        body
+      })
+      if (!growthResult.unhandled) {
+        if (growthResult.status && growthResult.status >= 400) {
+          fail(
+            config,
+            growthResult.data?.error || growthResult.data?.message || '离线预览接口返回错误',
+            growthResult.status,
+            'ERR_PREVIEW_OPERATION'
+          )
+        }
+        return {
+          status: growthResult.status || 200,
+          statusText: 'OK',
+          data: growthResult.data,
+          headers: {},
+          config
+        }
+      }
+    }
     const supplied =
       config.headers?.get?.('X-Mower-Config-Generation') ??
       config.headers?.['X-Mower-Config-Generation']
@@ -345,9 +514,41 @@ export function createPreviewAdapter(data, requests = []) {
       '/report/getReportData': () => clone(data.baseReport.report),
       '/report/getOrundumData': () => clone(data.baseReport.orundum),
       '/report/trading_history': () => clone(data.baseReport.trading),
+      '/report/order-candles': () => {
+        try {
+          return previewOrderCandles(data, {
+            ...Object.fromEntries(requestUrl.searchParams),
+            ...config.params
+          })
+        } catch {
+          fail(config, '订单记录查询参数无效')
+        }
+      },
+      '/report/restore-trading-history': () => '离线示例：分析已有订单记录完成',
       '/report/recycling_settings': () => clone(data.incomeSettings),
       // 离线示例仅提供默认预设，不读取 MAA 文件或建立连接。
       '/maa-conn-preset': () => ['General'],
+      '/maa-event-shop': () => ({ shops: [] }),
+      '/maa-paradox': () => ({ scripts: [] }),
+      '/maa-copilot': () => ({ scripts: [] }),
+      '/sss-copilot': () => ({
+        scripts: [
+          {
+            id: 'a'.repeat(64),
+            stage_name: '保全关卡 1',
+            title: '示例作业一',
+            details: '离线预览示例，请在游戏中准备编队。',
+            operators: [{ name: '棘刺', skill: 3 }]
+          },
+          {
+            id: 'b'.repeat(64),
+            stage_name: '保全关卡 2',
+            title: '示例作业二',
+            details: '可为此项单独选择关卡、导能单元和次数。',
+            operators: []
+          }
+        ]
+      }),
       '/operator': () => [
         '能天使',
         '德克萨斯',
@@ -440,6 +641,7 @@ export function createPreviewAdapter(data, requests = []) {
       }),
       '/ui-state/log-layout': () => clone(data.layout),
       '/gui/sidebar': () => ({ sidebar: clone(data.sidebar) }),
+      '/gui/depot': () => ({ depot: clone(data.depotPreferences) }),
       '/gui/appearance': () => clone(data.appearance),
       '/db-admin/stats': () => ({ log: 64, task: 5 }),
       '/screenshot/latest': () => new Blob([screenshot], { type: 'image/svg+xml' })
@@ -511,6 +713,31 @@ export function createPreviewAdapter(data, requests = []) {
     else if (method === 'PUT' && path === '/gui/sidebar') {
       data.sidebar = clone(body.sidebar)
       result = { sidebar: clone(data.sidebar) }
+    } else if (method === 'PUT' && path === '/gui/depot') {
+      const groups = ['favorites', 'view', 'baseline']
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).some((key) => !['depot', 'migrate'].includes(key)) ||
+        (Object.hasOwn(body, 'migrate') && body.migrate !== true) ||
+        !body.depot ||
+        typeof body.depot !== 'object' ||
+        Array.isArray(body.depot) ||
+        Object.keys(body.depot).length === 0 ||
+        Object.keys(body.depot).some((key) => !groups.includes(key))
+      )
+        fail(config, '仓库偏好无效')
+      if (!body.migrate || data.depotPreferences === null) {
+        data.depotPreferences = {
+          favorites: [],
+          view: clone(DEFAULT_VIEW_PREFS),
+          baseline: clone(DEFAULT_BASELINE_CONFIG),
+          ...data.depotPreferences,
+          ...clone(body.depot)
+        }
+      }
+      result = { depot: clone(data.depotPreferences) }
     } else if (method === 'PUT' && path === '/report/recycling_settings') {
       data.incomeSettings = { ...body, base_algorithm_saved: true }
       result = clone(data.incomeSettings)
@@ -519,7 +746,8 @@ export function createPreviewAdapter(data, requests = []) {
         software_version_display: ['version', 'channel'],
         software_version_language: ['zh', 'en'],
         watermark_visible: [true, false],
-        task_settings_layout: ['checklist', 'waterfall']
+        task_settings_layout: ['checklist', 'waterfall'],
+        base_report_mode: ['standard', 'stock']
       }
       if (!body || typeof body !== 'object' || Array.isArray(body)) fail(config, '外观配置无效')
       const changes = { ...body }

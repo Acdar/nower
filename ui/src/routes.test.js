@@ -5,18 +5,29 @@ import { routes } from './routes'
 describe('backend page fallback contract', () => {
   it('uses the unified settings page and keeps old addresses as redirects', () => {
     const children = routes[0].children
-    const page = children.find((route) => route.name === 'task-settings')
+    const page = children.find((route) => route.name === 'settings')
     expect(page.component).toBeTruthy()
     expect(page.meta.settings).not.toBe(true)
-    for (const path of ['mowersettings', 'maasettings']) {
+    for (const path of ['task-settings', 'mowersettings', 'maasettings']) {
       const legacy = children.find((route) => route.path === path)
       expect(legacy.component).toBeUndefined()
       expect(legacy.redirect({ query: { token: 'demo' }, hash: '#mower-data' })).toEqual({
-        name: 'task-settings',
+        name: 'settings',
         query: { token: 'demo' },
         hash: '#mower-data'
       })
     }
+  })
+
+  it('redirects the retired trading analysis page to the base report page', () => {
+    const record = routes[0].children.find((route) => route.path === 'record')
+    const legacy = record.children.find((route) => route.path === 'trading_analysis')
+    expect(legacy.component).toBeUndefined()
+    expect(legacy.redirect({ query: { token: 'demo' }, hash: '#order-distribution' })).toEqual({
+      name: 'report',
+      query: { token: 'demo' },
+      hash: '#order-distribution'
+    })
   })
 
   it('lists every production frontend route, including parent routes', () => {

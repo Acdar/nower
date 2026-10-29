@@ -311,6 +311,15 @@ def _apply_version_update_resting_threshold(info, scheduler, now=None):
         targets.append(op_data.config)
     changed = False
     for target in targets:
+        group_thresholds = config.conf.group_resting_thresholds
+        override = desired if active else None
+        if (
+            getattr(target, "group_resting_thresholds", {}) != group_thresholds
+            or getattr(target, "resting_threshold_override", None) != override
+        ):
+            changed = True
+        target.group_resting_thresholds = dict(group_thresholds)
+        target.resting_threshold_override = override
         if target.resting_threshold != desired:
             target.resting_threshold = desired
             changed = True
@@ -770,7 +779,7 @@ def simulate(saved):
                     - {backup.name for backup in base_scheduler.op_data.backup_plans}
                 )
             )
-            restored_tasks, restored_predecessors = [], {}
+            restored_tasks, restored_predecessors, restored_pairs = [], {}, []
             for task in tasks:
                 migrated = migrate_backup_tasks(
                     [task],
@@ -781,14 +790,26 @@ def simulate(saved):
                 )
                 if migrated:
                     restored_predecessors[id(task)] = migrated[0]
+                    restored_pairs.append((task, migrated[0]))
                     restored_tasks.extend(migrated)
             base_scheduler.tasks = restored_tasks
-            for task in base_scheduler.waiting_group_shifts:
-                if hasattr(task, "group_shift_predecessors"):
-                    task.group_shift_predecessors = tuple(
-                        restored_predecessors.get(id(previous), previous)
-                        for previous in task.group_shift_predecessors
-                    )
+            restored_pairs.extend(
+                (task, task) for task in base_scheduler.waiting_group_shifts
+            )
+            for original, task in restored_pairs:
+                for attribute in (
+                    "group_shift_predecessors",
+                    "product_shift_predecessors",
+                ):
+                    if hasattr(original, attribute):
+                        setattr(
+                            task,
+                            attribute,
+                            tuple(
+                                restored_predecessors.get(id(previous), previous)
+                                for previous in getattr(original, attribute)
+                            ),
+                        )
             base_scheduler.op_data.restore_dorm_state(
                 saved["dorm"],
                 group_transitions=base_scheduler._pending_group_transitions(),
@@ -827,7 +848,13 @@ def simulate(saved):
                 "idle_dorm_search_stopped_at"
             )
             base_scheduler.party_time = saved["party_time"]
+            base_scheduler.maa_copilot_progress = dict(
+                saved.get("maa_copilot_progress", {})
+            )
             base_scheduler.daily_visit_friend = saved["daily_visit_friend"]
+            base_scheduler.maa_daily_completed = dict(
+                saved.get("maa_daily_completed", {})
+            )
             base_scheduler.daily_visit_friend_attempt = saved.get(
                 "daily_visit_friend_attempt"
             )
@@ -1132,6 +1159,11 @@ def simulate(saved):
                         rg_sleep = False
 
                     if not rg_sleep:
+                        from arknights_mower.solvers.manual_tasks import (
+                            long_task_deadline,
+                            resume_dorm_releases,
+                        )
+
                         if config.conf.RA:
                             from arknights_mower.solvers.reclamation_algorithm import (
                                 ReclamationAlgorithm,
@@ -1142,12 +1174,16 @@ def simulate(saved):
                             ra_solver = ReclamationAlgorithm(
                                 base_scheduler.device, base_scheduler.recog
                             )
-                            ra_solver.run(
-                                find_next_task(
-                                    base_scheduler.tasks, op_data=base_scheduler.op_data
-                                ).time
-                                - datetime.now()
-                            )
+                            try:
+                                ra_solver.run(
+                                    long_task_deadline(
+                                        base_scheduler,
+                                        datetime.now() + timedelta(hours=24),
+                                    )
+                                    - datetime.now()
+                                )
+                            finally:
+                                resume_dorm_releases(base_scheduler)
                             remaining_time = (
                                 find_next_task(
                                     base_scheduler.tasks, op_data=base_scheduler.op_data
@@ -1162,12 +1198,16 @@ def simulate(saved):
                             sf_solver = SecretFront(
                                 base_scheduler.device, base_scheduler.recog
                             )
-                            sf_solver.run(
-                                find_next_task(
-                                    base_scheduler.tasks, op_data=base_scheduler.op_data
-                                ).time
-                                - datetime.now()
-                            )
+                            try:
+                                sf_solver.run(
+                                    long_task_deadline(
+                                        base_scheduler,
+                                        datetime.now() + timedelta(hours=24),
+                                    )
+                                    - datetime.now()
+                                )
+                            finally:
+                                resume_dorm_releases(base_scheduler)
                             remaining_time = (
                                 find_next_task(
                                     base_scheduler.tasks, op_data=base_scheduler.op_data
@@ -1180,6 +1220,11 @@ def simulate(saved):
                     # announcement before dispatching another scheduler task.
                     continue
 
+            from arknights_mower.solvers.manual_tasks import (
+                run_long_task_if_dorm_pending,
+            )
+
+            run_long_task_if_dorm_pending(base_scheduler)
             base_scheduler.run()
         except RECOVERABLE_DEVICE_ERRORS as exc:
             try:
