@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """独立倒计时挂件：显示距离 mower 下次任务的剩余时间，并在临界点弹桌面通知。
 
-数据来自 mower Web 服务的 /status 接口（无需 token）。端口默认自动发现：
-扫描 %LOCALAPPDATA%/arknights-mower/updates/*/instances/*.json 实例注册文件，
-按心跳时间优先连接能响应的实例；也可以用 --port 手动指定。
+数据来自 mower Web 服务的 /status 接口，该接口要求当前实例的访问令牌：
+先在 mower 设置里填写 Web UI token，再用右键菜单「设置令牌…」或 --token 填同一个值。
+
+端口默认自动发现：扫描实例登记文件（<数据目录>/tmp/updates/*/instances/*.json，
+兼容旧布局 <数据目录>/updates/*/instances/*.json），按心跳时间优先连接能响应的实例。
+数据目录取 %LOCALAPPDATA%/arknights-mower、程序自身目录及当前工作目录；
+也可以用 --port 手动指定，指定的端口连不上时仍会回退到自动发现。
 
 功能：
 - 置顶小窗（带系统标题栏，可最小化/关闭），实时倒计时（休眠中）/ 工作中 / 未运行；
 - 剩余 60 / 30 / 10 秒时弹 Windows 系统通知 + 提示音 + 窗口闪烁（阈值可用
   --thresholds 自定义），最后 10 秒倒计时数字平滑循环变色；
 - 显示下次任务名与时间；窗口可拖动（位置自动记忆），右键菜单可测试通知、
-  设置服务器、开关置顶/声音或退出；
+  设置服务器、设置访问令牌、开关置顶/声音或退出；
 - 支持 HTTP / HTTPS：目标写成 https://host:port 即走 TLS（先试 http、失败再试
   https），自签名证书可勾选「忽略证书校验」（等价 curl -k）。
 
 用法：
     python countdown_widget.py                 # 自动发现正在运行的实例
     python countdown_widget.py --port 58000    # 指定端口
+    python countdown_widget.py --token <令牌>  # 指定 mower 的 Web UI token
     python countdown_widget.py --host https://192.168.1.5:8443 --insecure
     pythonw countdown_widget.py                # 无控制台窗口启动
 """
@@ -56,6 +61,7 @@ DEFAULT_THRESHOLDS = (60, 30, 10)
 RAINBOW_SECONDS = 60  # 最后一分钟内倒计时数字循环变色
 TASK_NAME_WIDTH = 30  # 队列行显示宽度（中文按 2 计），完整内容悬停可看
 RAINBOW_SPEED = 0.35  # 彩虹色循环速度（圈/秒）
+STALE_RECORD_SECONDS = 120  # 超过这个时间没有心跳的实例登记视为残留
 
 # --- 主题（深色 / 浅色 / 跟随系统） ---
 
@@ -182,27 +188,67 @@ def window_scale(root: tk.Tk) -> float:
     return 1.0
 
 
+def _data_roots():
+    """可能存放 mower 数据目录的位置，供实例登记扫描使用。
+
+    打包版把数据放在程序目录（便携布局），开发时就在仓库根目录，macOS 放在
+    Application Support，因此这里同时看环境变量、程序自身目录和工作目录，
+    并向上多找两级，覆盖「挂件放在安装目录的子目录里」的情况。
+    """
+    seeds = []
+    for name in ("LOCALAPPDATA", "APPDATA"):
+        value = os.environ.get(name)
+        if value:
+            seeds.append(Path(value) / "arknights-mower")
+    anchors = [Path(__file__).resolve().parent, Path.cwd()]
+    if sys.executable:
+        anchors.insert(0, Path(sys.executable).resolve().parent)
+    for anchor in anchors:
+        for candidate in (anchor, anchor.parent, anchor.parent.parent):
+            seeds.append(candidate)
+            seeds.append(candidate / "arknights-mower")
+    roots = []
+    seen = set()
+    for seed in seeds:
+        try:
+            normalized = seed.resolve()
+        except OSError:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        roots.append(normalized)
+    return roots
+
+
 def instance_records():
     """遍历 mower 的实例注册文件，返回所有带端口的记录。"""
-    base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
-    for path in sorted(
-        (base / "arknights-mower" / "updates").glob("*/instances/*.json")
-    ):
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(record, dict) and isinstance(record.get("port"), int):
-            yield record
+    records = []
+    for root in _data_roots():
+        for parent in (root / "tmp" / "updates", root / "updates"):
+            for path in sorted(parent.glob("*/instances/*.json")):
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(record, dict) and isinstance(record.get("port"), int):
+                    records.append(record)
+    return records
 
 
 def discover_ports():
     """候选端口列表，最近有心跳的实例排在前面。"""
-    rows = [
-        (float(record.get("heartbeat") or 0), record["port"])
-        for record in instance_records()
-        if 0 < record["port"] < 65536
-    ]
+    now = time.time()
+    fresh = []
+    stale = []
+    for record in instance_records():
+        port = record["port"]
+        if not 0 < port < 65536:
+            continue
+        heartbeat = float(record.get("heartbeat") or 0)
+        target = fresh if now - heartbeat <= STALE_RECORD_SECONDS else stale
+        target.append((heartbeat, port))
+    rows = fresh or stale
     rows.sort(key=lambda item: item[0], reverse=True)
     return [port for _, port in rows]
 
@@ -408,6 +454,10 @@ def toast_script(
 # --- 状态轮询 ---
 
 
+class AuthRequired(Exception):
+    """状态接口要求访问令牌（HTTP 403）。"""
+
+
 class StatusPoller(threading.Thread):
     """后台线程：轮询 /status 维护快照；断线时自动重新发现端口。"""
 
@@ -419,6 +469,7 @@ class StatusPoller(threading.Thread):
         verbose=False,
         secure: bool | None = None,
         insecure: bool = False,
+        token: str = "",
     ):
         super().__init__(daemon=True, name="mower-status-poller")
         self.host = host
@@ -428,6 +479,8 @@ class StatusPoller(threading.Thread):
         # secure=None 表示自动：先按 http 试，失败再用 https
         self.secure = secure
         self.insecure = insecure  # True = 不校验证书（自签名证书）
+        self.token = (token or "").strip()
+        self.auth_failed = False  # 最近一次连接是否因缺少/错误令牌被拒绝
         self.snapshot: dict | None = None
         self.endpoint: int | None = None
         self.endpoint_secure = False
@@ -444,14 +497,17 @@ class StatusPoller(threading.Thread):
         port: int | None,
         secure: bool | None = None,
         insecure: bool | None = None,
+        token: str | None = None,
     ):
         """运行时切换目标服务器（右键菜单「设置服务器…」）。
 
-        secure=None 表示「自动」；insecure=None 表示保持原值不变。
+        secure=None 表示「自动」；insecure=None 与 token=None 表示保持原值不变。
         """
         self.host = host
         self.fixed_port = port
         self.secure = secure
+        if token is not None:
+            self.token = token.strip()
         if insecure is not None:
             self.insecure = bool(insecure)
             self._ssl_context = None
@@ -488,9 +544,12 @@ class StatusPoller(threading.Thread):
         else:
             connection = http.client.HTTPConnection(self.host, port, timeout=1.3)
         try:
-            connection.request("GET", "/status")
+            headers = {"token": self.token} if self.token else {}
+            connection.request("GET", "/status", headers=headers)
             response = connection.getresponse()
             body = response.read()
+            if response.status == 403:
+                raise AuthRequired("状态接口要求访问令牌")
             if response.status != 200:
                 raise ValueError(f"状态接口返回 HTTP {response.status}")
         finally:
@@ -529,18 +588,27 @@ class StatusPoller(threading.Thread):
         return f"{scheme}://{self.host}:{self.endpoint}"
 
     def _scan(self) -> bool:
-        candidates = [self.fixed_port] if self.fixed_port else discover_ports()
+        # 先试手动指定的端口，再看实例登记：端口固定值过期时不至于一直连不上
+        candidates = [self.fixed_port] if self.fixed_port else []
+        candidates.extend(port for port in discover_ports() if port not in candidates)
+        denied = False
         for port in candidates:
             for secure in self._schemes():
                 try:
                     data = self._request(port, secure)
+                except AuthRequired:
+                    denied = True
+                    self._log(f"端口 {port} 要求访问令牌")
+                    continue
                 except Exception:
                     continue
+                self.auth_failed = False
                 self._adopt(port, data, secure)
                 label = self.target_label()
                 self._log(f"已连接 mower {label}")
                 log_line(f"[poll] 已连接 mower {label}")
                 return True
+        self.auth_failed = denied
         return False
 
     def run(self):
@@ -557,12 +625,21 @@ class StatusPoller(threading.Thread):
                         self._request(self.endpoint, self.endpoint_secure),
                         self.endpoint_secure,
                     )
+                    self.auth_failed = False
                     failures = 0
                 elif self._scan():
                     failures = 0
                 else:
                     self.snapshot = None
                     failures += 1
+            except AuthRequired:
+                if self.endpoint is not None:
+                    self._log(f"端口 {self.endpoint} 要求访问令牌")
+                self.auth_failed = True
+                self.snapshot = None
+                failures += 1
+                if failures >= 2:
+                    self.endpoint = None  # 下轮重新扫描
             except Exception as exc:
                 if self.endpoint is not None:
                     self._log(f"端口 {self.endpoint} 连接失败：{exc}")
@@ -764,6 +841,7 @@ class CountdownWidget:
         self.menu.add_command(label="查看完整任务队列", command=self._copy_task_name)
         self.menu.add_command(label="重新连接", command=self.poller.reset)
         self.menu.add_command(label="设置服务器…", command=self._configure_server)
+        self.menu.add_command(label="设置令牌…", command=self._configure_token)
         self.menu.add_checkbutton(
             label="使用 HTTPS", variable=self.secure_var, command=self._toggle_secure
         )
@@ -944,7 +1022,10 @@ class CountdownWidget:
             self._set(self.info, "等待 mower 启动…")
             self._set(self.task, "　")
             self._set(self.task2, "　")
-            self._set(self.link, "○ 未连接（自动重试）", fg=SUB)
+            if self.poller.auth_failed:
+                self._set(self.link, "○ 需要访问令牌（右键 设置令牌…）", fg=WARN)
+            else:
+                self._set(self.link, "○ 未连接（自动重试）", fg=SUB)
             self._detail_text = ""
             return
 
@@ -1263,6 +1344,27 @@ class CountdownWidget:
         self.secure_var.set(bool(secure))
         save_settings(host=host, port=port, secure=secure)
 
+    def _configure_token(self):
+        """填写 mower 的 Web UI token：/status 需要它才能读取状态。"""
+        token = simpledialog.askstring(
+            "设置访问令牌",
+            "输入 mower 设置里的 Web UI token：\n"
+            "留空表示不使用令牌；令牌保存在用户主目录的 .mower-countdown.json",
+            initialvalue=self.poller.token,
+            show="*",
+            parent=self.root,
+        )
+        if token is None:
+            return
+        token = token.strip()
+        self.poller.configure(
+            self.poller.host,
+            self.poller.fixed_port,
+            secure=self.poller.secure,
+            token=token,
+        )
+        save_settings(token=token)
+
     def _toggle_secure(self):
         """右键菜单：在 HTTP / HTTPS 之间切换，改完立即重连。"""
         secure = bool(self.secure_var.get())
@@ -1329,6 +1431,11 @@ def main(argv=None):
         "--insecure", action="store_true", help="HTTPS 时不校验证书（自签名证书）"
     )
     parser.add_argument(
+        "--token",
+        default=None,
+        help="mower 的 Web UI token（/status 需要）；默认用上次保存的值",
+    )
+    parser.add_argument(
         "--thresholds",
         default=",".join(str(t) for t in DEFAULT_THRESHOLDS),
         help="临界提醒的秒数，逗号分隔（默认 60,30,10）",
@@ -1364,6 +1471,7 @@ def main(argv=None):
     if args.https:
         secure = True
     insecure = bool(args.insecure or settings.get("insecure"))
+    token = args.token if args.token is not None else (settings.get("token") or "")
     poller = StatusPoller(
         host=host,
         port=port,
@@ -1371,6 +1479,7 @@ def main(argv=None):
         verbose=args.verbose,
         secure=secure,
         insecure=insecure,
+        token=token,
     )
     poller.start()
     widget = CountdownWidget(
