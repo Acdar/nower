@@ -239,7 +239,6 @@ const syncLabel = computed(() => {
           :name="op.name"
           :rarity="op.rarity"
           :size="26"
-          muted
         />
       </div>
     </div>
@@ -295,7 +294,7 @@ const syncLabel = computed(() => {
   position: absolute;
   inset: -12% -6% -12% auto;
   width: 66%;
-  background-image: url('/bg.webp');
+  background-image: url('/bg_dark.webp');
   background-size: cover;
   background-position: 52% 30%;
   filter: grayscale(1) contrast(1.05) brightness(0.82);

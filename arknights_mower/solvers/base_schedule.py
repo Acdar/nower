@@ -124,6 +124,7 @@ from arknights_mower.utils.manufacture_product import (
     product_task_meta,
 )
 from arknights_mower.utils.mastery_support_types import TrainingObservationError
+from arknights_mower.utils.network_adaptation import get_network_adaptation
 from arknights_mower.utils.operation_timing import (
     estimate_dorm_minutes,
     record_dorm_recovery,
@@ -155,6 +156,16 @@ from arknights_mower.utils.resting_priority import (
     resting_key,
     resting_mood,
     resting_tier,
+)
+from arknights_mower.utils.run_order_network import (
+    bind_run_order_network,
+    finish_run_order_network,
+    reconcile_run_order_network,
+    run_order_buffer_seconds,
+    run_order_entry_seconds,
+    run_order_network_allowance,
+    run_order_network_scope,
+    with_run_order_network,
 )
 from arknights_mower.utils.scheduler_task import (
     MAINTENANCE_TASK_TYPES,
@@ -559,6 +570,25 @@ class BaseSchedulerSolver(
         self._startup_run_order_check_pending = True
         self._startup_mood_observations = {}
         workshop_inventory_changed.set()
+        self._register_network_wait_observer()
+
+    def _register_network_wait_observer(self):
+        owner = getattr(self, "recog", None)
+        if owner is None:
+            return
+        get_network_adaptation(owner).set_observation_callback(
+            self._on_network_wait_observed
+        )
+
+    def _on_network_wait_observed(self, event):
+        # 只更新待执行任务的参数，队列仍由下一次正常调度排序。
+        bind_run_order_network(
+            self.tasks,
+            self.recog,
+            config.conf,
+            event.observed_at,
+            op_data=getattr(self, "op_data", None),
+        )
 
     def find_next_task(
         self,
@@ -637,6 +667,8 @@ class BaseSchedulerSolver(
 
     def _task_failure_snapshot(self, task, rooms):
         """失败任务仅由新观测或相关安排变化重新准入，不使用时钟计时。"""
+        if getattr(task, "clue_access_record_pending", False):
+            return {"access_record_visible": self._clue_access_record_visible()}
         if task.type in MANUAL_TASK_TYPES:
             from arknights_mower.solvers.manual_tasks import manual_task_snapshot
 
@@ -862,7 +894,12 @@ class BaseSchedulerSolver(
         pending = [
             (task, failure)
             for task in self.tasks
-            if task.type in ordinary
+            if (
+                task.type in ordinary
+                or task.type == TaskTypes.RUN_ORDER
+                and getattr(task, "run_order_restore_pending", False)
+                and not task.meta_data
+            )
             and (failure := getattr(task, "execution_failure", None))
             and failure.get("reason", "").startswith("干员确认")
         ]
@@ -1021,6 +1058,11 @@ class BaseSchedulerSolver(
         self._discard_legacy_run_order_waits()
         for task in list(self.tasks):
             failure = getattr(task, "execution_failure", None)
+            if failure and getattr(task, "clue_access_record_pending", False):
+                if self._clue_access_record_cleared():
+                    del task.execution_failure
+                    del task.clue_access_record_pending
+                continue
             predecessors = getattr(task, "product_shift_predecessors", ())
             if failure and predecessors:
                 dispatch = task_view(self.tasks, TaskScope.DISPATCH, self.op_data)
@@ -1145,6 +1187,7 @@ class BaseSchedulerSolver(
 
         if config.stop_mower.is_set():
             raise MowerExit
+        self._register_network_wait_observer()
         if config.maintenance_recheck.is_set():
             return
         self._discard_legacy_mood_control_tasks()
@@ -1175,6 +1218,7 @@ class BaseSchedulerSolver(
                 self._queue_missing_run_order_reads()
             self._resume_waiting_group_shifts()
             self._fill_empty_dorms()
+            reconcile_run_order_network(self.tasks, config.conf)
             scheduling(self.tasks, op_data=getattr(self, "op_data", None))
             self.task = self.find_next_task()
             if self.task is None:
@@ -1217,7 +1261,17 @@ class BaseSchedulerSolver(
         save_log(logMsg, "{}" if not self.task else str(self.task), level="INFO")
         if config.maintenance_recheck.is_set():
             return
-        return super().run()
+        dispatched_task = self.task
+        try:
+            with run_order_network_scope(self):
+                return super().run()
+        finally:
+            if (
+                dispatched_task is not None
+                and not getattr(dispatched_task, "run_order_restore_pending", False)
+                and not any(task is dispatched_task for task in self.tasks)
+            ):
+                finish_run_order_network(dispatched_task, getattr(self, "recog", None))
 
     def _fill_empty_dorms(self, *, primary_planned=False):
         """统一空床入口：日常规划和调度前均检查，不等待五分钟空档或跑单延期事件。"""
@@ -3053,7 +3107,9 @@ class BaseSchedulerSolver(
                         and config.conf.run_order_buffer_time > 0
                         and datetime.now() + timedelta(seconds=45)
                         < self.task.time
-                        + timedelta(minutes=config.conf.run_order_delay)
+                        + timedelta(
+                            seconds=run_order_entry_seconds(self.task, config.conf)
+                        )
                     ):
                         # 有45秒冗余时间才返回基地主界面
                         logger.info("跑单前返回主界面以保持登录状态")
@@ -3194,10 +3250,10 @@ class BaseSchedulerSolver(
                 ):
                     remove_current_task = self.overtake_room() is not False
                 elif self.task.type == TaskTypes.CLUE_PARTY:
-                    self._run_clue_flow()
+                    remove_current_task = self._run_clue_flow() is not False
                 elif self.task.type == TaskTypes.CLUE:
                     # 手动触发的会客室任务，与定时触发走同一条路径
-                    self._run_clue_flow()
+                    remove_current_task = self._run_clue_flow() is not False
                 elif self.task.type == TaskTypes.REFRESH_TIME:
                     self.plan_run_order(self.task.meta_data)
                     self.skip(["todo_task", "collect_notification"])
@@ -3454,8 +3510,8 @@ class BaseSchedulerSolver(
                 and self.no_pending_task(3)
                 and self._clue_flow_resume_time() is None
             ):
-                self.clue_new()
-                self.last_clue = datetime.now()
+                if self.clue_new() is not False:
+                    self.last_clue = datetime.now()
             if (
                 self.drone_room not in self.op_data.run_order_rooms
                 and (
@@ -10198,18 +10254,23 @@ class BaseSchedulerSolver(
         """跑一次完整会客室流程。
 
         定时趴体（线索交流结束后触发）和手动「线索任务」共用这一条路径。
-        先清掉缓存的线索交流结束时间，让 clue_new() 从界面上重新读取；跑完
-        刷新 last_clue，把下一次定时触发顺延一小时。
+        clue_new() 根据界面更新线索交流结束时间；未读到新结果时保留已有观测。
+        完成后刷新 last_clue，失败时保留原任务和检查时间。
         """
-        self.party_time = None
-        self.clue_new()
+        if self.clue_new() is False:
+            task = getattr(self, "task", None)
+            if task is not None and task.type in (TaskTypes.CLUE, TaskTypes.CLUE_PARTY):
+                task.clue_access_record_pending = True
+                self._retain_failed_task(
+                    task, "访问记录关闭未确认", ("meeting",), dependency=True
+                )
+            return False
         self.last_clue = datetime.now()
         self.skip(["collect_notification"])
 
     def _run_clue_shop(self, *, settlement_checked=None):
         if self._clue_credit_enabled():
-            self._run_on_demand_clue_shop(settlement_checked=settlement_checked)
-            return
+            return self._run_on_demand_clue_shop(settlement_checked=settlement_checked)
         conf = config.conf
         if getattr(
             conf,
@@ -10239,10 +10300,20 @@ class BaseSchedulerSolver(
         )
 
     def clue_new(self):
+        if getattr(self, "_clue_access_record_exhausted", False):
+            self.recog.update()
+            if not self._clue_access_record_cleared():
+                return False
+            self._clue_access_record_exhausted = False
         try:
             settlement_checked = None
             logger.info("基建：线索")
             self.scene_graph_navigation(Scene.INFRA_MAIN)
+            if (
+                getattr(self, "_clue_access_record_exhausted", False)
+                and not self._clue_access_record_cleared()
+            ):
+                return False
             self.enter_room("meeting")
 
             clue_size = (162, 216)
@@ -10356,8 +10427,22 @@ class BaseSchedulerSolver(
                                 settlement_checked = self._collect_clue_message_board(
                                     collect_current=False
                                 )
+                                if (
+                                    getattr(
+                                        self, "_clue_access_record_exhausted", False
+                                    )
+                                    and not self._clue_access_record_cleared()
+                                ):
+                                    return False
                                 if not settlement_checked:
                                     self.scene_graph_navigation(Scene.INFRA_MAIN)
+                                    if (
+                                        getattr(
+                                            self, "_clue_access_record_exhausted", False
+                                        )
+                                        and not self._clue_access_record_cleared()
+                                    ):
+                                        return False
                                     self.enter_room("meeting")
                             else:
                                 self._prepare_clue_room()
@@ -10388,6 +10473,11 @@ class BaseSchedulerSolver(
                                 if self.scene() == Scene.INFRA_DETAILS:
                                     break
                                 self.sleep(0.5)
+                        if (
+                            getattr(self, "_clue_access_record_exhausted", False)
+                            and not self._clue_access_record_cleared()
+                        ):
+                            return False
                         ctm.complete("message_board")
                     elif ctm.task == "party_time":
                         self.wait_product_complete()
@@ -10422,6 +10512,11 @@ class BaseSchedulerSolver(
                     else:
                         # 点击左下角，关闭进驻信息，进入线索界面
                         self.tap((330, 1000))
+
+                elif scene == Scene.CLUE_ACCESS_RECORD:
+                    if not self._wait_clue_message_board():
+                        self._clue_access_record_exhausted = True
+                        return False
 
                 elif scene == Scene.CLUE_MESSAGE_BOARD:
                     # 停在信息板页面上：退回房间详情，后面的任务都在那里继续。
@@ -10696,11 +10791,18 @@ class BaseSchedulerSolver(
 
                 else:
                     self.scene_graph_navigation(Scene.INFRA_MAIN)
+                    if (
+                        getattr(self, "_clue_access_record_exhausted", False)
+                        and not self._clue_access_record_cleared()
+                    ):
+                        return False
                     self.enter_room("meeting")
             if self._clue_credit_enabled():
-                self._run_clue_shop(settlement_checked=settlement_checked)
+                shop_result = self._run_clue_shop(settlement_checked=settlement_checked)
             else:
-                self._run_clue_shop()
+                shop_result = self._run_clue_shop()
+            if shop_result is False:
+                return False
         except (MowerExit, DeviceRecoveryError, SharedADBError):
             raise
         except Exception as e:
@@ -10761,6 +10863,8 @@ class BaseSchedulerSolver(
                 meta_data=room,
                 op_data=self.op_data,
             ):
+                # 实读是新的订单截止依据，即使时间数值相同也不能复用旧预览。
+                task.__dict__.pop("run_order_network_timing", None)
                 task.time = task_time
                 logger.info(
                     f"房间 {room} 无人机加速后接单时间为 {task_time.strftime('%H:%M:%S')}"
@@ -12173,8 +12277,8 @@ class BaseSchedulerSolver(
                         getattr(self.task, "run_order_calibrated_time", self.task.time)
                         - datetime.now()
                     ).total_seconds()
-                    + config.conf.run_order_delay * 60
-                    - config.conf.run_order_buffer_time
+                    + run_order_entry_seconds(self.task, config.conf)
+                    - run_order_buffer_seconds(self.task, config.conf)
                     - capture_seconds
                 ),
                 1,
@@ -13627,6 +13731,19 @@ class BaseSchedulerSolver(
                     agents, ordered=False, observation=observation
                 )
             if exists is None:
+                if fast_mode and room.startswith("room") and agents:
+                    self.require_agent_selection_page()
+                    logger.info("生产房差量选人名单不符，在当前选人页完整重选一次")
+                    return self.choose_agent(
+                        agents,
+                        room,
+                        fast_mode=False,
+                        train_index=train_index,
+                        preserve_dorm_occupants=preserve_dorm_occupants,
+                        choose_error=choose_error,
+                        dorm_mood_candidates=mood_fallback,
+                        recovery_padding=recovery_padding,
+                    )
                 raise Exception("检测到干员选择错误，重新选择")
             logger.info(exists)
             # 蓝框只说明卡片被选中；返回名单按页面位置排序，不能由此推断
@@ -15203,11 +15320,19 @@ class BaseSchedulerSolver(
                         )
                     ):
                         remaining_time = self.get_order_remaining_time()
-                        if 0 < remaining_time < (config.conf.run_order_delay + 10) * 60:
+                        if (
+                            0
+                            < remaining_time
+                            < run_order_entry_seconds(self.task, config.conf) + 600
+                        ):
                             calibrated = (
                                 datetime.now()
                                 + timedelta(seconds=remaining_time)
-                                - timedelta(minutes=config.conf.run_order_delay)
+                                - timedelta(
+                                    seconds=run_order_entry_seconds(
+                                        self.task, config.conf
+                                    )
+                                )
                             )
                             if self.task.retains_execution:
                                 self.task.run_order_calibrated_time = calibrated
@@ -15434,12 +15559,24 @@ class BaseSchedulerSolver(
                             raise RoomArrangementDeferred(room, e) from e
                         raise e
                 continue
-        if len(new_plan) != 1:
+        if len(new_plan) != 1 or config.conf.run_order_buffer_time <= 0:
             self.back(0.5)
-        else:
-            if config.conf.run_order_buffer_time <= 0:
-                self.back(0.5)
+            self._wait_for_room_exit()
         return new_plan
+
+    def _wait_for_room_exit(self):
+        """确认已发送的返回键生效，再把地图交给下一次房间操作。"""
+        profile = self.performance_profile
+        deadline = monotonic() + profile.transition_timeout
+        poll_interval = profile.screenshot_interval / 1000
+        while True:
+            self.recog.update()
+            if self.scene() == Scene.INFRA_MAIN:
+                return
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise RecognizeError("换人后未确认返回基建全局视角")
+            self.sleep(min(poll_interval, remaining))
 
     def accept_order(self):
         task = getattr(self, "task", None)
@@ -15541,6 +15678,7 @@ class BaseSchedulerSolver(
             self.tasks.append(self.task)
         return False
 
+    @with_run_order_network
     def agent_arrange(self, plan: tp.BasePlan, get_time=False):
         if (
             self.task.type == TaskTypes.FIAMMETTA
@@ -15792,6 +15930,7 @@ class BaseSchedulerSolver(
         if restoring_order:
             del self.task.run_order_original_roster
             del self.task.run_order_restore_pending
+            finish_run_order_network(self.task, getattr(self, "recog", None))
             if getattr(self.task, "maintenance_replacement_run", False):
                 self.maintenance_entry_pending = True
         if (
@@ -15823,7 +15962,14 @@ class BaseSchedulerSolver(
                     # 此时才进入订单页读倒计时，避免换人前往返进入房间。
                     wait_time = self.get_order_remaining_time()
                     logger.debug(f"订单剩余时间 {wait_time} 秒")
-                    if 0 < wait_time < config.conf.run_order_delay * 60:
+                    if (
+                        0
+                        < wait_time
+                        < (
+                            run_order_entry_seconds(self.task, config.conf)
+                            + run_order_network_allowance(self.task)
+                        )
+                    ):
                         logger.info(f"停止{wait_time}秒等待订单完成")
                         self.sleep(wait_time)
                         # 等待服务器交互
@@ -15890,6 +16036,9 @@ class BaseSchedulerSolver(
                             )
                         del self.task.run_order_original_roster
                         del self.task.run_order_restore_pending
+                        finish_run_order_network(
+                            self.task, getattr(self, "recog", None)
+                        )
                         if getattr(self.task, "maintenance_replacement_run", False):
                             self.maintenance_entry_pending = True
                 else:
