@@ -133,6 +133,7 @@ def replan_update_tasks(saved):
         TaskTypes.NOT_SPECIFIC,
     }
     protected_flags = (
+        "backup_group_request",
         "strict_mood_limit",
         "initial_fia",
         "run_order_restore_pending",
@@ -698,6 +699,14 @@ def blocked_run_order_ids(tasks, op_data=None):
         for name in row
         if name not in ("", "Free", "Current")
     }
+    reserved.update(
+        name
+        for task in restorations
+        if (pending := getattr(task, "run_order_confirmation_pending", None))
+        and pending["submitted"]
+        for name in pending["target"]
+        if name not in ("", "Free", "Current")
+    )
     conflicting_rooms = set(rooms)
     if op_data is not None:
         conflicting_rooms.update(
@@ -2268,6 +2277,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         t
         for t in tasks
         if t.type not in [TaskTypes.SHIFT_ON, TaskTypes.RELEASE_DORM]
+        or getattr(t, "backup_group_request", None)
         or id(t) in locked_ids
     ]
     _, reserved_slots = dorm_task_reservations(
@@ -2433,8 +2443,13 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
                 and not op_data.skip_idle_dorm_release(dorm.name)
             ):
                 free_rooms.append(dorm)
+    from arknights_mower.utils.backup_group_tasks import held_rest_groups
+
+    held = held_rest_groups(op_data)
     new_task = {}
     for group_name, dorms in grouped_dorms.items():
+        if group_name in held:
+            continue
         logger.debug(f"开始计算:{group_name}")
         logger.debug(f"开始计算:{dorms}")
         task_time = datetime.max
@@ -2568,6 +2583,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         if (
             not op.is_high()
             or op.name in excluded_names
+            or op.group in held
             or op.multi_group
             and (not op.independent_rest or op_data.resting_binding_groups(op))
             or op.group
@@ -3746,9 +3762,12 @@ class SchedulerTask:
     @property
     def retains_execution(self):
         """失败任务与重新准入的剩余执行均保留原对象、安排和时间。"""
+        pending = getattr(self, "run_order_confirmation_pending", None)
         return bool(
             getattr(self, "execution_failure", None)
             or getattr(self, "execution_retained", False)
+            or pending
+            and pending["submitted"]
         )
 
     def __init__(
