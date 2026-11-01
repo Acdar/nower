@@ -1245,6 +1245,11 @@ class BaseSchedulerSolver(
 
         if config.stop_mower.is_set():
             raise MowerExit
+        from arknights_mower.solvers.mastery_reader import (
+            discard_completed_mastery_tasks,
+        )
+
+        discard_completed_mastery_tasks(self)
         self._register_network_wait_observer()
         if config.maintenance_recheck.is_set():
             return
@@ -1276,6 +1281,7 @@ class BaseSchedulerSolver(
         while True:
             if config.stop_mower.is_set():
                 raise MowerExit
+            discard_completed_mastery_tasks(self)
             if config.maintenance_recheck.is_set():
                 return
             self._sync_run_order_tasks()
@@ -18036,16 +18042,8 @@ class BaseSchedulerSolver(
             if large_task_started:
                 resume_dorm_releases(self)
                 large_task_started = False
-            running_long_task = False
-            remaining_time = (deadline() - datetime.now()).total_seconds()
-            if remaining_time > 0:
-                # 参照 rest_until_next_task：休眠前重置场景计时，避免 check_freeze
-                # 把这段休眠当成「同一场景超时」而再次调用 device.exit() 关闭游戏。
-                self.recog.last_scene = None
-                logger.info(
-                    f"休息 {format_time(remaining_time)}，到{deadline().strftime('%H:%M:%S')}开始工作"
-                )
-                self._idle_sleep(remaining_time)
+            self.recog.last_scene = None
+            self.rest_until_next_task()
         else:
             # 空闲唤醒故障交回设备恢复，不能作为 MAA 任务故障报告。
             battle_inventory_active.clear()
@@ -18944,6 +18942,11 @@ class BaseSchedulerSolver(
         一份几乎相同的实现，其中两份漏掉了 `sleeping`，正是 /status 卡在
         working 的根因。现在全部收口到这里，只有 `_idle_sleep` 一个状态写入点。
         """
+        from arknights_mower.solvers.mastery_reader import (
+            discard_completed_mastery_tasks,
+        )
+
+        discard_completed_mastery_tasks(self)
         self._refresh_workshop_inventory()
         self._refresh_observed_recovery_tasks()
         if any(getattr(task, "execution_failure", None) for task in self.tasks):
