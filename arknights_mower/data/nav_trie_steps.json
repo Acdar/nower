@@ -551,6 +551,71 @@
           }
         }
       ]
+    },
+    "TL-8": {
+      "updated_at": "2026-11-01T16:20:28",
+      "stage_type": "ACTIVITY",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              346,
+              827
+            ],
+            "text": "<时间啊，向前！>活动已开放"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              807,
+              961
+            ],
+            "text": "残照终尽",
+            "success": true
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              530,
+              743
+            ],
+            "text": "TL-8",
+            "success": true
+          }
+        }
+      ]
     }
   },
   "patterns": {
@@ -1057,6 +1122,72 @@
               537
             ],
             "text": "YW-7",
+            "success": true
+          }
+        }
+      ]
+    },
+    "TL-*": {
+      "updated_at": "2026-11-01T16:20:28",
+      "stage_type": "ACTIVITY",
+      "source_stage": "TL-8",
+      "success": true,
+      "steps": [
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              346,
+              827
+            ],
+            "text": "<时间啊，向前！>活动已开放"
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              807,
+              961
+            ],
+            "text": "残照终尽",
+            "success": true
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "swipe",
+          "payload": {
+            "start": [
+              1400,
+              540
+            ],
+            "vector": [
+              -800,
+              0
+            ]
+          }
+        },
+        {
+          "action": "tap",
+          "payload": {
+            "pos": [
+              530,
+              743
+            ],
+            "text": "TL-8",
             "success": true
           }
         }
