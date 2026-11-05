@@ -3,7 +3,6 @@
 from arknights_mower.utils.workshop_allocation import (
     WorkshopAllocation,
     scope_setting,
-    setting_priority,
 )
 from arknights_mower.utils.workshop_data import (
     WorkshopRecommendationError,
@@ -85,13 +84,9 @@ def _manual_available(available):
 
 
 def prioritize_workshop_settings(settings, *, available=None, formulas=None):
-    """Scope and order execution copies, preserving saved configurations/limits."""
-    available = _manual_available(available) or {}
+    """Keep the saved execution order while filtering disallowed recipes."""
     formulas = _formulas(formulas)
-    scoped = [scope_setting(entry, formulas) for entry in settings]
-    return sorted(
-        scoped, key=lambda entry: setting_priority(entry, available, formulas)
-    )
+    return [scope_setting(entry, formulas) for entry in settings]
 
 
 def recommend_workshop_operators(

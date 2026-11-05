@@ -1,4 +1,4 @@
-"""Caledo joins T4 automatic crafting immediately after Corroserum."""
+"""Caledo precedes Corroserum across T4 recommendations and execution."""
 
 import pytest
 
@@ -18,7 +18,7 @@ from arknights_mower.utils import workshop_recommendation as workshop
 
 
 @pytest.mark.parametrize("minimum", [80, 95, 1000])
-def test_caledo_defaults_and_references_follow_corroserum(game, minimum):
+def test_caledo_defaults_and_references_precede_corroserum(game, minimum):
     meta, ids = game
     result = workshop.recommend_workshop_operators(
         owned(ids, "镜匠", "蚀清", "九色鹿", "号角"),
@@ -26,7 +26,7 @@ def test_caledo_defaults_and_references_follow_corroserum(game, minimum):
         {"炽合金块": recipe(), "糖组": recipe(2), "双极纳米片": recipe(8)},
         min_bonus=minimum,
     )
-    assert result["defaults"]["fodder_operators"][:3] == ["九色鹿", "蚀清", "镜匠"]
+    assert result["defaults"]["fodder_operators"][:3] == ["九色鹿", "镜匠", "蚀清"]
     assert "镜匠" not in result["defaults"]["t5_operators"]
     mirror = next(
         op
@@ -39,8 +39,8 @@ def test_caledo_defaults_and_references_follow_corroserum(game, minimum):
     if minimum <= 80:
         assert result["defaults"]["fodder_operators"] == [
             "九色鹿",
-            "蚀清",
             "镜匠",
+            "蚀清",
             "号角",
         ]
 
@@ -60,7 +60,7 @@ def test_caledo_requires_owned_unlocked_and_unscheduled_skills(game):
     assert workshop.recipe_bonus(effects, "炽合金块", recipe()) == 75
 
 
-def test_caledo_execution_copies_keep_priority_and_t4_scope(game):
+def test_caledo_execution_copies_keep_manual_order_and_t4_scope(game):
     meta, ids = game
     names = ["号角", "镜匠", "蚀清", "九色鹿"]
     available = workshop.available_operators(owned(ids, *names), meta)
@@ -76,8 +76,8 @@ def test_caledo_execution_copies_keep_priority_and_t4_scope(game):
         available=available,
         formulas={"炽合金块": recipe(), "双极纳米片": recipe(8), "糖组": recipe(2)},
     )
-    assert [entry["operator"] for entry in result] == ["九色鹿", "蚀清", "镜匠", "号角"]
-    assert result[2]["items"] == [item("炽合金块")]
+    assert [entry["operator"] for entry in result] == names
+    assert result[1]["items"] == [item("炽合金块")]
     assert settings[1]["items"] == [item("炽合金块"), item("双极纳米片"), item("糖组")]
     allocated = workshop.allocate_workshop_items(
         [("fodder_operators", names, [item("炽合金块")])],
@@ -85,9 +85,4 @@ def test_caledo_execution_copies_keep_priority_and_t4_scope(game):
         formulas={"炽合金块": recipe()},
         min_bonus=90,
     )
-    assert [entry["operator"] for entry in allocated] == [
-        "九色鹿",
-        "蚀清",
-        "镜匠",
-        "号角",
-    ]
+    assert [entry["operator"] for entry in allocated] == names

@@ -238,6 +238,9 @@ class LongTaskPart(ConfModel):
         blackflow_strategy: Literal[
             "", "burn", "burn_with_investment", "ending1", "ending2", "ending3"
         ] = ""
+        blackflow_fast_flight: bool = False
+        blackflow_start_run_fast_flight: bool = False
+        blackflow_start_run_id: str = Field(default="", max_length=128)
         blackflow_start_animals: list[
             Literal[
                 "swaddled_cat",
@@ -487,6 +490,8 @@ class RecruitPart(ConfModel):
     "公招开关"
     recruit_robot: bool = True
     "保留支援机械标签"
+    recruit_auto_robot: bool = False
+    "自动招募未满潜支援机械"
     recruitment_permit: int = 30
     "三星招募阈值"
     recruit_gap: float = 9
@@ -831,6 +836,10 @@ class RIICPart(ConfModel):
     "加工站一键设置的副产品概率加成下限（百分比）"
     workshop_protect_t2_device_rock: bool = False
     "禁止加工消耗装置、固源岩（仅 T2），材料预算也排除对应合成配方"
+    workshop_t1_reserve: int = Field(default=100, ge=0, le=999999)
+    "加工时保留的 T1 精英材料数量"
+    workshop_t2_reserve: int = Field(default=100, ge=0, le=999999)
+    "加工时保留的 T2 精英材料数量"
     t5_operators: list[str] = ["年"]
     "自动专精 T5 加工干员"
     book_operators: list[str] = ["司霆惊蛰"]
@@ -843,6 +852,8 @@ class RIICPart(ConfModel):
     "协助位跟随排班（专精时协助位不固定，由排班系统管理）"
     enable_mastery: bool = True
     "全自动专精全局开关：OFF 时禁用全部训练室动作/通知/守卫，仅保留仓库材料扫描"
+    mastery_consecutive_skills: bool = False
+    "同干员技能接续训练"
     save_mastery_screenshots: bool = False
     "保存专精收取期间的截图"
 

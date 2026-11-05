@@ -10,7 +10,8 @@ export function mowerArrangementGroupTransitions(data:MowerSchedulingData,plan:M
  for(const [room,row] of Object.entries(plan))row.forEach((name,index)=>{
   const op=data.operators[data.plan[room]?.[index]??'']
   if(!op?.group||!data.isGroupShiftAnchor(op)||['','Current','Free'].includes(name))return
-  if(name===op.name)transitions[op.group]=false
+  if(op.multiGroup&&Object.keys(mowerWorkingReplacementAssignments(data,[op.name],plan)).length)return
+  if(name===op.name){if(!op.multiGroup||data.groupIsResting(op.group))transitions[op.group]=false}
   else if(op.replacement.includes(name))transitions[op.group]??=true
  })
  return transitions
@@ -21,7 +22,9 @@ export function mowerRestingBindingGroups(data:MowerSchedulingData,op:MowerOpera
 export function mowerSharedReplacements(op:MowerOperatorState,groups:string[]):string[]{
  return groups.length?op.replacementsForGroup(groups[0]!).filter(name=>groups.slice(1).every(group=>op.replacementsForGroup(group).includes(name))):[...op.replacement]
 }
-export function mowerSameGroupPrimaryReplacement(data:MowerSchedulingData,op:MowerOperatorState,name:string,group=op.group):boolean {
+export function mowerSameGroupPrimaryReplacement(data:MowerSchedulingData,op:MowerOperatorState,name:string,group?:string):boolean {
+ if(group===undefined&&op.multiGroup){const bindings=mowerRestingBindingGroups(data,op);if(bindings.length)return bindings.some(binding=>mowerSameGroupPrimaryReplacement(data,op,name,binding))}
+ group??=op.group
  const cover=data.operators[name]
  return !!group&&op.name!==name&&op.isHigh()&&!!cover?.isHigh()&&(cover.multiGroup?cover.groupBindings.some(binding=>binding.group===group):cover.group===group)&&op.replacementsForGroup(group).includes(name)
 }
@@ -32,6 +35,7 @@ export function commitMowerGroupShifts(data:MowerSchedulingData,transitions:Mowe
  Object.assign(data.groupShiftState,transitions)
  for(const op of Object.values(data.operators))if(op.multiGroup){
   if(op.independentRest){op.group='';op.replacement=[...op.replacementsForGroup('')];continue}
+  if(op.shiftGroup){op.group=op.shiftGroup;op.replacement=[...op.replacementsForGroup(op.group)];continue}
   const resting=mowerRestingBindingGroups(data,op)
   if(resting.length){op.group=resting.includes(op.group)?op.group:resting[0]!;op.replacement=[...op.replacementsForGroup(op.group)]}
  }
@@ -54,7 +58,8 @@ export function mowerWorkingReplacementAssignments(data:MowerSchedulingData,name
 }
 /** Shared followers may retain their working cover; a move still requires source handoff. */
 export function mowerWorkingReplacementBlocked(data:MowerSchedulingData,names:Iterable<string>,plan:MowerTaskPlan={}):boolean {
- return Object.entries(mowerWorkingReplacementAssignments(data,names,plan)).some(([owner,name])=>!data.operators[name]!.multiGroup||Object.entries(plan).some(([room,row])=>row.some((target,index)=>target===name&&(room!==data.operators[owner]!.room||index!==data.operators[owner]!.index))))
+ const members=[...names],groups=new Set(data.shiftRequestGroups(members))
+ return Object.entries(mowerWorkingReplacementAssignments(data,members,plan)).some(([owner,name])=>!data.operators[name]!.multiGroup||data.isGroupShiftAnchor(data.operators[name]!)&&groups.has(data.operators[name]!.group)||Object.entries(plan).some(([room,row])=>row.some((target,index)=>target===name&&(room!==data.operators[owner]!.room||index!==data.operators[owner]!.index))))
 }
 /** Mutates only the caller's plan, and only after every shared cover has a matching. */
 export function normalizeMowerSharedArrangement(data:MowerSchedulingData,plan:MowerTaskPlan,transitions=mowerArrangementGroupTransitions(data,plan),explicitSlots:ReadonlySet<string>=new Set()):boolean {

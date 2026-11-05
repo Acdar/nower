@@ -21,13 +21,7 @@ def replacement_dependencies(data, names):
 
 
 def replacements(data, op, required=()):
-    transitions = {
-        worker.group: True
-        for name in required
-        if (worker := data.operators.get(name)) is not None
-        and worker.group
-        and data.is_group_shift_anchor(worker)
-    }
+    transitions = dict.fromkeys(data.shift_request_groups(required), True)
     return (
         data.shared_replacements(op, data.resting_binding_groups(op, transitions))
         if op.multi_group
@@ -172,6 +166,8 @@ def plan_replacement_handoff(data, candidates, is_busy, protected=(), slots=()):
 
 
 def preferred_replacement_restore(data, is_busy, protected=(), slots=()):
+    from arknights_mower.utils.dorm_candidates import scheduling_mood_reaches
+
     plan, protected, slots = {}, set(protected), set(slots)
     shadow = data
     while True:
@@ -204,6 +200,13 @@ def preferred_replacement_restore(data, is_busy, protected=(), slots=()):
                     and (
                         not shadow.operators[name].current_room
                         or shadow.operators[name].is_resting()
+                        and scheduling_mood_reaches(
+                            shadow,
+                            name,
+                            shadow.operators[name].upper_limit
+                            if shadow.operators[name].rest_in_full
+                            else shadow.rescue_mood_threshold(shadow.operators[name]),
+                        )
                     )
                 ),
                 None,
@@ -238,11 +241,13 @@ def ordinary_recall_mood_admissible(data, recalled, candidates, *, now=None):
     def mood(op):
         return dorm_candidate_mood(data, op.name, now)
 
+    request_groups = set(data.shift_request_groups(candidates))
     request_moods = [
         (op, value)
         for name in candidates
         if (op := data.operators.get(name)) is not None
         and anchor(op)
+        and (not op.group or op.group in request_groups)
         and op.is_working()
         and (value := mood(op)) is not None
     ]

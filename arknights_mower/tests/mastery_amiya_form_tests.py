@@ -109,12 +109,19 @@ def test_dispatch_missing_form_preserves_halving_and_next_visit_resumes(
     assert recheck.time > solver.task.time
 
     # A fresh visit checks the new frame instead of treating the previous skip as a pause.
+    monkeypatch.setattr(
+        "arknights_mower.solvers.mastery_support_runtime.prepare_legacy_support_mood",
+        lambda *args: None,
+    )
     solver.train_scene.side_effect = None
     solver.train_scene.return_value = Scene.TRAIN_SKILL_SELECT
     ocr.return_value = ([skill_text("影霄·绝影", 1)], 0)
 
     def back_to_main(_):
         solver.train_scene.side_effect = [
+            Scene.TRAIN_MAIN,
+            Scene.TRAIN_SKILL_SELECT,
+            Scene.TRAIN_SKILL_SELECT,
             Scene.TRAIN_MAIN,
             Scene.TRAIN_SKILL_SELECT,
             Scene.TRAIN_SKILL_SELECT,
@@ -207,7 +214,7 @@ def test_arrangement_gate_blocks_both_slots_only_for_current_observation(
     solver._train_mastery_active.return_value = False
     solver._train_protected.return_value = False
     for method in (
-        "_train_scheduling_protected",
+        "_protected_training_slots",
         "_protected_training_names",
         "_suppress_train_arrangement",
         "_suppress_facility_arrangement",

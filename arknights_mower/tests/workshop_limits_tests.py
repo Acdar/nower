@@ -201,9 +201,15 @@ def game(monkeypatch, inventory):
     monkeypatch.setattr(base, "send_message", MagicMock())
     solver = object.__new__(base.BaseSchedulerSolver)
     solver._plan_dorm_recovery = MagicMock(return_value=True)
+    # 此套件验证加工数量与进站实读；本轮集中选人页扫描已完成。
+    solver._workshop_card_moods_scanned_this_run = True
     solver.tasks = []
     solver.recog = MagicMock(w=1920, h=1080)
-    solver.op_data = SimpleNamespace(operators={}, refresh_idle_dorm_search=MagicMock())
+    solver.op_data = SimpleNamespace(
+        operators={},
+        dorm_mood_estimates={},
+        refresh_idle_dorm_search=MagicMock(),
+    )
     state = SimpleNamespace(
         scene=base.Scene.FACTORY_DASHBOARD,
         selected=None,
@@ -347,7 +353,7 @@ def test_remaining_mood_selects_only_affordable_materials_and_stops_without_resc
     config.conf.workshop_settings[0].items.append(
         WorkShopItem(item_names=["固源岩"], self_upper_limit=10, children_lower_limit=0)
     )
-    inventory.save_inventory_counts({"固源岩": 0, "源岩": 99})
+    inventory.save_inventory_counts({"固源岩": 0, "源岩": 199})
     solver.item_list = MagicMock(wraps=solver.item_list)
     solver.generate_product("蜜莓")
     base.save_exception.assert_not_called()

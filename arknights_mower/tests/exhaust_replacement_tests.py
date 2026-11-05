@@ -71,6 +71,37 @@ def solver(monkeypatch):
     return instance
 
 
+def test_exhausted_primary_replaces_unfinished_priority_replacement(solver):
+    data = solver.op_data
+    data.add(Operator("夜烟", ""))
+    data.operators["夜烟"].mood = 24
+    data.operators["夜烟"].time_stamp = datetime.now()
+    data.operators["机械师"].replacement = ["夜烟"]
+    data.plan["room_3_3"][0].replacement = ["夜烟"]
+    resident = data.operators["陈"]
+    data.config.resting_priority_replacement = [resident.name]
+    resident.current_room, resident.current_index = "dormitory_1", 4
+    resident.mood = 12
+    data.dorm[-1].name = resident.name
+    data.dorm[-1].time = datetime.now() + timedelta(hours=4)
+    original_time = solver.task.time
+
+    solver.overtake_room()
+
+    assert len(solver.tasks) == 1
+    shift = solver.tasks[0]
+    assert shift.type == TaskTypes.SHIFT_OFF
+    assert shift.plan["room_3_3"] == ["夜烟"]
+    assert shift.plan["dormitory_1"][4] == "机械师"
+    assert not getattr(solver.task, "execution_failure", None)
+    assert solver.task.time == original_time
+    assert resident.current_room == "dormitory_1"
+    assert data.operators["机械师"].current_room == "room_3_3"
+    projected = data.project_arrangements([shift.plan])
+    assert projected.get_current_operator("dormitory_1", 4).name == "机械师"
+    assert projected.operators[resident.name].current_room == ""
+
+
 def run_retained(solver):
     """无法交接时保留原请求和实际驻员，不发送重复通知。"""
     original = solver.task
@@ -573,7 +604,7 @@ def test_alternate_does_not_take_another_exhausted_members_cover(solver):
     assert {"机械师", "阿罗玛"} <= set(task.plan["dormitory_1"])
 
 
-def test_training_protection_prevents_partial_group_recall(solver):
+def test_protected_training_slot_does_not_block_other_group_members_returning(solver):
     config.conf.enable_mastery = True
     solver._train_mastery_active = MagicMock(return_value=True)
     solver._train_protected = MagicMock(return_value=False)
@@ -586,12 +617,22 @@ def test_training_protection_prevents_partial_group_recall(solver):
         group="感知",
         replacement=["赫默"],
         operator_type="high",
+        current_room="train",
+        current_index=0,
     )
     data.add(op)
     data.groups["感知"].append("逻各斯")
     data.operators["苍苔"].replacement = ["槐琥"]
-    original = run_retained(solver)
-    assert solver.tasks == [original]
+    solver.check_fia = MagicMock(return_value=([], None))
+    solver.skip = MagicMock()
+    original = solver.task
+    solver.overtake_room()
+    support, pending = solver.tasks
+    assert pending is original
+    assert support.plan == {"room_2_2": ["苍苔"], "contact": ["絮雨"]}
+    assert data.operators["逻各斯"].current_room == "train"
+    solver.task = support
+    assert solver._coordination_support_valid(support.plan, ["机械师"])
 
 
 def test_unknown_recall_keeps_temporary_dorm_slot_and_occupant(solver):

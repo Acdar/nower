@@ -73,6 +73,7 @@ def group_recovery_workers(data, group):
         if op.is_high()
         and not op.room.startswith("dorm")
         and not op.independent_rest
+        and (not op.shift_group or op.group == group)
         and not op.workaholic
         and not data._can_standby(op)
         and (op.is_resting() or not op.current_room)
@@ -84,7 +85,7 @@ def group_recovery_deadline(data, group, *, now=None):
     now = now or getattr(data, "_projection_now", None) or datetime.now()
     conf = getattr(data, "runtime_conf", None) or config.conf
     workers = group_recovery_workers(data, group)
-    gap_workers = [op for op in workers if not op.multi_group]
+    gap_workers = [op for op in workers if data.is_group_shift_anchor(op, group)]
     latches = getattr(data, "group_recovery_full_members", None)
     if latches is None:
         latches = data.group_recovery_full_members = {}
@@ -149,6 +150,105 @@ def group_recovery_deadline(data, group, *, now=None):
             latest = max(known)
             deadlines.append(min(latest, cap) if cap is not None else latest)
     return required, max(now, *deadlines) if deadlines else None
+
+
+def restored_group_recovery_deadline(
+    data, effective, groups, *, now=None, delayed_groups=None
+):
+    """副表退出重新纳入的恢复主班沿用最终组的恢复规则和原期限。"""
+    now = now or getattr(data, "_projection_now", None) or datetime.now()
+    deadlines = []
+    for group in groups:
+        workers = group_recovery_workers(effective, group)
+        restored = [
+            op
+            for op in workers
+            if (previous := data.operators.get(op.name)) is not None
+            and (previous.is_resting() or not previous.current_room)
+            and not data.is_group_shift_anchor(previous, group)
+        ]
+        if not restored:
+            continue
+        required, deadline = group_recovery_deadline(effective, group, now=now)
+        if not required or deadline is None or deadline <= now:
+            continue
+        # 同一恢复周期的额外等待锚点不能因再次准备而重新计时。
+        if group in effective.group_recovery_full_members:
+            data.group_recovery_full_members[group] = list(
+                effective.group_recovery_full_members[group]
+            )
+        if group in effective.group_recovery_return_time:
+            data.group_recovery_return_time[group] = (
+                effective.group_recovery_return_time[group]
+            )
+        if delayed_groups is not None:
+            delayed_groups.add(group)
+        deadlines.append(deadline)
+    return max(deadlines) if deadlines else None
+
+
+def split_recovery_return(data, task, pending, unfinished):
+    """普通回班按原目标岗位拆开，共享目标、驻员或组的部分一起等待。"""
+    from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
+
+    if task.type != TaskTypes.SHIFT_ON:
+        return
+
+    def resources(names):
+        result = set()
+        for name in names:
+            op = data.operators.get(name)
+            if op is None:
+                continue
+            result.add(("operator", name))
+            groups = (
+                data.shift_request_groups([name])
+                if op.is_high() and not op.room.startswith("dorm")
+                else [binding["group"] for binding in op.group_bindings]
+                if op.multi_group
+                else [op.group]
+            )
+            result.update(("group", group) for group in groups if group)
+        return result
+
+    involved = {}
+    for room, row in task.plan.items():
+        for index, name in enumerate(row):
+            if name == "Current":
+                continue
+            names = {name}
+            occupant = data.get_current_operator(room, index)
+            if occupant is not None:
+                names.add(occupant.name)
+            if index < len(data.plan.get(room, ())):
+                names.add(data.plan[room][index].agent)
+            involved[room, index] = resources(names)
+    blocked, related = set(), resources(unfinished)
+    while connected := [
+        position
+        for position, names in involved.items()
+        if position not in blocked and names & related
+    ]:
+        for position in connected:
+            blocked.add(position)
+            related.update(involved[position])
+
+    def part(waiting):
+        result = {}
+        for room, row in task.plan.items():
+            names = [
+                name if ((room, index) in blocked) == waiting else "Current"
+                for index, name in enumerate(row)
+            ]
+            if any(name != "Current" for name in names):
+                result[room] = names
+        return result
+
+    independent = part(False)
+    if not blocked or not independent:
+        return
+    pending.append(SchedulerTask(task.time, independent, task.type))
+    task.plan = part(True)
 
 
 def _returning_mood(data, op, now):
@@ -255,7 +355,7 @@ def mood_limit_group_return(data, release, tasks, *, now=None):
         or op.room.startswith("dorm")
         or op.workaholic
         or data._can_standby(op)
-        or op.multi_group
+        or (op.multi_group and not op.shift_group)
         or op.independent_rest
         or not data.group_is_resting(op.group)
         or op.group in held_rest_groups(data)

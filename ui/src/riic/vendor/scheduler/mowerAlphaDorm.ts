@@ -18,6 +18,7 @@ export function alphaRestingTier(data:MowerSchedulingData,name:string,referenced
  if(alphaFullDynamicCandidate(data,name))return 6
  if(data.restingPriorityNames.includes(name))return 0
  if(data.standbyNames.includes(name))return 4
+ if(data.lowPriorityNames.includes(name))return 2
  const replacement=data.priorityReplacement.includes(name)?3:5
  if(op){
   if(op.room==='train'&&op.index===0||op.currentRoom==='train'&&op.currentIndex===0)return replacement
@@ -35,11 +36,11 @@ export function alphaFullDynamicCandidate(data:MowerSchedulingData,name:string):
 }
 export function alphaFullDormFiller(data:MowerSchedulingData,name:string):boolean {
  const op=data.operators[name],tier=alphaRestingTier(data,name)
- return !!op&&op.isResting()&&alphaFullDynamicCandidate(data,name)&&tier>3&&tier<7&&hasRestingMood(op,data.nowMicros)&&op.timeStampMicros!<=data.nowMicros&&!op.moodIsPrediction&&op.mood>=op.upperLimit
+ return !!op&&op.isResting()&&alphaFullDynamicCandidate(data,name)&&tier>3&&tier<7&&hasRestingMood(op,data.nowMicros)&&(data.policy.predictiveMoodControl&&data.calculatedMoodSnapshot!==undefined||op.timeStampMicros!<=data.nowMicros&&!op.moodIsPrediction&&op.mood>=op.upperLimit)
 }
 export function alphaBedTakeoverAllowed(data:MowerSchedulingData,requester:string,resident:string):boolean {
  const requesterTier=alphaRestingTier(data,requester),residentTier=alphaRestingTier(data,resident)
- if(alphaFullDynamicCandidate(data,requester)||requesterTier===7||residentTier<=3)return false
+ if(alphaFullDynamicCandidate(data,requester)||requesterTier===7||residentTier<=2)return false
  const incoming=data.operators[requester],mood=mowerDormCandidateMood(data,requester)
  const retained=data.freeRoomExcluded(requester)
  if(alphaFullDormFiller(data,resident))return !!incoming&&mood!==undefined&&(retained||mood<incoming.upperLimit)
@@ -76,13 +77,13 @@ export function alphaRestoreDisplaced(data:MowerSchedulingData,previous:Map<stri
  for(const [position,name] of previous){
   if(!name||name===current.get(position)||retained.has(name))continue
   const op=data.operators[name];if(!op?.isHigh()||!data.plan[op.room])continue
-  if(op.multiGroup&&!op.independentRest||op.group&&!data.isGroupShiftAnchor(op))continue
+  if(op.multiGroup&&!op.independentRest&&!op.shiftGroup||op.group&&!data.isGroupShiftAnchor(op))continue
   const members=op.group?data.shiftGroupMembers(op.group):[name],completed=!!op.group&&hasRestingMood(op,data.nowMicros)&&restingMood(op,data.nowMicros)>=op.upperLimit
   if((completed||data.canStandby(op))&&Object.values(data.operators).some(anchor=>retained.has(anchor.name)&&data.isGroupShiftAnchor(anchor)&&(data.canStandby(op)&&alphaRestingTier(data,anchor.name)<=3||!data.canStandby(anchor)&&!(hasRestingMood(anchor,data.nowMicros)&&restingMood(anchor,data.nowMicros)>=anchor.upperLimit))&&(!op.group||members.includes(anchor.name))))continue
   for(const member of members)if(member===name||!data.operators[member]!.independentRest)recalled.add(member)
  }
  const transitions=mowerArrangementGroupTransitions(data,plan)
- for(const name of recalled){const op=data.operators[name]!;if(op.group&&!op.multiGroup)transitions[op.group]=false}
+ for(const name of recalled){const op=data.operators[name]!;if(op.group&&(!op.multiGroup||op.shiftGroup))transitions[op.group]=false}
  for(const name of [...recalled]){const op=data.operators[name]!;if(op.multiGroup&&mowerRestingBindingGroups(data,op,transitions).length)recalled.delete(name)}
  for(const name of [...recalled]){
   const op=data.operators[name]!,target=plan[op.room]?.[op.index]

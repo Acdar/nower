@@ -14,6 +14,48 @@ afterEach(() => {
 })
 
 describe('workshop config autosave', () => {
+  it('saves same-operator skill continuity independently and defaults it off', async () => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const loaded = ref(false)
+    const app = createApp({})
+    app.use(pinia)
+    app.provide('loaded', loaded)
+    store = app.runWithContext(() => useConfigStore())
+    for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
+    expect(store.mastery_consecutive_skills).toBe(false)
+    expect(store.build_config().mastery_consecutive_skills).toBe(false)
+    axios.patch.mockResolvedValue({ data: {} })
+    loaded.value = true
+    await nextTick()
+    await store.flush_config_saves()
+    store.mastery_consecutive_skills = true
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
+    expect(axios.patch.mock.calls[0][1]).toEqual({ mastery_consecutive_skills: true })
+    expect(store.assistant_follows_schedule).toBe(false)
+    loaded.value = false
+  })
+
+  it.each([undefined, false, true])(
+    'hydrates the saved continuity preference %s',
+    async (value) => {
+      pinia = createPinia()
+      setActivePinia(pinia)
+      const app = createApp({})
+      app.use(pinia)
+      app.provide('loaded', ref(false))
+      store = app.runWithContext(() => useConfigStore())
+      for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
+      const data = { ...store.build_config(), maa_weekly_plan_active: '默认' }
+      if (value === undefined) delete data.mastery_consecutive_skills
+      else data.mastery_consecutive_skills = value
+      axios.get.mockResolvedValue({ data })
+      await store.load_config()
+      expect(store.mastery_consecutive_skills).toBe(value ?? false)
+      expect(store.build_config().mastery_consecutive_skills).toBe(value ?? false)
+    }
+  )
+
   it('saves the medicine expiry threshold without retired weekend settings', async () => {
     pinia = createPinia()
     setActivePinia(pinia)
@@ -69,6 +111,8 @@ describe('workshop config autosave', () => {
     store = app.runWithContext(() => useConfigStore())
     for (const name of ['reload_room', 'maa_mall_buy', 'maa_mall_blacklist']) store[name] = []
     expect(store.workshop_protect_t2_device_rock).toBe(false)
+    expect(store.workshop_t1_reserve).toBe(100)
+    expect(store.workshop_t2_reserve).toBe(100)
     const manual = [{ operator: '空爆', items: [{ item_names: ['固源岩组', '异铁组'] }] }]
     store.workshop_manual_settings = manual
     axios.patch.mockResolvedValue({ data: {} })
@@ -80,6 +124,13 @@ describe('workshop config autosave', () => {
     await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(1))
     expect(axios.patch.mock.calls[0][1]).toMatchObject({
       workshop_protect_t2_device_rock: true
+    })
+    store.workshop_t1_reserve = 0
+    store.workshop_t2_reserve = 230
+    await vi.waitFor(() => expect(axios.patch).toHaveBeenCalledTimes(2))
+    expect(axios.patch.mock.calls[1][1]).toEqual({
+      workshop_t1_reserve: 0,
+      workshop_t2_reserve: 230
     })
     loaded.value = false
   })

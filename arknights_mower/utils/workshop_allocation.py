@@ -1,40 +1,31 @@
-"""Allocate recipe tasks and sort scoped copies of saved workshop settings."""
+"""Allocate permitted recipes in the user-selected operator order."""
 
 from arknights_mower.utils.workshop_material_policy import protected_workshop_materials
 from arknights_mower.utils.workshop_recipes import (
     SCOPED_OPERATORS,
-    T4_PREFERRED,
-    exclusive_specialists,
     matches_specialty,
-    operator_priority,
     operator_recipe_allowed,
     operator_specialties,
     recipe_bonus,
-    recipe_category,
     scope_workshop_items,
     specialty_rules,
 )
 
 
-def setting_priority(entry, available, formulas):
+def setting_recipe_bonus(entry, available, formulas):
+    """按当前配方取最高已解锁副产品加成；缺少配方或练度时不比较。"""
     data = entry.model_dump() if hasattr(entry, "model_dump") else entry
-    name = data["operator"]
-    if name not in available:
-        return operator_priority(name, 0)
-    materials = [material for item in data["items"] for material in item["item_names"]]
-    effects = available[name]
-    bonus = max(
+    if data["operator"] not in available:
+        return None
+    return max(
         (
-            recipe_bonus(effects, material, formulas.get(material, {}))
-            for material in materials
+            recipe_bonus(available[data["operator"]], material, formulas[material])
+            for item in data["items"]
+            for material in item["item_names"]
+            if material in formulas
         ),
-        default=0,
+        default=None,
     )
-    t5 = any(
-        recipe_category(formulas.get(material, {})) == "t5_operators"
-        for material in materials
-    )
-    return operator_priority(name, bonus, t5=t5, effects=effects)
 
 
 def scope_setting(entry, formulas):
@@ -95,38 +86,13 @@ class WorkshopAllocation:
             and (not specialist_only or name in specialists)
         ]
 
-    def retained(self, candidates, material):
-        if self.available is None:
-            return candidates
-        recipe = self.formulas.get(material, {})
-        bonuses = {
-            name: recipe_bonus(self.available.get(name, []), material, recipe)
-            for name in candidates
-        }
-        highest = max(bonuses.values(), default=0)
-        specialists = self.specialists(candidates, material)
-        exclusive = exclusive_specialists(
-            bonuses, self.specialists(candidates, material, byproduct=True)
-        )
-        return [
-            name
-            for name in candidates
-            if (not exclusive or name in exclusive or name in T4_PREFERRED)
-            and (
-                name in T4_PREFERRED
-                or name in specialists
-                or bonuses[name] >= max(1, self.min_bonus)
-                or bonuses[name] == highest
-            )
-        ]
-
     def add_items(self, names, items, *, specialist_only=False):
         for item in items:
             for material in item["item_names"]:
                 candidates = self.candidates(
                     names, material, specialist_only=specialist_only
                 )
-                for name in self.retained(candidates, material):
+                for name in candidates:
                     self.result[name]["items"].append(
                         {**item, "item_names": [material]}
                     )

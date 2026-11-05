@@ -19,6 +19,28 @@ from arknights_mower.views.process_control import process_control_bp
 
 
 class ProcessControlTests(unittest.TestCase):
+    def test_info_returns_registered_instance_name_only_with_current_token(self):
+        app = Flask(__name__)
+        app.token = "current-instance"
+        app.register_blueprint(process_control_bp)
+
+        with patch.object(
+            control,
+            "info",
+            return_value={"ok": True, "supported": True, "name": "夜莺"},
+        ) as get_info:
+            client = app.test_client()
+            denied = client.get("/process-control/info", headers={"token": "wrong"})
+            self.assertEqual(denied.status_code, 403)
+            get_info.assert_not_called()
+
+            response = client.get(
+                "/process-control/info", headers={"token": "current-instance"}
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["name"], "夜莺")
+            get_info.assert_called_once_with()
+
     def test_reset_start_skips_saved_state(self):
         import server
 
@@ -174,13 +196,11 @@ class ProcessControlTests(unittest.TestCase):
         self.assertEqual(normal["MOWER_RESUME_MODE"], "preserve")
         self.assertEqual(normal["MOWER_RESUME_RUN"], "1")
 
-    def test_apply_schedule_uses_replan_mode(self):
-        env = control.restart_environment(
-            {"running": True, "background": False},
-            {"id": "schedule", "action": "apply_schedule"},
-        )
-        self.assertEqual(env["MOWER_RESUME_MODE"], "1")
-        self.assertEqual(env["MOWER_RESUME_RUN"], "1")
+    def test_apply_schedule_cannot_request_process_replacement(self):
+        with patch.object(subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(ValueError, "未知进程操作"):
+                control.request_action("apply_schedule")
+            launch.assert_not_called()
 
     def test_plain_process_restart_preserves_stopped_or_running_task_admission(self):
         from arknights_mower.tests.desktop_lifecycle_tests import DesktopStartupTests
@@ -215,8 +235,6 @@ class ProcessControlTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "未在运行"):
                 control.request_action("restart_resume")
-            with self.assertRaisesRegex(ValueError, "未在运行"):
-                control.request_action("apply_schedule")
             launch.assert_not_called()
 
     def test_only_current_instance_is_selected(self):

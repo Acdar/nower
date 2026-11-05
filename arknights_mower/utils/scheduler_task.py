@@ -34,6 +34,7 @@ from arknights_mower.utils.resting_priority import (
     RestingTier,
     bed_takeover_allowed,
     busy_resting_names,
+    crafting_rest_candidates,
     crafting_rest_order,
     has_resting_mood,
     is_full_dorm_filler,
@@ -1454,6 +1455,7 @@ def adjust_run_order_for_maintenance(
         task
         for task in task_view(tasks, TaskScope.REPLAN)
         if task.type == TaskTypes.RUN_ORDER
+        and not getattr(task, "run_order_collect_only", False)
         and not getattr(task, "run_order_restore_pending", False)
         and id(task) not in blocked_orders
     ]
@@ -1525,7 +1527,9 @@ def adjust_run_order_for_maintenance(
     return list(adjusted.values())
 
 
-def _native_return(op_data, plan, names, *, excluded_names=()):
+def _native_return(
+    op_data, plan, names, *, excluded_names=(), excluded_replacements=None
+):
     """把需要结束休息的干员按当前排班写回原岗位。"""
     for name in names:
         if name in excluded_names:
@@ -1536,7 +1540,9 @@ def _native_return(op_data, plan, names, *, excluded_names=()):
         slots = plan.setdefault(op.room, ["Current"] * len(op_data.plan[op.room]))
         if slots[op.index] in ("Current", name):
             slots[op.index] = name
-    op_data.normalize_shared_arrangement(plan, excluded_names=excluded_names)
+    op_data.normalize_shared_arrangement(
+        plan, excluded_names=excluded_names, excluded_replacements=excluded_replacements
+    )
 
 
 def _active_recovery_room(op_data, name):
@@ -1950,6 +1956,7 @@ def generate_plan_by_drom(
     pending_arrangements=(),
     *,
     excluded_names=(),
+    excluded_replacements=None,
     now=None,
 ):
     # 同时刻的回班与释放床位必须分别保留类型，并共用一次未来状态演算。
@@ -1994,6 +2001,7 @@ def generate_plan_by_drom(
             op = op_data.operators[room.name]
             if (
                 op.multi_group
+                and not op.shift_group
                 and rest_in_full is not None
                 and (not op.independent_rest or op_data.resting_binding_groups(op))
             ):
@@ -2098,7 +2106,10 @@ def generate_plan_by_drom(
         if rest_in_full is not None:
             transitions = op_data.arrangement_group_transitions(plan)
             if not op_data.normalize_shared_arrangement(
-                plan, transitions, excluded_names=excluded_names
+                plan,
+                transitions,
+                excluded_names=excluded_names,
+                excluded_replacements=excluded_replacements,
             ):
                 continue
             # Shared primaries kept off shift still participate in later returns.
@@ -2168,7 +2179,9 @@ def generate_plan_by_drom(
     return result
 
 
-def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
+def plan_metadata(
+    op_data, tasks, *, excluded_names=(), excluded_replacements=None, now=None
+):
     now = now or getattr(op_data, "_projection_now", None) or datetime.now()
     conf = getattr(op_data, "runtime_conf", None) or config.conf
     for task in tasks:
@@ -2218,9 +2231,23 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         if name in op_data.operators and op_data.operators[name].group
     }
 
-    def recovery_reservations(group):
+    def recovery_reservations(group, returning_names=()):
         names, slots = retained_task_reservations(
-            actual_data, locked_tasks, returning_groups=[group] if group else ()
+            actual_data,
+            locked_tasks,
+            returning_groups=[group] if group else (),
+            returning_names=[
+                name
+                for name in returning_names
+                if existing_targets.get(
+                    name,
+                    (
+                        actual_data.operators[name].room,
+                        actual_data.operators[name].index,
+                    ),
+                )
+                == (actual_data.operators[name].room, actual_data.operators[name].index)
+            ],
         )
         for pending in locked_tasks:
             names.update(getattr(pending, "product_lock_names", ()))
@@ -2329,7 +2356,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
             for v in op_data.operators.values()
             if v.is_high()
             and v.name not in excluded_names
-            and not v.multi_group
+            and (not v.multi_group or v.shift_group)
             and (not v.group or op_data.is_group_shift_anchor(v))
             and not v.room.startswith("dorm")
             and not v.is_resting()
@@ -2385,7 +2412,8 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
                     (name, existing_targets.get(name, (op.room, op.index)), op.group)
                     for name in members
                     for op in [op_data.operators[name]]
-                    if not operator.group or op_data.is_group_shift_anchor(op)
+                    if not operator.group
+                    or op_data.is_group_shift_anchor(op, operator.group)
                 )
             ),
         )
@@ -2424,13 +2452,21 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         if dorm.name and dorm.name in op_data.operators:
             operator = op_data.operators[dorm.name]
             return_names, return_slots, return_groups = recovery_reservations(
-                operator.group
+                operator.group, [operator.name] if not operator.group else ()
             )
             if (
                 dorm.name not in return_names | set(excluded_names)
                 and operator.group not in return_groups
                 and dorm.position not in return_slots
-                and (not operator.multi_group or operator.independent_rest)
+                and (
+                    operator.group
+                    or (operator.room, operator.index) not in return_slots
+                )
+                and (
+                    not operator.multi_group
+                    or operator.independent_rest
+                    or operator.shift_group
+                )
                 and (not operator.group or op_data.is_group_shift_anchor(operator))
             ):
                 grouped_dorms[operator.group].append(dorm)
@@ -2553,6 +2589,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         release_tasks=release_tasks,
         pending_arrangements=pending_arrangements,
         excluded_names=excluded_names,
+        excluded_replacements=excluded_replacements,
         now=now,
     )
     for task in generated:
@@ -2585,6 +2622,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
             or op.name in excluded_names
             or op.group in held
             or op.multi_group
+            and not op.shift_group
             and (not op.independent_rest or op_data.resting_binding_groups(op))
             or op.group
             and not op_data.is_group_shift_anchor(op)
@@ -2639,7 +2677,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         workers = [
             op_data.operators[name]
             for name in members
-            if op_data.is_group_shift_anchor(op_data.operators[name])
+            if op_data.is_group_shift_anchor(op_data.operators[name], op.group)
         ]
         if (
             not required
@@ -2648,6 +2686,7 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
                 not worker.current_room
                 and (
                     op_data._can_standby(worker)
+                    or op_data.rest_mood_complete(worker.name)
                     or (
                         has_resting_mood(worker)
                         and worker.current_mood() >= worker.upper_limit
@@ -2658,7 +2697,13 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         ):
             continue
         plan = {}
-        _native_return(op_data, plan, members, excluded_names=excluded_names)
+        _native_return(
+            op_data,
+            plan,
+            members,
+            excluded_names=excluded_names,
+            excluded_replacements=excluded_replacements,
+        )
         recalled = rebalance_closing_dorm_slots(
             op_data.project_arrangements([]), plan, members
         )
@@ -2698,13 +2743,25 @@ def plan_metadata(op_data, tasks, *, excluded_names=(), now=None):
         ):
             continue
         return_plan = {}
-        _native_return(op_data, return_plan, [op.name], excluded_names=excluded_names)
+        _native_return(
+            op_data,
+            return_plan,
+            [op.name],
+            excluded_names=excluded_names,
+            excluded_replacements=excluded_replacements,
+        )
         earliest = _after_pending_arrangements(return_plan, pending_resources)
         for task in return_tasks:
             slots = task.plan.get(op.room, ["Current"] * len(op_data.plan[op.room]))
             if task.time < earliest or slots[op.index] != "Current":
                 continue
-            _native_return(op_data, task.plan, [op.name], excluded_names=excluded_names)
+            _native_return(
+                op_data,
+                task.plan,
+                [op.name],
+                excluded_names=excluded_names,
+                excluded_replacements=excluded_replacements,
+            )
             returning.add(op.name)
             break
     tasks.extend(limited_releases)
@@ -3309,7 +3366,7 @@ def next_workshop_task_time(tasks, earliest=None):
     return candidate
 
 
-def try_workshop_tasks(op_data, tasks, *, minimum_mood=22):
+def try_workshop_tasks(op_data, tasks, *, minimum_mood=22, completed_task=None):
     # 如果没有其他任务则进行加工站干员检查
     from arknights_mower.utils.workshop_automation import (
         refresh_workshop_after_inventory_change,
@@ -3330,12 +3387,36 @@ def try_workshop_tasks(op_data, tasks, *, minimum_mood=22):
     pending_operators = {
         task.meta_data
         for task in tasks
-        if task.type == TaskTypes.WORKSHOP and workshop_task_current(task)
+        if task is not completed_task
+        and task.type == TaskTypes.WORKSHOP
+        and workshop_task_current(task)
     }
+    deer_first = config.conf.workshop_auto_active and any(
+        setting.operator == "九色鹿" for setting in config.conf.workshop_settings
+    )
     inventory_data = get_inventory_counts()
+    if deer_first and any(
+        item.operator in pending_operators
+        and workshop_admission_block(
+            op_data, item, inventory_data, tasks, minimum_mood=0
+        )
+        is None
+        for item in config.conf.workshop_settings
+        if item.enabled
+    ):
+        return
     if config.conf.workshop_settings and inventory_data:
         for item in prioritize_workshop_settings(config.conf.workshop_settings):
             if item.operator in pending_operators:
+                continue
+            if (
+                deer_first
+                and completed_task is not None
+                and item.operator == completed_task.meta_data
+                and workshop_task_current(completed_task)
+            ):
+                # The same quota just stopped. Let later workers continue until
+                # changed stock or configuration produces a new generation.
                 continue
             if not item.enabled:
                 logger.info(f"{item.operator}加工站任务被禁用，跳过")
@@ -3363,6 +3444,8 @@ def try_workshop_tasks(op_data, tasks, *, minimum_mood=22):
             stamp_workshop_task(task)
             tasks.append(task)
             pending_operators.add(item.operator)
+            if deer_first:
+                break
     else:
         if not config.conf.workshop_settings:
             logger.debug("未配置加工站任务，跳过任务生成")
@@ -3434,6 +3517,9 @@ def try_add_release_dorm(
             if not recovery_names:
                 return
         recovering = recovery_names.copy()
+        estimated_crafters = set(
+            crafting_rest_candidates(op_data, candidates.estimated_recovering)
+        )
         waiting = next(iter(recovering), None)
         full = [
             name
@@ -3486,6 +3572,7 @@ def try_add_release_dorm(
                         for name in recovering
                         if (
                             name in candidates.recovering
+                            or name in estimated_crafters
                             or resting_tier(op_data, name)
                             <= RestingTier.PRIORITY_REPLACEMENT
                             or is_full_dorm_filler(op_data, occupant.name, now)

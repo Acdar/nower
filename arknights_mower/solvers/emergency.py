@@ -164,6 +164,12 @@ class EmergencyRecoveryMixin:
             or task.type in (TaskTypes.FIAMMETTA, TaskTypes.RUN_ORDER)
             and task.plan
         ]
+        if getattr(self, "_emergency_startup_pending", False):
+            dependencies.extend(
+                task
+                for task in self._startup_priority_tasks()
+                if all(existing is not task for existing in dependencies)
+            )
         rooms.update(room for task in dependencies for room in task.plan)
         probe = SchedulerTask()
         return {
@@ -394,6 +400,7 @@ class EmergencyRecoveryMixin:
             self._emergency_startup_pending = True
             self._emergency_defer_read()
             return
+        self._initial_card_scan_required = True
         self._read_initial_card_mood()
         if self._queue_initial_fia():
             return
@@ -514,6 +521,7 @@ class EmergencyRecoveryMixin:
             logger.info("原生轮休检查未完成，不启动自动救急：%s", projection.reason)
             return
         try:
+            data.training_scheduling_protected = bool(self._protected_training_slots())
             resolved = effective_rescue_plan(data, config.rescue_plan)
         except ValueError as exc:
             logger.warning("自动救急未启动：%s，请在设置旁填写救急主表", exc)
@@ -1032,6 +1040,8 @@ class EmergencyRecoveryMixin:
     def _emergency_run_order_available(self, room, plan=None):
         if not self._emergency_frozen():
             return True
+        if self.op_data.is_order_collection_room(room):
+            return not self.op_data.run_order_paused
         configured = {
             name
             for row in self.op_data.run_order_replacements(room)

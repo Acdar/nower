@@ -52,6 +52,8 @@ export function incomeReportLines(result, settings, plan, label) {
       ? '本次演算固定为无未完成训练计划且未在训练，不模拟训练进度或计划完成时刻。'
       : `历史演算的未完成训练计划：${settings.masteryPlanPresent ? '有' : '无'}，整段演算保持此条件，不模拟训练完成。`,
     '赤金等价龙门币为制造赤金 × 500 加特殊订单溢价，不扣除交付消耗的赤金；该项不是实际龙门币入账。',
+    '制造配方默认已解锁，当前制造站等级不限制配方；各站容量及材料库存仍按本次配置计算。',
+    '龙门币产出与制造源石碎片消耗的龙门币、固源岩及装置分别显示；消耗按统计期实际开工批次计算，包含尚未完成的批次，预热期已支付的材料不重复计入。',
     `收益权重（${settings.weightMode === 'mower' ? incomeAlgorithmLabel(settings.mowerAlgorithm) : '本次自定义'}）：${Object.entries(
       incomeWeights(settings)
     )
@@ -129,7 +131,6 @@ export async function renderIncomeImage(
     const scale = width / 980
     const algorithmLines = incomeImageAlgorithmLines(settings)
     const days = result.observedHours / 24
-    const contentBottom = Math.max(100, 28 + Math.ceil(metrics.length / 3) * 24)
     const canvas = document.createElement('canvas')
     canvas.width = width
     const ctx = canvas.getContext('2d')
@@ -148,7 +149,7 @@ export async function renderIncomeImage(
     const orders = result.orderDistribution ?? incomeOrderDistribution(result.simulationReport)
     const annotationTop = Math.max(73 + weightLines.length * 14, orders?.other ? 100 : 87)
     const headerHeight = Math.ceil(
-      Math.max(contentBottom, annotationTop + annotationLines.length * 16 + 3) * scale
+      Math.max(100, annotationTop + annotationLines.length * 16 + 3) * scale
     )
     const dark = theme === 'dark'
     const planTop = headerHeight - imageTopWhitespace(source, scale, dark)
@@ -229,18 +230,34 @@ export async function renderIncomeImage(
       lmd: ['#087ead', '#ffffff'],
       gold: ['#f36c3e', '#ffffff'],
       fragment: ['#9d7940', '#ffffff'],
+      lmdCost: ['#735456', '#ffffff'],
+      orirockCost: ['#735456', '#ffffff'],
+      deviceCost: ['#735456', '#ffffff'],
       orundum: ['#be4c51', '#ffffff'],
       recycle: ['#398d83', '#ffffff'],
       recruitment: ['#657385', '#ffffff'],
       clue: ['#756791', '#ffffff']
     }
-    const order = ['exp', 'lmd', 'gold', 'fragment', 'orundum', 'clue', 'recruitment', 'recycle']
-    metrics
-      .map((metric, index) => ({ ...metric, image: icons[index] }))
-      .sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key))
-      .forEach((metric, index) => {
-        const x = 570 + (index % 3) * 130
-        const y = 28 + Math.floor(index / 3) * 24
+    const withIcons = new Map(
+      metrics.map((metric, index) => [metric.key, { ...metric, image: icons[index] }])
+    )
+    const pick = (keys) => keys.map((key) => withIcons.get(key)).filter(Boolean)
+    const products = pick(['exp', 'lmd', 'gold'])
+    const originium = pick(['fragment', 'orundum'])
+    const costs = pick(['lmdCost', 'orirockCost', 'deviceCost'])
+    const bottomHasRoom = !(withIcons.has('orirockCost') && withIcons.has('deviceCost'))
+    if (originium[0]?.key === 'fragment' && bottomHasRoom) costs.unshift(originium.shift())
+    const productVacancies = 3 - products.length
+    products.push(...originium.splice(-productVacancies, productVacancies))
+    const rows = [originium, products, pick(['clue', 'recruitment', 'recycle']), costs]
+    rows
+      .flatMap((metrics, row) =>
+        metrics.map((metric, index) => ({ ...metric, row, column: index + (row === 0 ? 1 : 0) }))
+      )
+      .forEach((metric) => {
+        const { column, row } = metric
+        const x = 570 + column * 130
+        const y = 4 + row * 24
         const [background, color] = colors[metric.key]
         ctx.fillStyle = background
         ctx.fillRect((x + 12) * scale, (y + 3) * scale, 110 * scale, 18 * scale)
@@ -286,10 +303,20 @@ export async function renderIncomeImage(
         } else {
           ctx.drawImage(metric.image, x * scale, y * scale, 24 * scale, 24 * scale)
         }
-        const value = `${compactIncomeNumber(metric.daily)}${metric.key === 'clue' ? '个' : metric.unit === '次' ? '次' : ''}`
+        const negative = metric.daily < 0
+        const value = `${compactIncomeNumber(Math.abs(metric.daily))}${metric.key === 'clue' ? '个' : metric.unit === '次' ? '次' : ''}`
         ctx.font = `${14 * scale}px sans-serif`
         ctx.fillStyle = color
-        ctx.fillText(value, (x + 30) * scale, (y + 17) * scale, 89 * scale)
+        const baseline = (y + 17) * scale
+        let valueX = (x + 30) * scale
+        if (negative) {
+          const digits = ctx.measureText('0')
+          const center =
+            baseline - (digits.actualBoundingBoxAscent - digits.actualBoundingBoxDescent) / 2
+          ctx.fillRect(valueX, center - 0.5 * scale, 6 * scale, scale)
+          valueX += 8 * scale
+        }
+        ctx.fillText(value, valueX, baseline, (negative ? 81 : 89) * scale)
       })
     annotationLines.forEach((line, index) => {
       write(line, 28, annotationTop + 16 + index * 16, 10, muted)

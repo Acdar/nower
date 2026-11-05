@@ -10,8 +10,14 @@ from arknights_mower.utils.workshop_material_policy import (
     workshop_recipe_allowed,
 )
 
-T4_PREFERRED = ("九色鹿", "蚀清", "镜匠")
-SCOPED_OPERATORS = (*T4_PREFERRED, "莱伊", "旅骨")
+T4_PREFERRED = ("九色鹿", "镜匠", "蚀清")
+SCOPED_OPERATORS = (*T4_PREFERRED, "莱伊", "旅骨", "瑕光")
+
+
+def is_deer_fodder(recipe):
+    return recipe.get("tab") in {"基建材料", "技巧概要"} or (
+        recipe.get("tab") == "精英材料" and recipe.get("apCost") in {1, 2}
+    )
 
 
 def recipe_category(recipe):
@@ -24,6 +30,8 @@ def recipe_category(recipe):
 
 def operator_recipe_allowed(name, recipe, *, fodder=False):
     """Apply user material scopes using original recipe cost, before reductions."""
+    if name == "瑕光":
+        return recipe.get("tab") == "精英材料" and recipe.get("apCost") in {1, 2}
     if name == "旅骨":
         return (
             recipe_category(recipe) == "t5_operators"
@@ -31,14 +39,7 @@ def operator_recipe_allowed(name, recipe, *, fodder=False):
         )
     t4 = recipe.get("tab") == "精英材料" and recipe.get("apCost") == 4
     if name in T4_PREFERRED:
-        deer_fodder = (
-            name == "九色鹿"
-            and fodder
-            and (
-                recipe.get("tab") in {"基建材料", "技巧概要"}
-                or (recipe.get("tab") == "精英材料" and recipe.get("apCost") == 1)
-            )
-        )
+        deer_fodder = name == "九色鹿" and fodder and is_deer_fodder(recipe)
         return t4 or deer_fodder
     return name != "莱伊" or not t4
 
@@ -161,8 +162,8 @@ def exclusive_specialists(bonuses, specialists):
     )
 
 
-def operator_priority(name, bonus, *, t5=False, effects=()):
-    # T4 exceptions precede probability; all other preferences only break ties.
+def operator_priority(name, bonus, *, t5=False, effects=(), prefer_t4=True):
+    # Execution can prefer T4 exceptions; recovery compares bonuses directly.
     preference = 2
     if bonus == 80:
         if name == "蜜莓":
@@ -170,7 +171,9 @@ def operator_priority(name, bonus, *, t5=False, effects=()):
         elif name == "缇缇" and t5:
             preference = 1
     return (
-        T4_PREFERRED.index(name) if name in T4_PREFERRED else len(T4_PREFERRED),
+        T4_PREFERRED.index(name)
+        if prefer_t4 and name in T4_PREFERRED
+        else len(T4_PREFERRED),
         -bonus,
         not any(effect["kind"] == "dormitory" for effect in effects),
         preference,
