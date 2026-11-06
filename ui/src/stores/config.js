@@ -72,6 +72,7 @@ export const useConfigStore = defineStore('config', () => {
   const server_push_enable = ref(false) // Server酱通知开关
   const sendKey = ref('') // Server酱Key值
   const pushplus = ref({})
+  const mail_attach_error_screenshot = ref(false)
   const account = ref('')
   const pass_code = ref('')
   const recipient = ref('')
@@ -584,6 +585,7 @@ export const useConfigStore = defineStore('config', () => {
         ratio_rules: response.data.maa_stage_ratio_rules
       })
       mail_enable.value = response.data.mail_enable != 0
+      mail_attach_error_screenshot.value = response.data.mail_attach_error_screenshot ?? false
       account.value = response.data.account
       pass_code.value = response.data.pass_code
       recipient.value = response.data.recipient
@@ -805,6 +807,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_stage_limit_rules: normalizeStageLimitRules(maa_stage_limit_rules.value),
       maa_stage_ratio_rules: normalizeStageRatioRules(maa_stage_ratio_rules.value),
       mail_enable: mail_enable.value ? 1 : 0,
+      mail_attach_error_screenshot: mail_attach_error_screenshot.value,
       package_type: package_type.value == 'official' ? 1 : 2,
       pass_code: pass_code.value,
       recipient: recipient.value,
@@ -953,6 +956,7 @@ export const useConfigStore = defineStore('config', () => {
   function build_advanced_settings() {
     return {
       product_switching: product_switching.value,
+      drone_room: drone_room.value,
       drone_count_limit: drone_count_limit.value,
       drone_interval: drone_interval.value,
       resting_threshold: resting_threshold.value / 100,
@@ -1176,6 +1180,7 @@ export const useConfigStore = defineStore('config', () => {
     server_push_enable,
     sendKey,
     mail_enable,
+    mail_attach_error_screenshot,
     account,
     pass_code,
     recipient,
