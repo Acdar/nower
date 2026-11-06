@@ -310,6 +310,35 @@ def _merge_plan_overlay(plan: dict, overlay: dict, op_data: Operators) -> None:
                 target[index] = name
 
 
+def _arrangement_room_order(plan: dict, op_data: Operators) -> list[str]:
+    """Refill pending source workplaces before transferring their occupants."""
+    work = [room for room in plan if not room.startswith("dormitory_")]
+    dependencies = {room: set() for room in work}
+    for room in work:
+        for name in plan[room]:
+            operator = op_data.operators.get(name)
+            source = operator.current_room if operator is not None else ""
+            if source != room and source in dependencies:
+                dependencies[room].add(source)
+    pending = list(work)
+    ordered = []
+    while pending:
+        ready = next(
+            (room for room in pending if not dependencies[room].intersection(pending)),
+            None,
+        )
+        if ready is None:
+            # Cyclic exchanges still complete in the original stable order.
+            ordered.extend(pending)
+            break
+        pending.remove(ready)
+        ordered.append(ready)
+    return ordered + sorted(
+        (room for room in plan if room.startswith("dormitory_")),
+        key=lambda room: int(room.split("_")[1]),
+    )
+
+
 def _assigned_operator_names(plan: dict) -> set[str]:
     return {
         name
@@ -15607,7 +15636,7 @@ class BaseSchedulerSolver(
         return round((execute_time - datetime.now()).total_seconds(), 1)
 
     def _cancel_pending_shift_on(self, name):
-        """实际重新上岗后，撤销本人的旧回班预约，保留同批其他人的动作。"""
+        """实际上岗只撤销本人的旧工作目标，保留宿舍迁移和其他人的动作。"""
         locks_changed = False
         for task in task_view(self.tasks, TaskScope.REPLAN):
             if (
@@ -15617,7 +15646,8 @@ class BaseSchedulerSolver(
                 or not any(
                     name in names
                     for plan in (task.plan, getattr(task, "backup_shift_intent", {}))
-                    for names in plan.values()
+                    for room, names in plan.items()
+                    if not room.startswith("dorm")
                 )
             ):
                 continue
@@ -15628,9 +15658,12 @@ class BaseSchedulerSolver(
                 del task.backup_shift_intent
                 del task.backup_shift_conditions
             task.plan = {
-                room: ["Current" if agent == name else agent for agent in names]
+                room: names
+                if room.startswith("dorm")
+                else ["Current" if agent == name else agent for agent in names]
                 for room, names in task.plan.items()
-                if any(agent not in (name, "Current") for agent in names)
+                if room.startswith("dorm")
+                or any(agent not in (name, "Current") for agent in names)
             }
             locked = getattr(task, "product_shift_locked", False)
             locks_changed |= locked
@@ -17021,7 +17054,7 @@ class BaseSchedulerSolver(
             for dorm_room in list(plan):
                 if dorm_room.startswith("dorm"):
                     self.preserve_resting_crafters(plan[dorm_room], dorm_room)
-        rooms = list(plan.keys())
+        rooms = _arrangement_room_order(plan, self.op_data)
         # 救急跑单失败沿用换入意图；普通跑单由实测原班补偿接续。
         original_plan = (
             copy.deepcopy(plan)
@@ -17029,13 +17062,6 @@ class BaseSchedulerSolver(
             else None
         )
         new_plan = {}
-        # 优先替换工作站再替换宿舍
-        rooms.sort(
-            key=lambda x: (
-                x.startswith("dormitory_"),
-                int(x.split("_")[1]) if x.startswith("dormitory_") else 0,
-            )
-        )
         from arknights_mower.solvers.mastery_support_runtime import (
             central_training_occupants,
             refresh_after_central_change,
