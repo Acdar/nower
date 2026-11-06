@@ -78,6 +78,7 @@ function mountSwitches(componentType, scope) {
     componentType.setup({}, { expose: (value) => (exposed = value) })
   )
   return {
+    state: setupState,
     flushSettings: () => exposed.flushSettings(),
     render: () => renderToString(createSSRApp({ ...componentType, setup: () => setupState })),
     switch: (label) => state.switches.get(label)
@@ -108,7 +109,14 @@ describe('offline software package installation', () => {
               blockers: [],
               instances: [{ name: 'one' }],
               channels: [],
-              settings: { channel: 'beta', auto_check: true, auto_update: true, background: true }
+              settings: {
+                channel: 'beta',
+                auto_check: true,
+                auto_update: true,
+                background: true,
+                update_repo: 'ArkMowers/arknights-mower',
+                ota_repo: 'ArkMowers/MowerRelease'
+              }
             }
           : { ok: true, status: 'idle' }
       })),
@@ -334,6 +342,35 @@ describe('offline software package installation', () => {
     expect(
       state.client.post.mock.calls.find(([url]) => url.endsWith('/settings'))[1].background
     ).toBe(false)
+  })
+
+  it('saves the update repositories and restores the accepted value after rejection', async () => {
+    state.client.post.mockResolvedValue({
+      data: {
+        ok: true,
+        settings: { update_repo: 'personal/mower', ota_repo: 'personal/releases' }
+      }
+    })
+    const view = mountSwitches(SoftwareUpdate, scope)
+    await Promise.all(state.mounted.map((callback) => callback()))
+    await view.render()
+    expect(view.state.updateRepo.value).toBe('ArkMowers/arknights-mower')
+    expect(view.state.otaRepo.value).toBe('ArkMowers/MowerRelease')
+
+    view.state.updateRepo.value = ' https://github.com/personal/mower.git '
+    view.state.otaRepo.value = 'personal/releases'
+    await view.state.saveRepositories()
+    expect(state.client.post.mock.calls.find(([url]) => url.endsWith('/settings'))[1]).toEqual({
+      update_repo: 'https://github.com/personal/mower.git',
+      ota_repo: 'personal/releases'
+    })
+    expect(view.state.updateRepo.value).toBe('personal/mower')
+
+    state.client.post.mockRejectedValue(new Error('请填写有效的 GitHub 仓库地址'))
+    view.state.updateRepo.value = 'not a repository'
+    await view.state.saveRepositories()
+    expect(view.state.updateRepo.value).toBe('ArkMowers/arknights-mower')
+    expect(view.state.otaRepo.value).toBe('ArkMowers/MowerRelease')
   })
 
   it('opens the shared resource update dialog without installing from the settings button', () => {

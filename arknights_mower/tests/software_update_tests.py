@@ -43,7 +43,7 @@ def release(
         "prerelease": prerelease,
         "draft": draft,
         "published_at": published_at,
-        "html_url": update.RELEASES_URL,
+        "html_url": f"https://github.com/{update.REPO}/releases",
         "body": "Release notes",
         "assets": [
             {
@@ -196,14 +196,16 @@ class ReleaseDiscoveryTests(unittest.TestCase):
             patch.object(
                 update,
                 "release_index",
-                side_effect=ValueError("MowerRelease 版本索引暂时不可用"),
+                side_effect=ValueError("版本索引暂时不可用"),
             ) as api,
             patch.object(update, "github", return_value=latest) as github,
         ):
             result = update.check("stable")
         self.assertEqual(result["version"], "v4.1.5")
         api.assert_called_once_with("stable")
-        github.assert_called_once_with("/releases/latest", "")
+        github.assert_called_once_with(
+            "/releases/latest", "", repo=update.update_repo()
+        )
 
     def test_publication_timestamps_use_timezone_and_ignore_invalid_dates(self):
         older = release("v4.2.0", published_at="2026-09-09T08:00:00+08:00")

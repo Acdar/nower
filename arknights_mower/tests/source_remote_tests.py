@@ -199,12 +199,15 @@ class SourceRemoteTests(unittest.TestCase):
         self.assertEqual(plan["source_url"], "https://github.com/personal/mower.git")
         self.assertEqual(plan["ref"], "a" * 40)
 
-    def test_release_api_stays_official_and_source_api_uses_selected_repo(self):
+    def test_release_api_follows_the_selected_update_repository(self):
         response = Mock(status_code=200)
         response.json.return_value = {}
         with patch.object(update.requests, "get", return_value=response) as get:
             update.github("/releases/latest")
-            self.assertEqual(get.call_args.args[0], update.API + "/releases/latest")
+            self.assertEqual(
+                get.call_args.args[0],
+                f"https://api.github.com/repos/{update.REPO}/releases/latest",
+            )
             update.github("/commits/main", repo="personal/mower")
             self.assertEqual(
                 get.call_args.args[0],

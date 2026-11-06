@@ -1360,7 +1360,7 @@ async function db_delete(keys) {
   background-size: contain;
   background-position: center bottom;
   transform: none;
-  opacity: 1;
+  opacity: v-bind(bg_opacity);
   -webkit-mask-image: none;
   mask-image: none;
 }

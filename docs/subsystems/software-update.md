@@ -80,6 +80,13 @@ Automatic updates follow the same target when enabled and do not reinstall an id
 
 Explicit historical Release selection and offline package inspection retain their rollback confirmation. Offline Nightly packages with unknown SHA ordering remain network-free and require confirmation. The authenticated update endpoints retain their token and POST origin checks.
 
+<a id="update-repository-targets"></a>
+### Update Repository Targets
+
+Two saved settings name the online sources and default to the built-in repositories. `update_repo` (`ArkMowers/arknights-mower`) supplies the Release, tag and commit lookups of the stable and beta channels for source deployments, and the Latest release used when a channel index is unavailable. `ota_repo` (`ArkMowers/MowerRelease`) supplies the channel index at `version/<channel>.json`, the OTA tag lookups, and the download prefix of full packages and OTA assets. The dev channel of a source deployment still follows `source_remote` from source version management; see [online channel targets](#6-online-channel-targets).
+
+Both values accept `owner/repo` or a `github.com` address and are stored as `owner/repo`. Empty values, credentials and addresses on other hosts are rejected before saving. A release or OTA asset is admitted only when its URL starts with the configured repository's `https://github.com/<repo>/releases/download/` prefix. The saved repositories participate in the coalesced automatic-check key, so changing either value starts a new check instead of reusing the suppressed launch result. The settings form exposes `update_repo` for both deployments and `ota_repo` for release deployments. Focused offline coverage is in [`software_update_repository_tests.py`](../../arknights_mower/tests/software_update_repository_tests.py).
+
 The [archived Nightly direction decision](../../.agents/notes/archived/bug-fix/2026-10-07-nightly-direction-evidence.md) preserves the superseded publication-time and commit-ancestry approach.
 
 ## 7. MAA Resource Updates

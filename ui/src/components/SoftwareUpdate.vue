@@ -28,6 +28,8 @@ const channel = ref('beta')
 const background = ref(false)
 const autoCheck = ref(false)
 const autoUpdate = ref(false)
+const updateRepo = ref('ArkMowers/arknights-mower')
+const otaRepo = ref('ArkMowers/MowerRelease')
 const checked = ref(null)
 const rollbackOptions = ref([])
 const rollbackVersion = ref(null)
@@ -112,6 +114,38 @@ function setAutoUpdate(value) {
   saveSettings()
 }
 
+function applyRepositories(settings) {
+  updateRepo.value = settings?.update_repo || ''
+  otaRepo.value = settings?.ota_repo || ''
+}
+
+async function saveRepositories() {
+  const payload = {
+    update_repo: updateRepo.value.trim(),
+    ota_repo: otaRepo.value.trim()
+  }
+  settingsRequest = settingsRequest
+    .catch(() => {})
+    .then(async () => {
+      const { data } = await axios.post(`${base}/settings`, payload, { headers })
+      if (!data.ok) throw new Error(data.message)
+      applyRepositories(data.settings)
+      checked.value = null
+      if (autoCheck.value && !packageFiles.value.length)
+        await axios.post(`${base}/auto-check`, {}, { headers })
+    })
+  try {
+    await settingsRequest
+  } catch (err) {
+    error.value = errorMessage(err)
+    try {
+      await loadInfo()
+    } catch {
+      applyRepositories(info.value?.settings)
+    }
+  }
+}
+
 function showLastCheck(result) {
   if (
     checking.value ||
@@ -160,6 +194,7 @@ async function loadInfo() {
     autoCheck.value = data.settings.auto_check
     autoUpdate.value = data.settings.auto_update
   }
+  applyRepositories(data.settings)
   info.value = data
   showLastCheck(data.last_check)
 }
@@ -552,6 +587,44 @@ onUnmounted(() => {
           :disabled="running || checking || !info"
           :input-props="{ 'aria-label': '更新渠道' }"
           @update:value="saveSettings"
+        />
+      </n-form-item>
+      <n-form-item>
+        <template #label>
+          <span class="settings-row-copy">
+            <span>更新仓库</span>
+            <span class="settings-row-description">{{
+              source
+                ? '正式版和公测版按此仓库的 Release 标签更新，开发版跟随下方源码版本管理的远端仓库'
+                : '版本索引缺失时从此仓库读取安装包'
+            }}</span>
+          </span>
+        </template>
+        <n-input
+          v-model:value="updateRepo"
+          size="small"
+          placeholder="owner/repo 或 GitHub 地址"
+          :disabled="running || checking || !info"
+          :input-props="{ 'aria-label': '更新仓库' }"
+          @blur="saveRepositories"
+          @keyup.enter="saveRepositories"
+        />
+      </n-form-item>
+      <n-form-item v-if="!source">
+        <template #label>
+          <span class="settings-row-copy">
+            <span>OTA 仓库</span>
+            <span class="settings-row-description">渠道版本索引、完整安装包和增量包的来源仓库</span>
+          </span>
+        </template>
+        <n-input
+          v-model:value="otaRepo"
+          size="small"
+          placeholder="owner/repo 或 GitHub 地址"
+          :disabled="running || checking || !info"
+          :input-props="{ 'aria-label': 'OTA 仓库' }"
+          @blur="saveRepositories"
+          @keyup.enter="saveRepositories"
         />
       </n-form-item>
       <n-form-item>

@@ -27,12 +27,9 @@ from arknights_mower.utils.software_update_worker import (
     require_clean_source,
 )
 
+# Built-in update sources. Both can be replaced by the saved update settings.
 REPO = "ArkMowers/arknights-mower"
 OTA_REPO = "ArkMowers/MowerRelease"
-API = f"https://api.github.com/repos/{REPO}"
-RELEASES_URL = f"https://github.com/{REPO}/releases"
-OTA_RELEASES_URL = f"https://github.com/{OTA_REPO}/releases"
-OTA_INDEX_URL = f"https://raw.githubusercontent.com/{OTA_REPO}/main/version"
 CHANNELS = [
     {
         "value": "stable",
@@ -131,6 +128,8 @@ def get_settings():
         "source_branch": saved.get("source_branch", "alpha"),
         "source_remote": saved.get("source_remote", "origin"),
         "source_remote_history": saved.get("source_remote_history", []),
+        "update_repo": saved.get("update_repo", REPO),
+        "ota_repo": saved.get("ota_repo", OTA_REPO),
     }
 
 
@@ -147,6 +146,9 @@ def save_settings(data):
         if data["channel"] not in {item["value"] for item in CHANNELS}:
             raise ValueError("未知更新渠道")
         settings["channel"] = data["channel"]
+    for key, label in (("update_repo", "更新仓库"), ("ota_repo", "OTA 仓库")):
+        if key in data:
+            settings[key] = normalize_repo(data[key], label)
     if settings["auto_update"]:
         settings["auto_check"] = True
     with runtime.submission_lock(runtime.state_dir()):
@@ -154,13 +156,37 @@ def save_settings(data):
     return {"ok": True, "settings": settings}
 
 
+def update_repo():
+    """Configured owner/name of the repository that publishes Mower releases."""
+    return get_settings().get("update_repo") or REPO
+
+
+def ota_repo():
+    """Configured owner/name of the repository that publishes channel indexes."""
+    return get_settings().get("ota_repo") or OTA_REPO
+
+
+def releases_url():
+    return f"https://github.com/{update_repo()}/releases"
+
+
+def ota_releases_url():
+    return f"https://github.com/{ota_repo()}/releases"
+
+
+def ota_index_url():
+    return f"https://raw.githubusercontent.com/{ota_repo()}/main/version"
+
+
 def automatic_check_key(settings):
     return {
-        key: settings[key]
+        key: settings.get(key)
         for key in (
             "channel",
             "source_branch",
             "source_remote",
+            "update_repo",
+            "ota_repo",
             "auto_check",
             "auto_update",
         )
@@ -298,10 +324,10 @@ def platform_asset():
 validate_proxy = network_settings.normalize_http_proxy
 
 
-def github(path, proxy="", *, repo=REPO):
+def github(path, proxy="", *, repo=None):
     proxies = {"http": proxy, "https": proxy} if proxy else None
     response = requests.get(
-        f"https://api.github.com/repos/{repo}" + path,
+        f"https://api.github.com/repos/{repo or update_repo()}" + path,
         timeout=30,
         proxies=proxies,
         headers={
@@ -315,7 +341,8 @@ def github(path, proxy="", *, repo=REPO):
     return response.json()
 
 
-def source_commit_info(commit, repo=REPO):
+def source_commit_info(commit, repo=None):
+    repo = repo or update_repo()
     sha = commit.get("sha", "")
     if not isinstance(sha, str) or not re.fullmatch(r"[a-fA-F0-9]{40}", sha):
         raise ValueError("GitHub 返回的提交 SHA 无效")
@@ -356,6 +383,13 @@ def normalize_source_url(value):
         else f"https://github.com/{repo}.git"
     )
     return {"source_repo": repo, "source_url": url}
+
+
+def normalize_repo(value, label="仓库"):
+    """Accept owner/name or a GitHub URL; reject credentials and other hosts."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"请填写{label}，格式为 owner/repo 或 GitHub 地址")
+    return normalize_source_url(value)["source_repo"]
 
 
 def resolve_source_remote(remote=None):
@@ -666,11 +700,11 @@ def choose_release(releases, channel):
     return max(candidates, key=lambda item: item[:2])[2]
 
 
-def list_releases(proxy):
+def list_releases(proxy, repo=None):
     releases = []
     page = 1
     while True:
-        batch = github(f"/releases?per_page=100&page={page}", proxy)
+        batch = github(f"/releases?per_page=100&page={page}", proxy, repo=repo)
         if not isinstance(batch, list):
             raise ValueError("GitHub Release 列表格式错误")
         releases.extend(batch)
@@ -681,10 +715,10 @@ def list_releases(proxy):
 
 
 def release_index(channel):
-    """Read the full and OTA assets for a channel in one MowerRelease request."""
+    """Read the full and OTA assets for a channel from the configured index."""
     if channel not in ("stable", "beta", "dev"):
         raise ValueError("未知 Release 更新渠道")
-    url = f"{OTA_INDEX_URL}/{channel}.json"
+    url = f"{ota_index_url()}/{channel}.json"
     try:
         response, _ = github_download.request_download(
             requests,
@@ -696,7 +730,7 @@ def release_index(channel):
         with response:
             data = response.json()
     except (requests.RequestException, ValueError) as error:
-        raise ValueError("MowerRelease 版本索引暂时不可用，请稍后重试") from error
+        raise ValueError("版本索引暂时不可用，请稍后重试") from error
     if (
         not isinstance(data, dict)
         or data.get("schema") != 1
@@ -718,7 +752,7 @@ def release_index(channel):
             for asset in data["full_assets"] + data["ota_assets"]
         )
     ):
-        raise ValueError("MowerRelease 版本索引格式错误")
+        raise ValueError("版本索引格式错误")
     return data
 
 
@@ -730,7 +764,7 @@ def latest_release_index(channel):
             candidate = release_index(promoted)
             if version_key(candidate["version"]) <= version_key(selected["version"]):
                 continue
-            choose_asset(candidate, repo=OTA_REPO)
+            choose_asset(candidate, repo=ota_repo())
         except ValueError:
             # Optional channels may have no published package or index yet.
             continue
@@ -787,7 +821,7 @@ def release_rollback_candidates(channel, proxy):
     compatible = []
     for published, item in candidates[:3]:
         try:
-            compatible.append((published, item, choose_asset(item, repo=OTA_REPO)))
+            compatible.append((published, item, choose_asset(item, repo=ota_repo())))
         except (KeyError, TypeError, ValueError):
             continue
     return compatible
@@ -853,7 +887,8 @@ def check_release_rollback(channel, version):
     }
 
 
-def choose_asset(release, *, repo=REPO):
+def choose_asset(release, *, repo=None):
+    repo = repo or update_repo()
     system, arch = platform_asset()
     version = (release.get("version") or release.get("tag_name")).lstrip("v")
     extension = {"windows": "zip", "linux": "tar.gz", "macos": "dmg"}[system]
@@ -874,7 +909,7 @@ def choose_asset(release, *, repo=REPO):
     if not isinstance(url, str) or not url.startswith(
         f"https://github.com/{repo}/releases/download/"
     ):
-        raise ValueError("Release 下载地址不属于官方仓库")
+        raise ValueError("Release 下载地址不属于所选仓库")
     if type(asset.get("size")) is not int or asset["size"] <= 0:
         raise ValueError("Release 安装包大小无效")
     return {
@@ -900,7 +935,7 @@ def choose_ota_asset(target_version, current_version, proxy="", release=None):
             release = github(
                 "/releases/tags/" + quote(target_version, safe=""),
                 proxy,
-                repo=OTA_REPO,
+                repo=ota_repo(),
             )
         except (requests.RequestException, ValueError):
             return None
@@ -925,7 +960,7 @@ def choose_ota_asset(target_version, current_version, proxy="", release=None):
     digest = asset.get("digest") or ""
     url = asset.get("url") or asset.get("browser_download_url") or ""
     if not re.fullmatch(r"sha256:[a-fA-F0-9]{64}", digest) or not url.startswith(
-        f"https://github.com/{OTA_REPO}/releases/download/"
+        f"https://github.com/{ota_repo()}/releases/download/"
     ):
         return None
     if not isinstance(asset.get("size"), int) or asset["size"] <= 0:
@@ -1077,7 +1112,9 @@ def info():
             for r in registered
             if r["kind"] == "instance"
         ],
-        "releases_url": RELEASES_URL if deployment == "source" else OTA_RELEASES_URL,
+        "releases_url": releases_url()
+        if deployment == "source"
+        else ota_releases_url(),
         "manual_supported": deployment == "release",
         "manual_ota_supported": deployment == "release"
         and platform_asset() == ("windows", "x64"),
@@ -1120,16 +1157,16 @@ def check(channel, proxy=None):
             + quote(branch, safe=""),
         )
     elif deployment == "release":
-        release_repo = OTA_REPO
+        index_repo = ota_repo()
         try:
             release = latest_release_index(channel)
         except ValueError:
             if channel != "stable":
                 raise
             # The current stable Latest release has no installable packages,
-            # so its MowerRelease index may not exist yet.
-            release = github("/releases/latest", proxy)
-            release_repo = REPO
+            # so its channel index may not exist yet.
+            index_repo = update_repo()
+            release = github("/releases/latest", proxy, repo=index_repo)
         release_version = release.get("version") or release["tag_name"]
         plan.update(
             version=release_version,
@@ -1137,11 +1174,12 @@ def check(channel, proxy=None):
             url=release.get("source_release") or release["html_url"],
         )
     else:
+        repo = update_repo()
         if channel == "stable":
             # Respect GitHub's Latest selection instead of comparing legacy
             # calendar versions (2025.x) numerically with current versions (4.x).
             try:
-                releases = [github("/releases/latest", proxy)]
+                releases = [github("/releases/latest", proxy, repo=repo)]
             except requests.HTTPError as error:
                 if error.response is not None and error.response.status_code == 404:
                     raise ValueError("正式版渠道暂无已发布的 Latest Release") from error
@@ -1149,7 +1187,7 @@ def check(channel, proxy=None):
         else:
             # /latest omits prereleases. Read every page before comparing their
             # publication times; creation time and API order are not sufficient.
-            releases = list_releases(proxy)
+            releases = list_releases(proxy, repo)
         release = choose_release(releases, channel)
         plan.update(
             version=release["tag_name"],
@@ -1157,12 +1195,14 @@ def check(channel, proxy=None):
             url=release["html_url"],
         )
         if deployment == "source":
-            commit = github("/commits/" + quote(release["tag_name"], safe=""), proxy)
+            commit = github(
+                "/commits/" + quote(release["tag_name"], safe=""), proxy, repo=repo
+            )
             plan.update(
                 ref="refs/tags/" + release["tag_name"],
                 commit=commit["sha"],
-                source_url=f"https://github.com/{REPO}.git",
-                source_repo=REPO,
+                source_url=f"https://github.com/{repo}.git",
+                source_repo=repo,
             )
     if deployment == "source":
         current = subprocess.check_output(
@@ -1181,12 +1221,12 @@ def check(channel, proxy=None):
             0
         ].removeprefix("v")
         if available:
-            plan["asset"] = choose_asset(release, repo=release_repo)
+            plan["asset"] = choose_asset(release, repo=index_repo)
             ota = choose_ota_asset(
                 plan["version"],
                 __version__,
                 proxy,
-                release=release if release_repo == OTA_REPO else None,
+                release=release if index_repo == ota_repo() else None,
             )
             if ota and ota["size"] < plan["asset"]["size"]:
                 plan["ota_asset"] = ota
