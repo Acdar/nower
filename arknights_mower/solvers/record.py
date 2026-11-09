@@ -14,6 +14,7 @@ from tzlocal import get_localzone
 
 from arknights_mower.solvers.mood_history_query import mood_curve_filter
 from arknights_mower.utils import config
+from arknights_mower.utils.activity_observations import snapshot_observations
 from arknights_mower.utils.log import logger
 from arknights_mower.utils.path import get_path
 
@@ -328,6 +329,10 @@ def current_state():
         ),
         "daily_visit_friend": base_scheduler.daily_visit_friend,
         "maa_daily_completed": getattr(base_scheduler, "maa_daily_completed", {}),
+        "annihilation_lock_mail_day": getattr(
+            base_scheduler, "annihilation_lock_mail_day", None
+        ),
+        "display_observations": snapshot_observations(base_scheduler),
         "daily_visit_friend_attempt": getattr(
             base_scheduler, "daily_visit_friend_attempt", None
         ),
@@ -1138,6 +1143,7 @@ def save_inventory_counts(
     cloud_at=0,
     force_cloud=False,
     invalidate_missing=False,
+    invalidation_scope=None,
 ):
     with _conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -1156,10 +1162,11 @@ def save_inventory_counts(
         }
         invalidated = set()
         if invalidate_missing and cloud_at > 0 and not battle_inventory_active.is_set():
+            missing = current.keys() - (cloud_counts or {}).keys()
+            if invalidation_scope is not None:
+                missing &= set(invalidation_scope)
             invalidated = {
-                name
-                for name in current.keys() - (cloud_counts or {}).keys()
-                if protected.get(name, 0) < cloud_at
+                name for name in missing if protected.get(name, 0) < cloud_at
             }
             conn.executemany(
                 "DELETE FROM inventory WHERE item_name = ?",

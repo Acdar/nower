@@ -1,3 +1,5 @@
+import {mowerForcedWorkGroups} from './mowerBackupGroupTasks'
+import {mowerCoordinationRequestFulfilled} from './mowerReplacementCoordination'
 import {restingThresholdFor} from './mowerOperatorState'
 // Preserve native group exhaustion admission (Mower e6c06a5b1, MIT).
 import type {MowerSchedulingData} from './mowerSchedulingData'
@@ -12,22 +14,24 @@ export function mowerExhaustGroups(data:MowerSchedulingData):Set<string> {
 
 /** Revalidate an ordinary request after a backup change or an observed charge. */
 export function mowerOrdinaryCoordinationNeeded(data:MowerSchedulingData,names:readonly string[]):boolean {
- const exhausted=mowerExhaustGroups(data)
+ const exhausted=new Set([...mowerExhaustGroups(data),...mowerForcedWorkGroups(data)])
  const eligible=(name:string)=>{
   const op=data.operators[name]
   if(!op||!op.isHigh()||op.multiGroup&&!op.independentRest&&!op.shiftGroup||op.group&&!data.isGroupShiftAnchor(op)||op.isResting()||data.isStandby(name)||['factory','train'].includes(op.room)||['factory','train'].includes(op.currentRoom)||data.busyRestingNames.has(name)||data.reservedProductReplacements.has(name)||op.exhaustRequire||exhausted.has(op.group)||alphaRestingTier(data,name)===7)return false
   const mood=mowerDormCandidateMood(data,name),threshold=op.lowerLimit+(op.upperLimit-op.lowerLimit)*restingThresholdFor(op,data.policy)
   return mood!==undefined&&mood<op.upperLimit&&mood<=(op.customMoodLimit?threshold:Math.floor(threshold))&&(op.customMoodLimit||op.upperLimit-mood>=2)
  }
- const units=new Map<string,string[]>()
+ const units=new Map<string,{requestNames:string[];members:string[]}>()
  for(const name of names){
   const op=data.operators[name]
   if(!op||!op.isHigh()||op.room.startsWith('dorm')||op.workaholic)continue
-  const followsRequestedGroup=op.multiGroup&&names.some(other=>other!==name&&!!data.operators[other]?.group&&op.groupBindings.some(binding=>binding.group===data.operators[other]!.group))
-  if(op.multiGroup&&!op.shiftGroup&&(!op.independentRest||followsRequestedGroup))continue
-  units.set(op.group?'group:'+op.group:'operator:'+name,op.group?data.shiftGroupMembers(op.group):[name])
+  if(op.multiGroup&&!op.shiftGroup&&!op.independentRest)continue
+  const key=op.group?'group:'+op.group:'operator:'+name,previous=units.get(key)
+  if(previous)previous.requestNames.push(name)
+  else units.set(key,{requestNames:[name],members:op.group?data.shiftGroupMembers(op.group):[name]})
  }
- return units.size>0&&[...units.values()].every(members=>members.some(eligible))
+ const pending=[...units.values()].filter(unit=>!mowerCoordinationRequestFulfilled(data,unit.requestNames))
+ return pending.length>0&&pending.every(unit=>unit.members.some(eligible))
 }
 
 /** Retained failures still own their request; dispatch visibility is unrelated. */
@@ -36,8 +40,8 @@ export function mowerPendingExhaust(tasks:readonly MowerTask[],name:string):Mowe
 }
 
 /** A concrete departure owns a request only when it covers every recovery-requiring member. */
-export function mowerPendingExhaustDeparture(data:MowerSchedulingData,tasks:readonly MowerTask[],candidates:readonly string[]):MowerTask|undefined {
- const requestGroups=new Set(data.shiftRequestGroups(candidates)),members=candidates.map(name=>data.operators[name]!).filter(op=>!op.room.startsWith('dorm')&&!op.workaholic&&(!op.multiGroup||requestGroups.has(op.shiftGroup??'')||candidates.length===1&&op.independentRest))
+export function mowerPendingExhaustDeparture(data:MowerSchedulingData,tasks:readonly MowerTask[],candidates:readonly string[],requestNames:readonly string[]=candidates):MowerTask|undefined {
+ const requestGroups=new Set(data.shiftRequestGroups(requestNames)),members=candidates.map(name=>data.operators[name]!).filter(op=>!op.room.startsWith('dorm')&&!op.workaholic&&(!op.multiGroup||requestGroups.has(op.shiftGroup??'')||requestNames.includes(op.name)&&op.independentRest))
  if(!members.length)return
  return tasks.find(task=>{
   if(task.type!==T.SHIFT_OFF)return false

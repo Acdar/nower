@@ -293,7 +293,8 @@ def get_cred(grant):
     return resp["data"]
 
 
-def get_ak_binding_list(sign_token):
+def get_binding_list(sign_token):
+    """读取账号下明日方舟与终末地的绑定角色，忽略其他游戏。"""
     v = []
     resp = request_with_retry(
         "get",
@@ -323,31 +324,7 @@ def get_ak_binding_list(sign_token):
     for i in body["data"]["list"]:
         if i.get("appCode") not in ("arknights", "endfield"):
             continue
-        v.extend(i.get("bindingList"))
-    return v
-
-
-def get_ef_binding_list(sign_token):
-    v = []
-    resp = requests.get(
-        binding_url,
-        headers=get_sign_header(
-            binding_url,
-            "get",
-            None,
-            sign_token,
-        ),
-        timeout=30,
-    ).json()
-    if resp["code"] != 0:
-        logger.info(f"请求角色列表出现问题：{resp['message']}")
-        if resp.get("message") == "用户未登录":
-            logger.warning("用户登录可能失效了，请重新运行此程序！")
-            return []
-    for i in resp["data"]["list"]:
-        if i.get("appCode") != "endfield":
-            continue
-        v.append(i.get("bindingList")[0])
+        v.extend(i.get("bindingList") or [])
     return v
 
 
@@ -371,7 +348,7 @@ def log(account):
     r = resp.json()
     if r.get("status") != 0:
         raise Exception(f"获得token失败：{r['msg']}")
-    logger.info("森空岛登陆成功")
+    logger.debug("已获取森空岛登录令牌")
     return r["data"]["token"]
 
 
