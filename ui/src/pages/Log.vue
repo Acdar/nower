@@ -2556,7 +2556,7 @@ async function db_delete(keys) {
 }
 
 .task-operator-button:focus-visible {
-  outline: 2px solid var(--mower-primary, #18a058);
+  outline: 2px solid var(--mower-primary, #4e648e);
   outline-offset: 2px;
 }
 
@@ -3344,7 +3344,7 @@ html[data-window-shell-theme='dark'] .view-options-anchor::before {
   --lg-surface-bottom: rgba(237, 241, 247, 0.94);
   --lg-action-surface: #edf1f7;
   --lg-line-base: #fafbfd;
-  --lg-primary: #2e7d5b;
+  --lg-primary: #4e648e;
   --lg-error: #c93850;
   --lg-warning: #c47222;
   --lg-info: #4c73a8;
@@ -3365,7 +3365,7 @@ html[data-window-shell-theme='dark'] .view-options-anchor::before {
     color-mix(in srgb, var(--lg-primary) 4%, var(--lg-surface-bottom))
   );
   --lg-btn-primary-line: color-mix(in srgb, var(--lg-primary) 26%, var(--lg-line-base));
-  --lg-btn-primary-label: #216346;
+  --lg-btn-primary-label: #3e4656;
   --lg-btn-error-line: color-mix(in srgb, var(--lg-error) 26%, var(--lg-line-base));
   --lg-btn-error-label: #a8283e;
   --lg-btn-warning-bg: linear-gradient(
@@ -3386,7 +3386,7 @@ html[data-window-shell-theme='dark'] .home-container {
   --lg-surface-bottom: rgba(54, 59, 76, 0.94);
   --lg-action-surface: #363b4c;
   --lg-line-base: #363b4c;
-  --lg-primary: #a3be8c;
+  --lg-primary: #88c0d0;
   --lg-error: #e28c96;
   --lg-warning: #ebcb8b;
   --lg-info: #88c0d0;
@@ -3399,7 +3399,7 @@ html[data-window-shell-theme='dark'] .home-container {
   );
   --lg-btn-neutral-line: rgba(216, 222, 233, 0.14);
   --lg-btn-neutral-label: #eceff4;
-  --lg-btn-primary-label: #a3be8c;
+  --lg-btn-primary-label: #88c0d0;
   --lg-btn-error-label: #e28c96;
   --lg-btn-warning-label: #ebcb8b;
   --lg-btn-info-label: #88c0d0;

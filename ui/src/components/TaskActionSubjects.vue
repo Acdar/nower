@@ -285,11 +285,11 @@ onBeforeUnmount(close)
     background-color 90ms ease-out;
 }
 .task-action-subjects__trigger:focus-visible {
-  outline: 2px solid var(--lg-primary, #13834a);
+  outline: 2px solid var(--lg-primary, #4e648e);
   outline-offset: 3px;
 }
 .task-action-subjects__group {
-  color: var(--log-room-ink, var(--lg-primary, #13834a));
+  color: var(--log-room-ink, var(--lg-primary, #4e648e));
   font-weight: 600;
   vertical-align: baseline;
 }

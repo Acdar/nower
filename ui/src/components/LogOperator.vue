@@ -68,7 +68,6 @@ function imageFailed(event) {
 <style scoped>
 .log-operator {
   display: inline;
-  color: inherit;
   font: inherit;
   white-space: nowrap;
   user-select: text;

@@ -1586,7 +1586,7 @@ function lineClasses(row) {
   --log-detail-toggle-gap: 5px;
   --log-muted-ink: #6c768a;
   --log-detail-ink: #5a6478;
-  --log-time-ink: #4e648e;
+  --log-time-ink: #45689c;
   --log-room-ink: #2e7d5b;
   --log-operator-ink: #c93850;
   --log-warning-ink: #c47222;
@@ -2180,7 +2180,7 @@ function lineClasses(row) {
 .log-stamp {
   display: inline-block;
   width: var(--log-gutter);
-  color: var(--log-muted-ink);
+  color: var(--log-time-ink);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   text-indent: 0;
@@ -2532,6 +2532,7 @@ html[data-window-shell-theme='dark'] .log-output {
 }
 
 :is(
+  .log-stamp,
   .log-time,
   .log-token--room,
   .log-token--operator,
