@@ -969,16 +969,24 @@ watch(
 
 // 深色背景上的浅色立绘更显眼，透明度略低于浅色主题，避免干扰日志文字。
 const bg_opacity = computed(() => {
-  const opacity = theme.value == 'light' ? 0.28 : 0.38
+  const opacity = theme.value == 'light' ? 0.3 : 0.36
   return mobile.value ? opacity * 0.6 : opacity
 })
 
+// 锚定浅色与深色默认立绘中骑士头部的纵向位置，消除不同窗口宽高比下的高低偏移。
+const bg_position = computed(() => {
+  return theme.value == 'light' ? '50% 41.4%' : '50% 35.4%'
+})
+
 const bg_transform = computed(() => {
-  return theme.value == 'light' ? 'scale(1.45)' : 'scale(1.35)'
+  return theme.value == 'light' ? 'scale(1.48)' : 'scale(1.38)'
 })
 
 const bg_origin = computed(() => {
-  return theme.value == 'light' ? '0% 60%' : '0% 26%'
+  if (rail_mode.value) {
+    return theme.value == 'light' ? '46.5% 67.2%' : '55.6% 52.1%'
+  }
+  return theme.value == 'light' ? '9% 67.2%' : '8.2% 52.1%'
 })
 
 function stop_maa() {
@@ -2947,44 +2955,117 @@ html[data-window-shell-theme='dark'] .view-options-anchor::before {
   position: absolute;
   inset: 0;
   z-index: 0;
+  overflow: hidden;
   opacity: v-bind(bg_opacity);
   background-repeat: no-repeat;
-  background-size: cover;
-  background-position: center;
-  transform: v-bind(bg_transform);
-  transform-origin: v-bind(bg_origin);
-  -webkit-mask-image: linear-gradient(
-    to right,
-    rgb(0 0 0 / 60%) 0%,
-    rgb(0 0 0 / 60%) 30%,
-    rgb(0 0 0 / 100%) 100%
-  );
-  mask-image: linear-gradient(
-    to right,
-    rgb(0 0 0 / 60%) 0%,
-    rgb(0 0 0 / 60%) 30%,
-    rgb(0 0 0 / 100%) 100%
-  );
+  background-size: 0 0;
+  -webkit-mask-image:
+    linear-gradient(
+      to right,
+      rgb(0 0 0 / 42%) 0%,
+      rgb(0 0 0 / 64%) 25%,
+      rgb(0 0 0 / 96%) 48%,
+      rgb(0 0 0 / 100%) 82%,
+      rgb(0 0 0 / 88%) 100%
+    ),
+    linear-gradient(
+      to bottom,
+      rgb(0 0 0 / 82%) 0%,
+      rgb(0 0 0 / 100%) 6%,
+      rgb(0 0 0 / 100%) 80%,
+      rgb(0 0 0 / 55%) 94%,
+      rgb(0 0 0 / 15%) 100%
+    );
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(
+      to right,
+      rgb(0 0 0 / 42%) 0%,
+      rgb(0 0 0 / 64%) 25%,
+      rgb(0 0 0 / 96%) 48%,
+      rgb(0 0 0 / 100%) 82%,
+      rgb(0 0 0 / 88%) 100%
+    ),
+    linear-gradient(
+      to bottom,
+      rgb(0 0 0 / 82%) 0%,
+      rgb(0 0 0 / 100%) 6%,
+      rgb(0 0 0 / 100%) 80%,
+      rgb(0 0 0 / 55%) 94%,
+      rgb(0 0 0 / 15%) 100%
+    );
+  mask-composite: intersect;
   pointer-events: none;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: inherit;
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: v-bind(bg_position);
+    transform: v-bind(bg_transform);
+    transform-origin: v-bind(bg_origin);
+  }
 }
 
 .home-container--mobile .log-bg {
   inset: auto 0 64px;
   height: 62%;
-  background-size: contain;
-  background-position: center bottom;
-  transform: none;
   opacity: v-bind(bg_opacity);
   -webkit-mask-image: none;
   mask-image: none;
+
+  &::before {
+    background-size: contain;
+    background-position: center bottom;
+    transform: none;
+  }
 }
 
-/* 右栏布局时立绘只铺在左侧日志区，向截图和任务列表一侧渐隐。 */
+/* 右栏布局时立绘在左侧日志区舒展放大，向右侧截图和任务列表柔和渐隐。 */
 .home-container--rail .log-bg {
-  width: 74%;
-  background-position: 50% 50%;
-  -webkit-mask-image: linear-gradient(90deg, #000 58%, transparent);
-  mask-image: linear-gradient(90deg, #000 58%, transparent);
+  -webkit-mask-image:
+    linear-gradient(
+      90deg,
+      rgb(0 0 0 / 42%) 0%,
+      rgb(0 0 0 / 64%) 20%,
+      rgb(0 0 0 / 96%) 36%,
+      rgb(0 0 0 / 100%) 54%,
+      rgb(0 0 0 / 62%) 65%,
+      rgb(0 0 0 / 20%) 75%,
+      transparent 85%
+    ),
+    linear-gradient(
+      to bottom,
+      rgb(0 0 0 / 82%) 0%,
+      rgb(0 0 0 / 100%) 6%,
+      rgb(0 0 0 / 100%) 80%,
+      rgb(0 0 0 / 55%) 94%,
+      rgb(0 0 0 / 15%) 100%
+    );
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(
+      90deg,
+      rgb(0 0 0 / 42%) 0%,
+      rgb(0 0 0 / 64%) 20%,
+      rgb(0 0 0 / 96%) 36%,
+      rgb(0 0 0 / 100%) 54%,
+      rgb(0 0 0 / 62%) 65%,
+      rgb(0 0 0 / 20%) 75%,
+      transparent 85%
+    ),
+    linear-gradient(
+      to bottom,
+      rgb(0 0 0 / 82%) 0%,
+      rgb(0 0 0 / 100%) 6%,
+      rgb(0 0 0 / 100%) 80%,
+      rgb(0 0 0 / 55%) 94%,
+      rgb(0 0 0 / 15%) 100%
+    );
+  mask-composite: intersect;
 }
 
 .db-admin-body {
@@ -3062,72 +3143,72 @@ html[data-window-shell-theme='dark'] .view-options-anchor::before {
 }
 
 .home-container {
-  --lg-focus: #18a058;
-  --lg-surface-top: rgba(255, 255, 255, 0.96);
-  --lg-surface-bottom: rgba(249, 250, 252, 0.94);
-  --lg-action-surface: #fafbfc;
-  --lg-line-base: #ffffff;
-  --lg-primary: #18a058;
-  --lg-error: #d03050;
-  --lg-warning: #f0a020;
-  --lg-info: #2080f0;
+  --lg-focus: #4e648e;
+  --lg-surface-top: rgba(250, 251, 253, 0.96);
+  --lg-surface-bottom: rgba(237, 241, 247, 0.94);
+  --lg-action-surface: #edf1f7;
+  --lg-line-base: #fafbfd;
+  --lg-primary: #2e7d5b;
+  --lg-error: #c93850;
+  --lg-warning: #c47222;
+  --lg-info: #4c73a8;
   --lg-btn-shadow:
-    inset 0 0.5px 0 rgba(255, 255, 255, 0.55), 0 4px 12px -8px rgba(24, 25, 28, 0.24);
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.78), 0 4px 12px -8px rgba(42, 48, 60, 0.22);
   --lg-btn-sheen: linear-gradient(
     115deg,
     rgba(255, 255, 255, 0) 30%,
-    rgba(255, 255, 255, 0.08) 47%,
+    rgba(255, 255, 255, 0.14) 47%,
     rgba(255, 255, 255, 0) 66%
   );
   --lg-btn-neutral-bg: linear-gradient(145deg, var(--lg-surface-top), var(--lg-surface-bottom));
-  --lg-btn-neutral-line: rgba(24, 25, 28, 0.08);
-  --lg-btn-neutral-label: #1b1c20;
+  --lg-btn-neutral-line: rgba(108, 118, 138, 0.18);
+  --lg-btn-neutral-label: #2a303c;
   --lg-btn-primary-bg: linear-gradient(
     145deg,
-    color-mix(in srgb, var(--lg-primary) 6%, var(--lg-surface-top)),
-    color-mix(in srgb, var(--lg-primary) 3%, var(--lg-surface-bottom))
+    color-mix(in srgb, var(--lg-primary) 8%, var(--lg-surface-top)),
+    color-mix(in srgb, var(--lg-primary) 4%, var(--lg-surface-bottom))
   );
-  --lg-btn-primary-line: color-mix(in srgb, var(--lg-primary) 22%, var(--lg-line-base));
-  --lg-btn-primary-label: #0e7140;
-  --lg-btn-error-line: color-mix(in srgb, var(--lg-error) 22%, var(--lg-line-base));
-  --lg-btn-error-label: #a5203e;
+  --lg-btn-primary-line: color-mix(in srgb, var(--lg-primary) 26%, var(--lg-line-base));
+  --lg-btn-primary-label: #216346;
+  --lg-btn-error-line: color-mix(in srgb, var(--lg-error) 26%, var(--lg-line-base));
+  --lg-btn-error-label: #a8283e;
   --lg-btn-warning-bg: linear-gradient(
     145deg,
-    color-mix(in srgb, var(--lg-warning) 6%, var(--lg-surface-top)),
-    color-mix(in srgb, var(--lg-warning) 3%, var(--lg-surface-bottom))
+    color-mix(in srgb, var(--lg-warning) 8%, var(--lg-surface-top)),
+    color-mix(in srgb, var(--lg-warning) 4%, var(--lg-surface-bottom))
   );
-  --lg-btn-warning-line: color-mix(in srgb, var(--lg-warning) 22%, var(--lg-line-base));
-  --lg-btn-warning-label: #8c5800;
-  --lg-btn-info-line: color-mix(in srgb, var(--lg-info) 22%, var(--lg-line-base));
-  --lg-btn-info-label: #135f9e;
+  --lg-btn-warning-line: color-mix(in srgb, var(--lg-warning) 26%, var(--lg-line-base));
+  --lg-btn-warning-label: #9c5612;
+  --lg-btn-info-line: color-mix(in srgb, var(--lg-info) 26%, var(--lg-line-base));
+  --lg-btn-info-label: #3a5d8c;
 }
 
 html[data-mower-theme='dark'] .home-container,
 html[data-window-shell-theme='dark'] .home-container {
-  --lg-focus: #7fe0b0;
-  --lg-surface-top: rgba(38, 40, 46, 0.96);
-  --lg-surface-bottom: rgba(29, 31, 36, 0.94);
-  --lg-action-surface: #24262c;
-  --lg-line-base: #24262c;
-  --lg-primary: #7fe0b0;
-  --lg-error: #ffb3c2;
-  --lg-warning: #f8d794;
-  --lg-info: #b3def7;
-  --lg-btn-shadow: inset 0 0.5px 0 rgba(244, 240, 229, 0.08), 0 4px 12px -8px rgba(0, 0, 0, 0.45);
+  --lg-focus: #88c0d0;
+  --lg-surface-top: rgba(64, 70, 89, 0.96);
+  --lg-surface-bottom: rgba(54, 59, 76, 0.94);
+  --lg-action-surface: #363b4c;
+  --lg-line-base: #363b4c;
+  --lg-primary: #a3be8c;
+  --lg-error: #e28c96;
+  --lg-warning: #ebcb8b;
+  --lg-info: #88c0d0;
+  --lg-btn-shadow: inset 0 0.5px 0 rgba(236, 239, 244, 0.08), 0 4px 12px -8px rgba(18, 20, 28, 0.5);
   --lg-btn-sheen: linear-gradient(
     115deg,
-    rgba(244, 240, 229, 0) 30%,
-    rgba(244, 240, 229, 0.04) 47%,
-    rgba(244, 240, 229, 0) 66%
+    rgba(236, 239, 244, 0) 30%,
+    rgba(236, 239, 244, 0.05) 47%,
+    rgba(236, 239, 244, 0) 66%
   );
-  --lg-btn-neutral-line: rgba(244, 240, 229, 0.1);
-  --lg-btn-neutral-label: #f4f0e5;
-  --lg-btn-primary-label: #7fe0b0;
-  --lg-btn-error-label: #ffb3c2;
-  --lg-btn-warning-label: #f8d794;
-  --lg-btn-info-label: #b3def7;
-  --log-rule: rgb(244 240 229 / 12%);
-  --log-shot-shadow: 0 12px 30px -14px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(244, 240, 229, 0.06);
+  --lg-btn-neutral-line: rgba(216, 222, 233, 0.14);
+  --lg-btn-neutral-label: #eceff4;
+  --lg-btn-primary-label: #a3be8c;
+  --lg-btn-error-label: #e28c96;
+  --lg-btn-warning-label: #ebcb8b;
+  --lg-btn-info-label: #88c0d0;
+  --log-rule: rgb(216 222 233 / 12%);
+  --log-shot-shadow: 0 12px 30px -14px rgba(18, 20, 28, 0.7), 0 0 0 1px rgba(216, 222, 233, 0.08);
 }
 
 .execution-control :deep(.n-button),
@@ -3446,22 +3527,22 @@ html:active-view-transition-type(mower-log)::view-transition-new(mower-log-actio
 }
 
 .hljs-date {
-  color: #f0a020 !important;
+  color: #c87d46 !important;
   font-weight: bold;
 }
 
 .hljs-time {
-  color: #2080f0 !important;
+  color: #5e81ac !important;
   font-weight: bold;
 }
 
 .hljs-room {
-  color: #18a058 !important;
+  color: #4c8062 !important;
   font-weight: bold;
 }
 
 .hljs-operator {
-  color: #d03050 !important;
+  color: #bf616a !important;
 }
 
 .hljs-info {
@@ -3469,12 +3550,12 @@ html:active-view-transition-type(mower-log)::view-transition-new(mower-log-actio
 }
 
 .hljs-warning {
-  color: #f0a020 !important;
+  color: #c87d46 !important;
   font-weight: bold;
 }
 
 .hljs-error {
-  color: #d03050 !important;
+  color: #bf616a !important;
   font-weight: bold;
 }
 

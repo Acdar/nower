@@ -86,21 +86,21 @@ const themes = [
     lightTheme,
     mowerLightThemeOverrides,
     mowerLightCssVariables,
-    { color: 'rgba(0, 0, 0, 0.85)', textColor: '#ffffff' }
+    { color: 'rgba(42, 48, 60, 0.92)', textColor: '#f5f7fb' }
   ],
   [
     'dark',
     darkTheme,
     mowerDarkThemeOverrides,
     mowerDarkCssVariables,
-    { color: 'rgb(72, 72, 78)', textColor: 'rgba(255, 255, 255, 0.9)' }
+    { color: '#4a5268', textColor: '#eceff4' }
   ]
 ]
 
 describe.each(themes)('Mower %s theme', (_mode, naiveTheme, mowerTheme, cssVariables, tooltip) => {
-  it('keeps the Naive UI palette and font defaults', () => {
+  it('defines a complete Nord palette while keeping Naive UI font defaults', () => {
     for (const token of nativeCommonTokens) {
-      expect(mowerTheme.common[token]).toBe(naiveTheme.common[token])
+      expect(mowerTheme.common[token], `common.${token}`).toEqual(expect.any(String))
     }
     expect(mowerTheme.common).not.toHaveProperty('fontFamily')
     expect(mowerTheme.common).not.toHaveProperty('fontFamilyMono')
@@ -158,8 +158,8 @@ describe.each(themes)('Mower %s theme', (_mode, naiveTheme, mowerTheme, cssVaria
 
   it('derives custom-page semantic colors from the same theme source', () => {
     expect(cssVariables).toMatchObject({
-      '--mower-text': naiveTheme.common.textColorBase,
-      '--mower-text-muted': naiveTheme.common.textColor3,
+      '--mower-text': mowerTheme.common.textColorBase,
+      '--mower-text-muted': mowerTheme.common.textColor3,
       '--mower-surface': mowerTheme.common.cardColor,
       '--mower-shadow-surface': 'none',
       '--mower-shadow-control': 'none',

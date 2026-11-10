@@ -1121,13 +1121,13 @@ body {
 }
 
 .provider--window-shell {
-  --window-shell-frame-surface: #faf9f7;
-  --window-shell-content-surface: #fff;
-  --window-shell-content-shadow-left: rgba(63, 55, 47, 0.13);
-  --window-shell-content-shadow-top: rgba(63, 55, 47, 0.07);
-  --window-shell-content-shadow-corner: rgba(63, 55, 47, 0.09);
-  --window-shell-scrollbar-thumb: rgba(46, 43, 40, 0.2);
-  --window-shell-scrollbar-thumb-hover: rgba(46, 43, 40, 0.34);
+  --window-shell-frame-surface: #eaeff6;
+  --window-shell-content-surface: #f5f7fb;
+  --window-shell-content-shadow-left: rgba(42, 48, 60, 0.11);
+  --window-shell-content-shadow-top: rgba(42, 48, 60, 0.06);
+  --window-shell-content-shadow-corner: rgba(42, 48, 60, 0.08);
+  --window-shell-scrollbar-thumb: rgba(108, 118, 138, 0.24);
+  --window-shell-scrollbar-thumb-hover: rgba(108, 118, 138, 0.38);
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -1136,13 +1136,13 @@ body {
 }
 
 html[data-window-shell-theme='dark'] .provider--window-shell {
-  --window-shell-frame-surface: #18181c;
-  --window-shell-content-surface: #101014;
-  --window-shell-content-shadow-left: rgba(0, 0, 0, 0.34);
-  --window-shell-content-shadow-top: rgba(0, 0, 0, 0.2);
-  --window-shell-content-shadow-corner: rgba(0, 0, 0, 0.26);
-  --window-shell-scrollbar-thumb: rgba(255, 255, 255, 0.18);
-  --window-shell-scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
+  --window-shell-frame-surface: #252834;
+  --window-shell-content-surface: #2b2e3b;
+  --window-shell-content-shadow-left: rgba(18, 20, 28, 0.36);
+  --window-shell-content-shadow-top: rgba(18, 20, 28, 0.22);
+  --window-shell-content-shadow-corner: rgba(18, 20, 28, 0.28);
+  --window-shell-scrollbar-thumb: rgba(216, 222, 233, 0.2);
+  --window-shell-scrollbar-thumb-hover: rgba(216, 222, 233, 0.34);
   background: var(--window-shell-frame-surface);
 }
 
@@ -1209,59 +1209,59 @@ html[data-window-shell-theme='dark'] .provider--window-shell {
 .n-input {
   --n-height: 36px !important;
   --n-border-radius: 8px !important;
-  --n-border: 1px solid #e4e4e7 !important;
-  --n-border-hover: 1px solid #36ad6a !important;
-  --n-border-focus: 1px solid #18a058 !important;
+  --n-border: 1px solid #d8dfea !important;
+  --n-border-hover: 1px solid #5c6f94 !important;
+  --n-border-focus: 1px solid #3e4656 !important;
   --n-color: #ffffff !important;
   --n-color-hover: #ffffff !important;
   --n-color-focus: #ffffff !important;
   --n-padding-left: 12px !important;
   --n-padding-right: 12px !important;
   --n-padding-vertical: 0 !important;
-  --n-text-color: #09090b !important;
-  --n-placeholder-color: #71717a !important;
-  --n-box-shadow-focus: 0 0 0 2px rgba(24, 160, 88, 0.2) !important;
+  --n-text-color: #2a303c !important;
+  --n-placeholder-color: #7b8598 !important;
+  --n-box-shadow-focus: 0 0 0 2px rgba(78, 100, 142, 0.22) !important;
 }
 html[data-mower-theme='dark'] .n-input {
-  --n-border: 1px solid #27272a !important;
-  --n-border-hover: 1px solid #7fe7c4 !important;
-  --n-border-focus: 1px solid #63e2b7 !important;
-  --n-color: #101014 !important;
-  --n-color-hover: #101014 !important;
-  --n-color-focus: #101014 !important;
-  --n-text-color: #fafafa !important;
-  --n-placeholder-color: #71717a !important;
-  --n-box-shadow-focus: 0 0 0 2px rgba(99, 226, 183, 0.25) !important;
+  --n-border: 1px solid #4a5268 !important;
+  --n-border-hover: 1px solid #8fbcbb !important;
+  --n-border-focus: 1px solid #88c0d0 !important;
+  --n-color: #2b2e3b !important;
+  --n-color-hover: #2b2e3b !important;
+  --n-color-focus: #2b2e3b !important;
+  --n-text-color: #eceff4 !important;
+  --n-placeholder-color: #828ca3 !important;
+  --n-box-shadow-focus: 0 0 0 2px rgba(136, 192, 208, 0.25) !important;
 }
 
 /* 下拉选择框（n-select）的触发器沿用输入框外观。 */
 .n-base-selection {
   --n-height: 36px !important;
   --n-border-radius: 8px !important;
-  --n-border: 1px solid #e4e4e7 !important;
-  --n-border-hover: 1px solid #36ad6a !important;
-  --n-border-focus: 1px solid #18a058 !important;
-  --n-border-active: 1px solid #18a058 !important;
+  --n-border: 1px solid #d8dfea !important;
+  --n-border-hover: 1px solid #5c6f94 !important;
+  --n-border-focus: 1px solid #3e4656 !important;
+  --n-border-active: 1px solid #3e4656 !important;
   --n-color: #ffffff !important;
   --n-color-active: #ffffff !important;
-  --n-box-shadow-focus: 0 0 0 2px rgba(24, 160, 88, 0.2) !important;
-  --n-box-shadow-active: 0 0 0 2px rgba(24, 160, 88, 0.2) !important;
-  --n-text-color: #09090b !important;
-  --n-placeholder-color: #71717a !important;
+  --n-box-shadow-focus: 0 0 0 2px rgba(78, 100, 142, 0.22) !important;
+  --n-box-shadow-active: 0 0 0 2px rgba(78, 100, 142, 0.22) !important;
+  --n-text-color: #2a303c !important;
+  --n-placeholder-color: #7b8598 !important;
   --n-padding-single: 0 12px !important;
   --n-font-size: 14px !important;
 }
 html[data-mower-theme='dark'] .n-base-selection {
-  --n-border: 1px solid #27272a !important;
-  --n-border-hover: 1px solid #7fe7c4 !important;
-  --n-border-focus: 1px solid #63e2b7 !important;
-  --n-border-active: 1px solid #63e2b7 !important;
-  --n-color: #101014 !important;
-  --n-color-active: #101014 !important;
-  --n-text-color: #fafafa !important;
-  --n-placeholder-color: #71717a !important;
-  --n-box-shadow-focus: 0 0 0 2px rgba(99, 226, 183, 0.25) !important;
-  --n-box-shadow-active: 0 0 0 2px rgba(99, 226, 183, 0.25) !important;
+  --n-border: 1px solid #4a5268 !important;
+  --n-border-hover: 1px solid #8fbcbb !important;
+  --n-border-focus: 1px solid #88c0d0 !important;
+  --n-border-active: 1px solid #88c0d0 !important;
+  --n-color: #2b2e3b !important;
+  --n-color-active: #2b2e3b !important;
+  --n-text-color: #eceff4 !important;
+  --n-placeholder-color: #828ca3 !important;
+  --n-box-shadow-focus: 0 0 0 2px rgba(136, 192, 208, 0.25) !important;
+  --n-box-shadow-active: 0 0 0 2px rgba(136, 192, 208, 0.25) !important;
 }
 
 /* 提升处于聚焦/激活状态输入框的层叠层级，避免被相邻单元格、边框或相邻按钮遮挡 */

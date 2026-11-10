@@ -220,13 +220,13 @@ onBeforeUnmount(stopWatchingDrag)
 
 <style scoped>
 .window-titlebar {
-  --window-titlebar-text: #302e2c;
-  --window-titlebar-muted: #817d78;
-  --window-titlebar-control: #242220;
-  --window-titlebar-hover: rgba(40, 37, 35, 0.07);
-  --window-titlebar-pressed: rgba(40, 37, 35, 0.12);
-  --window-titlebar-divider: rgba(40, 37, 35, 0.1);
-  --window-titlebar-focus: #18a058;
+  --window-titlebar-text: #2a303c;
+  --window-titlebar-muted: #6c768a;
+  --window-titlebar-control: #2a303c;
+  --window-titlebar-hover: rgba(42, 48, 60, 0.07);
+  --window-titlebar-pressed: rgba(42, 48, 60, 0.12);
+  --window-titlebar-divider: rgba(42, 48, 60, 0.1);
+  --window-titlebar-focus: #4e648e;
   display: flex;
   flex: 0 0 36px;
   align-items: flex-start;
@@ -249,13 +249,13 @@ onBeforeUnmount(stopWatchingDrag)
 }
 
 .window-titlebar--dark {
-  --window-titlebar-text: rgba(255, 255, 255, 0.88);
-  --window-titlebar-muted: rgba(255, 255, 255, 0.52);
-  --window-titlebar-control: rgba(255, 255, 255, 0.9);
-  --window-titlebar-hover: rgba(255, 255, 255, 0.08);
-  --window-titlebar-pressed: rgba(255, 255, 255, 0.13);
-  --window-titlebar-divider: rgba(255, 255, 255, 0.12);
-  --window-titlebar-focus: #63c38a;
+  --window-titlebar-text: rgba(236, 239, 244, 0.9);
+  --window-titlebar-muted: rgba(216, 222, 233, 0.56);
+  --window-titlebar-control: rgba(236, 239, 244, 0.92);
+  --window-titlebar-hover: rgba(236, 239, 244, 0.08);
+  --window-titlebar-pressed: rgba(236, 239, 244, 0.13);
+  --window-titlebar-divider: rgba(216, 222, 233, 0.12);
+  --window-titlebar-focus: #88c0d0;
 }
 
 .window-titlebar__drag-region {

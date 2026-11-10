@@ -1519,24 +1519,30 @@ function lineClasses(row) {
   --log-scroll-padding: 12px;
   --log-detail-toggle-width: 18px;
   --log-detail-toggle-gap: 5px;
-  --log-muted-ink: #8a9099;
-  --log-detail-ink: #7d838c;
-  --log-time-ink: #2f7fd8;
-  --log-room-ink: #13834a;
-  --log-operator-ink: #c43c5a;
-  --log-warning-ink: #b96f00;
-  --log-error-ink: #cc2f4e;
-  --log-warning-tint: rgb(240 160 32 / 12%);
-  --log-error-tint: rgb(208 48 80 / 11%);
-  --log-hover-tint: rgb(128 128 128 / 7%);
-  --log-ink: var(--mower-text, #333639);
-  --log-sheen-opacity: 0.22;
+  --log-muted-ink: #6c768a;
+  --log-detail-ink: #5a6478;
+  --log-time-ink: #4e648e;
+  --log-room-ink: #2e7d5b;
+  --log-operator-ink: #c93850;
+  --log-warning-ink: #c47222;
+  --log-error-ink: #c93850;
+  --log-warning-tint: rgb(196 114 34 / 13%);
+  --log-error-tint: rgb(201 56 80 / 12%);
+  --log-hover-tint: rgb(108 118 138 / 7%);
+  --log-ink: var(--mower-text, #2a303c);
+  --log-text-glow:
+    0 0 6px rgb(255 255 255 / 98%), 0 0 12px rgb(245 248 255 / 72%);
+  --log-accent-glow:
+    0 0 5px rgb(255 255 255 / 98%),
+    0 0 11px color-mix(in srgb, currentColor 28%, rgb(255 255 255 / 92%));
+  --log-sheen-opacity: 0.85;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
   overflow: hidden;
   color: var(--log-ink);
+  text-shadow: var(--log-text-glow);
 }
 
 .log-output--compact {
@@ -2344,24 +2350,41 @@ function lineClasses(row) {
   font-style: italic;
 }
 
-/* 深色主题的正文用暖白而非纯白，长时间阅读不刺眼。 */
+/* 深色主题采用与 bg_dark 对应的 Nord Polar Night 与 Frost / Aurora 色板，保留极光微光。 */
 html[data-mower-theme='dark'] .log-output,
 html[data-window-shell-theme='dark'] .log-output {
-  --log-ink: #e5e1d6;
+  --log-ink: #eceff4;
+  --log-text-glow:
+    0 0 6px rgb(36 40 52 / 92%), 0 0 12px rgb(216 222 233 / 18%);
+  --log-accent-glow:
+    0 0 6px rgb(36 40 52 / 92%),
+    0 0 11px color-mix(in srgb, currentColor 38%, transparent);
   --log-sheen-opacity: 0.96;
-  --log-muted-ink: #868d97;
-  --log-detail-ink: #959ca6;
-  --log-time-ink: #7cb8f2;
-  --log-room-ink: #74d3a3;
-  --log-operator-ink: #f598ae;
-  --log-recruit-one-ink: #abc5d7;
-  --log-recruit-four-ink: #c6a1e8;
-  --log-recruit-five-ink: #e5d36b;
-  --log-recruit-six-ink: #f1b35f;
-  --log-warning-ink: #f1bd5d;
-  --log-error-ink: #ff8fa6;
-  --log-warning-tint: rgb(241 189 93 / 12%);
-  --log-error-tint: rgb(255 143 166 / 12%);
-  --log-hover-tint: rgb(255 255 255 / 5%);
+  --log-muted-ink: #949cb0;
+  --log-detail-ink: #a5aec2;
+  --log-time-ink: #88c0d0;
+  --log-room-ink: #a3be8c;
+  --log-operator-ink: #e28c96;
+  --log-recruit-one-ink: #8fbcbb;
+  --log-recruit-four-ink: #b48ead;
+  --log-recruit-five-ink: #ebcb8b;
+  --log-recruit-six-ink: #d08770;
+  --log-warning-ink: #ebcb8b;
+  --log-error-ink: #e07d87;
+  --log-warning-tint: rgb(235 203 139 / 12%);
+  --log-error-tint: rgb(191 97 106 / 14%);
+  --log-hover-tint: rgb(236 239 244 / 5%);
+}
+
+:is(
+  .log-time,
+  .log-token--room,
+  .log-token--operator,
+  .log-token--warning,
+  .log-token--error,
+  .log-token--critical,
+  [data-recruit-rarity]
+) {
+  text-shadow: var(--log-accent-glow);
 }
 </style>
