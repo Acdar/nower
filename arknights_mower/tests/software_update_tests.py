@@ -1854,6 +1854,7 @@ class ArchiveAndLauncherTests(unittest.TestCase):
                         exit_if_webview_backend_missing=Mock(),
                         close_child=Mock(),
                         start_http_server=Mock(),
+                        start_hud_local_server=Mock(),
                     )
                 )
                 stack.enter_context(
