@@ -1732,19 +1732,6 @@ function lineClasses(row) {
   user-select: none;
 }
 
-.log-sticky:not(.log-sticky--alternate)::before {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  inset-inline: 0;
-  inset-block-end: 0;
-  height: 12px;
-  background: color-mix(in srgb, var(--mower-surface) 55%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  mask-image: linear-gradient(transparent, #000 40%, transparent);
-}
-
 .log-sticky__label {
   flex: none;
   max-width: 50%;
