@@ -128,6 +128,7 @@ from arknights_mower.utils.log import log_parent_context, logger
 from arknights_mower.utils.maa_callback import (
     REPORT_REQUEST,
     MaaCallbackLog,
+    blackflow_boss_stop_reached,
     parse_details,
 )
 from arknights_mower.utils.maa_report import upload_report
@@ -10825,6 +10826,7 @@ class BaseSchedulerSolver(
                         ):
                             continue
                     raise ValueError("原下班目标未完成，保留原任务并等待岗位释放")
+            # 回班预演附带的副表任务不能让原普通回班跳过恢复要求。
             if (
                 task.type == TaskTypes.SHIFT_ON
                 and not getattr(task, "initial_staffing", False)
@@ -10832,7 +10834,7 @@ class BaseSchedulerSolver(
                 and not getattr(task, "group_shift_expected", {})
                 and not getattr(task, "backup_shift_active", False)
                 and not getattr(task, "product_shift_locked", False)
-                and not explicit_slots
+                and not getattr(task, "backup_explicit_slots", ())
                 and not getattr(task, "exhaust_support", False)
                 and not getattr(task, "dorm_recovery_restore", ())
             ):
@@ -10920,7 +10922,9 @@ class BaseSchedulerSolver(
                             for queued in trial_solver.tasks
                         ]
                         return
+                    # 恢复完成前保留原回班意图，不提交预演中的副表安排。
                     task.time = max(task.time, deadline)
+                    return
             task.group_shift_transitions = {
                 group: resting
                 for group, resting in simulation.op_data.group_shift_state.items()
@@ -20131,13 +20135,19 @@ class BaseSchedulerSolver(
         return progress
 
     def _maa_blackflow_run(self, conf):
-        from arknights_mower.utils.maa_long_task import blackflow_start_run_key
+        from arknights_mower.utils.maa_long_task import (
+            blackflow_boss_run_key,
+            blackflow_preserved_run,
+            blackflow_start_run_key,
+        )
 
-        key = blackflow_start_run_key(conf)
-        progress = load_maa_blackflow_progress()
+        boss = blackflow_preserved_run(conf) == "boss"
+        key = (blackflow_boss_run_key if boss else blackflow_start_run_key)(conf)
+        progress = load_maa_blackflow_progress(boss=boss)
         if progress.get("key") != key:
             progress = {"key": key, "completed": False}
-            save_maa_blackflow_progress(progress)
+            save_maa_blackflow_progress(progress, boss=boss)
+        progress["kind"] = "boss" if boss else "opening"
         return progress
 
     def _record_maa_blackflow_callback(self, msg, details):
@@ -20148,13 +20158,22 @@ class BaseSchedulerSolver(
             or details["taskid"] != task[0]
             or details.get("taskchain") != "Roguelike"
             or msg != 20003
-            or details.get("what") != "BlackFlowStartRun"
         ):
             return
         inner = details.get("details")
-        if isinstance(inner, dict) and inner.get("status") == "completed":
+        if not isinstance(inner, dict):
+            return
+        boss = task[1].get("kind") == "boss"
+        if boss:
+            completed = blackflow_boss_stop_reached(details)
+        else:
+            completed = (
+                details.get("what") == "BlackFlowStartRun"
+                and inner.get("status") == "completed"
+            )
+        if completed:
             task[1]["completed"] = True
-            save_maa_blackflow_progress(task[1])
+            save_maa_blackflow_progress(task[1], boss=boss)
 
     def _maa_paradox_run(self, conf):
         from arknights_mower.utils.maa_copilot import queue_key
@@ -21096,14 +21115,16 @@ class BaseSchedulerSolver(
             except ValueError:
                 rg_sleep = False
             paradox = selected_long == "paradox"
+            from arknights_mower.utils.maa_long_task import blackflow_preserved_run
+
             if (
                 selected_long == "rogue"
                 and conf.maa_rg_theme == "BlackFlow"
-                and conf.rogue.mode == 30003
+                and blackflow_preserved_run(conf.rogue) is not None
                 and (manual or not rg_sleep)
             ):
                 blackflow_run = self._maa_blackflow_run(conf.rogue)
-                if blackflow_run["completed"]:
+                if blackflow_run.get("completed") is True:
                     selected_long = None
             if selected_long in ("copilot", "paradox") and (manual or not rg_sleep):
                 copilot_conf = conf.paradox if paradox else conf.copilot
@@ -21379,9 +21400,8 @@ class BaseSchedulerSolver(
                             if seed:
                                 rogue_params["start_with_seed"] = seed
                         if conf.maa_rg_theme == "BlackFlow":
-                            strategy = getattr(conf.rogue, "blackflow_strategy", "")
-                            if conf.rogue.mode == 0 and strategy:
-                                rogue_params["blackflow_strategy"] = strategy
+                            if conf.rogue.mode == 0:
+                                rogue_params["blackflow_strategy"] = "ending1"
                             if conf.rogue.mode == 30003:
                                 for key, default in (
                                     ("blackflow_start_animals", []),
@@ -21429,7 +21449,11 @@ class BaseSchedulerSolver(
                         if not large_task_start_allowed():
                             break
                         task_id = self.MAA.append_task("Roguelike", rogue_params)
-                        if blackflow_run is not None:
+                        if (
+                            blackflow_run is not None
+                            and type(task_id) is int
+                            and task_id > 0
+                        ):
                             self.maa_blackflow_task = (task_id, blackflow_run)
                     elif selected_long in ("copilot", "paradox"):
                         from arknights_mower.utils.maa_copilot import (

@@ -239,10 +239,11 @@ class LongTaskPart(ConfModel):
         start_with_seed: str = ""
         blackflow_strategy: Literal[
             "", "burn", "burn_with_investment", "ending1", "ending2", "ending3"
-        ] = ""
+        ] = "ending1"
         blackflow_fast_flight: bool = False
         blackflow_start_run_fast_flight: bool = False
         blackflow_start_run_id: str = Field(default="", max_length=128)
+        blackflow_boss_run_id: str = Field(default="", max_length=128)
         blackflow_start_animals: list[
             Literal[
                 "swaddled_cat",
@@ -299,7 +300,7 @@ class LongTaskPart(ConfModel):
         difficulty: int = -1
         "肉鸽难度（-1 = 不指定难度；2147483647 = 主题最高难度）"
         stop_at_final_boss: bool = False
-        "打到第 5 层险路恶敌节点前停止（Phantom 主题不适用）"
+        "第五层险路恶敌前停止；黑流树海停在编队页，尚未扣除此次移动的行动力"
         stop_at_max_level: bool = False
         "肉鸽等级刷满后停止"
         investment_enabled: bool = True
@@ -398,6 +399,30 @@ class LongTaskPart(ConfModel):
     "生息演算设置"
     rogue: RogueConf = Field(default_factory=RogueConf)
     "肉鸽设置"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_blackflow_strategy(cls, value):
+        if not isinstance(value, dict) or value.get("maa_rg_theme") != "BlackFlow":
+            return value
+        rogue = value.get("rogue")
+        if not isinstance(rogue, dict) or rogue.get("mode", 1) != 0:
+            return value
+        strategy = rogue.get("blackflow_strategy")
+        if not isinstance(strategy, str) or strategy not in (
+            "",
+            "burn",
+            "burn_with_investment",
+            "ending2",
+            "ending3",
+        ):
+            return value
+        rogue = dict(rogue, blackflow_strategy="ending1")
+        if strategy in ("burn", "burn_with_investment"):
+            rogue["blackflow_fast_flight"] = True
+            rogue["investment_enabled"] = strategy == "burn_with_investment"
+        return dict(value, rogue=rogue)
+
     sss: SSSConf = Field(default_factory=SSSConf)
     "保全设置"
     reclamation_algorithm: ReclamationAlgorithmConf = Field(
@@ -981,6 +1006,8 @@ class AIAgentPart(ConfModel):
     "自定义接口密钥"
     ai_base_url: str = ""
     "自定义 OpenAI 兼容接口地址"
+    ai_api_protocol: Literal["auto", "chat-completions", "responses"] = "auto"
+    "自定义模型 API 协议"
     ai_model: str = ""
     "自定义模型名称"
     ai_deepseek_model: str = "deepseek-flash"
