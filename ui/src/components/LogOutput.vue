@@ -218,24 +218,26 @@ watch(
     if (previous?.[0] && !running) {
       for (const id of retainedRecruitment) interruptedRecruitmentIds.add(id)
     }
-    if (!running) {
-      interruptedLifecycleKeys.value = timelineAnalysis.value.lifecycle.pendingKeys
-      interruptedRescueStarts.clear()
-      for (const key of interruptedLifecycleKeys.value) {
+    const retained = new Set(lines.map((line) => lifecycleKey(line.event)))
+    const nextInterrupted = new Set(
+      [...interruptedLifecycleKeys.value].filter(
+        (id) =>
+          retained.has(id) &&
+          (!interruptedRescueStarts.has(id) ||
+            rescueStartMarker(lines, id) === interruptedRescueStarts.get(id))
+      )
+    )
+    for (const key of [...interruptedRescueStarts.keys()]) {
+      if (!nextInterrupted.has(key)) interruptedRescueStarts.delete(key)
+    }
+    if (previous?.[0] && !running) {
+      for (const key of timelineAnalysis.value.lifecycle.pendingKeys) {
+        nextInterrupted.add(key)
         if (key.startsWith('["rescue-staffing",'))
           interruptedRescueStarts.set(key, rescueStartMarker(lines, key))
       }
-    } else {
-      const retained = new Set(lines.map((line) => lifecycleKey(line.event)))
-      interruptedLifecycleKeys.value = new Set(
-        [...interruptedLifecycleKeys.value].filter(
-          (id) =>
-            retained.has(id) &&
-            (!interruptedRescueStarts.has(id) ||
-              rescueStartMarker(lines, id) === interruptedRescueStarts.get(id))
-        )
-      )
     }
+    interruptedLifecycleKeys.value = nextInterrupted
   },
   { immediate: true, flush: 'sync' }
 )
@@ -773,7 +775,7 @@ function lineClasses(row) {
   >
     <slot name="header" />
     <div class="log-output__body">
-      <svg class="log-sheen-filter" width="0" height="0" aria-hidden="true" focusable="false">
+      <svg class="log-sheen-filter" aria-hidden="true" focusable="false">
         <defs>
           <filter
             v-for="sheen in sheenFilters"
@@ -845,11 +847,19 @@ function lineClasses(row) {
                   :in="`protected-${index}`"
                 />
               </feMerge>
-              <feFlood flood-color="white" style="flood-opacity: var(--log-sheen-protection)" />
+              <feFlood
+                flood-color="white"
+                flood-opacity="0.15"
+                style="flood-opacity: var(--log-sheen-protection)"
+              />
               <feComposite in2="protected-shape" operator="in" result="protected-mask" />
               <feComposite in="soft-band" in2="protected-mask" operator="out" result="muted-band" />
             </template>
-            <feFlood flood-color="white" style="flood-opacity: var(--log-sheen-opacity)" />
+            <feFlood
+              flood-color="white"
+              flood-opacity="0.85"
+              style="flood-opacity: var(--log-sheen-opacity)"
+            />
             <feComposite
               :in2="sheen.protectedRegions.length ? 'muted-band' : 'soft-band'"
               operator="in"
@@ -2299,6 +2309,7 @@ function lineClasses(row) {
   white-space: nowrap;
 }
 .log-lifecycle-text {
+  text-indent: 0;
   transition: color 180ms ease-out;
 }
 .log-lifecycle-active {
@@ -2306,10 +2317,13 @@ function lineClasses(row) {
 }
 .log-sheen-filter {
   position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
   pointer-events: none;
 }
 @media (prefers-reduced-motion: no-preference) {
-  .log-lifecycle-active {
+  .log-output:not(.log-output--compact) .log-lifecycle-active {
     filter: var(--log-sheen-filter, none);
   }
 }

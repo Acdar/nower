@@ -294,4 +294,19 @@ describe('running log sheen', () => {
     await flushFrames()
     expect(sheen.filters.value).toHaveLength(1)
   })
+
+  it('waits until filters are committed on nextTick before setting the CSS filter reference', async () => {
+    const sample = fixture()
+    sample.root.active = []
+    const sheen = await mount(sample.root)
+    sample.root.active = [sample.heading]
+    sheen.refresh()
+    const callbacks = [...frames.values()]
+    frames.clear()
+    for (const callback of callbacks) callback()
+    expect(sheen.filters.value).toHaveLength(1)
+    expect(sample.properties.has('--log-sheen-filter')).toBe(false)
+    await nextTick()
+    expect(sample.properties.get('--log-sheen-filter')).toBe(`url(#${sheen.filters.value[0].id})`)
+  })
 })

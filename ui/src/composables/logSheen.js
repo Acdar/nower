@@ -1,4 +1,4 @@
-import { onBeforeUnmount, onMounted, shallowRef, useId, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, shallowRef, useId, watch } from 'vue'
 
 const coloredTokenSelector = '.log-operator, .log-token--room, .log-token--item'
 
@@ -99,6 +99,7 @@ export function useLogSheen(root) {
         entries.delete(element)
       }
     }
+    const pendingStyles = []
     for (const element of active) {
       const geometry = measureSheen(element)
       if (!geometry?.lines.length) {
@@ -116,11 +117,20 @@ export function useLogSheen(root) {
         begin: `${beganAt}s`
       }
       entries.set(element, entry)
-      element.style.setProperty('--log-sheen-filter', `url(#${entry.id})`)
+      pendingStyles.push([element, entry])
     }
     const next = [...entries.values()]
     if (next.length !== filters.value.length || next.some((entry, i) => entry !== filters.value[i]))
       filters.value = next
+    if (pendingStyles.length) {
+      nextTick(() => {
+        if (stopped) return
+        for (const [element, entry] of pendingStyles) {
+          if (entries.get(element) === entry)
+            element.style.setProperty('--log-sheen-filter', `url(#${entry.id})`)
+        }
+      })
+    }
   }
 
   function refresh() {

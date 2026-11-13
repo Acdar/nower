@@ -1885,6 +1885,43 @@ describe('explicit grouped observations', () => {
     ])
   })
 
+  it('activates an in-progress arrangement when initial running status or live stream resolves', async () => {
+    const firstEvent = {
+      type: 'facility-arrangement',
+      id: 'initial-pending',
+      phase: 'started',
+      anchor: true,
+      room: 'room_1_1',
+      label: '贸易站 B101',
+      agents: ['但书', '龙舌兰'],
+      summary: '正在 贸易站 B101 安排 [[operator:但书]]、[[operator:龙舌兰]] 跑单'
+    }
+    const first = {
+      id: 912,
+      event: firstEvent,
+      text: '2026-11-13 23:16:54,730 INFO 正在 贸易站 B101 安排 [[operator:但书]]、[[operator:龙舌兰]] 跑单'
+    }
+    const page = mount({ running: false, lines: [first] })
+    const summaries = () => page.all().filter((entry) => hasClass(entry, 'log-arrangement'))
+    expect(visibleText(summaries()[0])).toBe('尚未确认但书、龙舌兰进驻贸易站 B101')
+    expect(hasClass(summaries()[0], 'log-arrangement--active')).toBe(false)
+    expect(hasClass(summaries()[0], 'log-lifecycle-active')).toBe(false)
+
+    page.props.running = true
+    await nextTick()
+    expect(visibleText(summaries()[0])).toBe('正在 贸易站 B101 安排 但书、龙舌兰 跑单')
+    expect(hasClass(summaries()[0], 'log-arrangement--active')).toBe(true)
+    expect(hasClass(summaries()[0], 'log-lifecycle-active')).toBe(true)
+
+    page.props.running = false
+    await nextTick()
+    page.props.running = true
+    await nextTick()
+    expect(visibleText(summaries()[0])).toBe('尚未确认但书、龙舌兰进驻贸易站 B101')
+    expect(hasClass(summaries()[0], 'log-arrangement--active')).toBe(false)
+    expect(hasClass(summaries()[0], 'log-lifecycle-active')).toBe(false)
+  })
+
   it('uses item icons and explicit increase or decrease styling for confirmed crafting changes', () => {
     const changes = [
       { name: '化合切削液', delta: -3 },
