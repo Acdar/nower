@@ -20,9 +20,11 @@ import {
 import { routeLocationKey, routerKey } from 'vue-router'
 
 import LogPage from './Log.vue'
+import LogDailyStatus from '@/components/LogDailyStatus.vue'
 import TaskConfiguration from '@/task-workflow/TaskConfiguration.vue'
 import { useLogBackgroundStore } from '@/stores/logBackground'
 import { useGuiStore } from '@/stores/gui'
+import { windowMinimizedKey } from '@/window-shell/context.js'
 
 const { descriptor } = parse(readFileSync(new URL('./Log.vue', import.meta.url), 'utf8'))
 const script = compileScript(descriptor, { id: 'task-dialog-loading-test' })
@@ -63,6 +65,7 @@ const state = vi.hoisted(() => ({
   router: null,
   mobile: null,
   chatPanelVisible: null,
+  windowMinimized: null,
   preview: null,
   previewOptions: null,
   realPreview: false,
@@ -84,6 +87,7 @@ vi.mock('vue', async (original) => ({
     if (key === routerKey) return state.router
     if (key === 'mobile') return state.mobile
     if (key === 'chat_panel_visible') return state.chatPanelVisible
+    if (key === windowMinimizedKey) return state.windowMinimized
     return ref(false)
   },
   onBeforeUnmount: vi.fn(),
@@ -172,7 +176,8 @@ describe('log page', () => {
     state.router = { push: vi.fn(), replace: vi.fn() }
     state.mobile = ref(false)
     state.chatPanelVisible = ref(false)
-    state.preview = { start: vi.fn(), stop: vi.fn() }
+    state.windowMinimized = ref(false)
+    state.preview = { start: vi.fn(), pause: vi.fn(), stop: vi.fn() }
     state.realPreview = false
     vi.stubGlobal('localStorage', { setItem: vi.fn(), getItem: vi.fn(() => null) })
     const documentTarget = Object.assign(new EventTarget(), {
@@ -240,6 +245,100 @@ describe('log page', () => {
   function callsTo(path) {
     return state.client.get.mock.calls.filter(([url]) => url.endsWith(path))
   }
+
+  it('pauses only screenshot requests while the desktop window is minimized', async () => {
+    state.realPreview = true
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 16
+        naturalHeight = 9
+        async decode() {}
+      }
+    )
+    const frame = new Blob(['frame'])
+    const pending = Promise.withResolvers()
+    const previewRequests = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 200, data: frame, headers: { etag: '"frame"' } })
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue({ status: 304, headers: {} })
+    state.client.get.mockImplementation(async (url, options) => {
+      if (url.endsWith('/screenshot/latest')) return previewRequests(options)
+      if (url.endsWith('/status')) return { data: { status: 'working', plan_condition: [] } }
+      return { data: url.endsWith('/task') ? [] : {} }
+    })
+
+    const component = await mountWithStore()
+    try {
+      const displayedUrl = component.sc_blob.value
+      expect(displayedUrl).toMatch(/^blob:/)
+      const snapshot = component.workspace.screenshot
+      expect(snapshot).toEqual({ blob: frame, etag: '"frame"', aspect: 16 / 9 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(previewRequests).toHaveBeenCalledTimes(2)
+      const request = previewRequests.mock.lastCall[0]
+
+      state.windowMinimized.value = true
+      await nextTick()
+      expect(document.hidden).toBe(false)
+      expect(request.signal.aborted).toBe(true)
+      pending.resolve({ status: 200, data: new Blob(['stale']), headers: { etag: '"stale"' } })
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(previewRequests).toHaveBeenCalledTimes(2)
+      expect(component.sc_blob.value).toBe(displayedUrl)
+      expect(component.workspace.screenshot).toBe(snapshot)
+      expect(callsTo('/task')).toHaveLength(2)
+      expect(callsTo('/status')).toHaveLength(2)
+
+      state.windowMinimized.value = false
+      await nextTick()
+      expect(previewRequests).toHaveBeenCalledTimes(3)
+      expect(previewRequests.mock.lastCall[0].headers).toEqual({ 'If-None-Match': '"frame"' })
+      state.windowMinimized.value = false
+      await vi.advanceTimersByTimeAsync(0)
+      expect(previewRequests).toHaveBeenCalledTimes(3)
+      expect(component.sc_blob.value).toBe(displayedUrl)
+      expect(callsTo('/task')).toHaveLength(2)
+      expect(callsTo('/status')).toHaveLength(2)
+    } finally {
+      onUnmounted.mock.lastCall[0]()
+    }
+  })
+
+  it('waits for browser visibility and the screenshot toggle after desktop restore', async () => {
+    state.realPreview = true
+    state.windowMinimized.value = true
+    state.client.get.mockImplementation(async (url) =>
+      url.endsWith('/screenshot/latest') ? { status: 204, headers: {} } : { data: {} }
+    )
+    const component = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+    onMounted.mock.lastCall[0]()
+
+    try {
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(callsTo('/screenshot/latest')).toHaveLength(0)
+
+      setHidden(true)
+      state.windowMinimized.value = false
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(callsTo('/screenshot/latest')).toHaveLength(0)
+
+      setHidden(false)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(callsTo('/screenshot/latest')).toHaveLength(1)
+
+      state.windowMinimized.value = true
+      await nextTick()
+      component.sc_preview.value = false
+      state.windowMinimized.value = false
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(callsTo('/screenshot/latest')).toHaveLength(1)
+      expect(localStorage.setItem).toHaveBeenCalledWith('sc_preview', 'false')
+    } finally {
+      onUnmounted.mock.lastCall[0]()
+    }
+  })
 
   it('pauses hidden-page requests and refreshes immediately when visible again', async () => {
     let status = 'working'
@@ -377,6 +476,9 @@ describe('log page', () => {
         props: {},
         children: [],
         parent: null,
+        get offsetWidth() {
+          return this.clientWidth
+        },
         scrollTop: 0,
         scrollIntoView: vi.fn(),
         style: { setProperty: vi.fn(), removeProperty: vi.fn() },
@@ -463,6 +565,15 @@ describe('log page', () => {
             slots.title?.(),
             props.showAlternateView ? slots.alternate?.() : slots.header?.()
           ])
+    })
+    const dailyStatusTemplate = parse(
+      readFileSync(new URL('../components/LogDailyStatus.vue', import.meta.url), 'utf8')
+    ).descriptor.template.content
+    app.component('LogDailyStatus', {
+      ...LogDailyStatus,
+      ssrRender: undefined,
+      render: compile(dailyStatusTemplate),
+      setup: (props, context) => ({ ...LogDailyStatus.setup(props, context) })
     })
     app.component('LogOperator', {
       props: ['name', 'showName'],
@@ -557,6 +668,107 @@ describe('log page', () => {
     expect(all().some((target) => target.props.class === 'log-resizer log-resizer-sc')).toBe(true)
   })
 
+  it('keeps the last decoded screenshot and layout through repeated invalid frames', async () => {
+    state.realPreview = true
+    const frames = ['A', 'B', 'C', 'D'].map((name) => ({
+      status: 200,
+      data: new Blob([name], { type: 'image/jpeg' }),
+      headers: { etag: `"${name}"` }
+    }))
+    const requests = vi.fn()
+    for (const frame of frames) requests.mockResolvedValueOnce(frame)
+    requests.mockResolvedValue({ status: 304, headers: {} })
+    state.client.get.mockImplementation(async (url, options) =>
+      url.endsWith('/screenshot/latest') ? requests(options) : { data: {} }
+    )
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 1600
+
+        async decode() {
+          if (this.src === 'blob:B' || this.src === 'blob:C') throw new Error('Invalid JPEG')
+          this.naturalHeight = this.src === 'blob:A' ? 900 : 1200
+        }
+      }
+    )
+    const createUrl = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockReturnValueOnce('blob:A')
+      .mockReturnValueOnce('blob:B')
+      .mockReturnValueOnce('blob:C')
+      .mockReturnValueOnce('blob:D')
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const { find, page, sizes } = mountWidePane()
+    const getScreenshot = () => find((target) => target.props.class === 'log-screenshot')
+    const getResizer = () => find((target) => target.props.class === 'log-resizer log-resizer-sc')
+    const released = []
+    const revokeUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation((url) => {
+      released.push([url, getScreenshot()?.props.src])
+    })
+
+    try {
+      onMounted.mock.lastCall[0]()
+      await vi.advanceTimersByTimeAsync(0)
+      const screenshot = getScreenshot()
+      const resizer = getResizer()
+      const cached = { blob: frames[0].data, etag: '"A"', aspect: 16 / 9 }
+      expect(screenshot.props.src).toBe('blob:A')
+      expect(resizer).toBeDefined()
+      expect(sizes()['--log-rail-w']).toBe('480px')
+      expect(sizes()['--log-sc-h']).toBe('270px')
+      expect(page.workspace.screenshot).toEqual(cached)
+      expect(requests.mock.lastCall[0].headers).toEqual({})
+
+      for (const [index, invalid] of ['blob:B', 'blob:C'].entries()) {
+        await vi.advanceTimersByTimeAsync(999)
+        expect(requests).toHaveBeenCalledTimes(index + 1)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(requests).toHaveBeenCalledTimes(index + 2)
+        expect(requests.mock.lastCall[0].headers).toEqual({ 'If-None-Match': '"A"' })
+        expect(getScreenshot()).toBe(screenshot)
+        expect(screenshot.props.src).toBe('blob:A')
+        expect(getResizer()).toBe(resizer)
+        expect(sizes()['--log-rail-w']).toBe('480px')
+        expect(sizes()['--log-sc-h']).toBe('270px')
+        expect(page.workspace.screenshot).toEqual(cached)
+        expect(released.at(-1)).toEqual([invalid, 'blob:A'])
+        expect(revokeUrl).not.toHaveBeenCalledWith('blob:A')
+      }
+
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(requests).toHaveBeenCalledTimes(4)
+      expect(requests.mock.lastCall[0].headers).toEqual({ 'If-None-Match': '"A"' })
+      expect(getScreenshot()).toBe(screenshot)
+      expect(screenshot.props.src).toBe('blob:D')
+      expect(getResizer()).toBe(resizer)
+      expect(sizes()['--log-rail-w']).toBe('360px')
+      expect(sizes()['--log-sc-h']).toBe('270px')
+      expect(page.workspace.screenshot).toEqual({
+        blob: frames[3].data,
+        etag: '"D"',
+        aspect: 4 / 3
+      })
+      expect(released).toContainEqual(['blob:A', 'blob:D'])
+
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(requests).toHaveBeenCalledTimes(5)
+      expect(requests.mock.lastCall[0].headers).toEqual({ 'If-None-Match': '"D"' })
+      expect(screenshot.props.src).toBe('blob:D')
+      expect(createUrl).toHaveBeenCalledTimes(4)
+    } finally {
+      onUnmounted.mock.lastCall[0]()
+      createUrl.mockRestore()
+      revokeUrl.mockRestore()
+      debug.mockRestore()
+    }
+  })
+
+  async function publishScreenshot(url, aspect) {
+    await state.previewOptions.onChange(url, aspect)
+    await nextTick()
+  }
+
   it('fits the default mobile screenshot height to the loaded frame and current pane width', async () => {
     state.mobile.value = true
     const { find } = mountWorkspace()
@@ -564,13 +776,9 @@ describe('log page', () => {
     const pane = find((target) => target.props['aria-label'] === '运行日志')
     pane.clientWidth = 360
     pane.getBoundingClientRect = () => ({ top: 0, bottom: 900, height: 900 })
-    page.sc_blob = 'blob:http://latest'
-    await nextTick()
-    const image = find((target) => target.props.src === 'blob:http://latest')
+    await publishScreenshot('blob:http://latest', 16 / 9)
     const screenshot = find((target) => target.props.class === 'log-screenshot')
     pane.querySelector = (selector) => (selector === '.log-screenshot' ? screenshot : null)
-    image.props.onLoad({ target: { naturalWidth: 1920, naturalHeight: 1080 } })
-    await nextTick()
     const screenshotHeight = () =>
       pane.style.setProperty.mock.calls.filter(([key]) => key === '--log-sc-h').at(-1)?.[1]
     expect(screenshotHeight()).toBe('203px')
@@ -585,13 +793,11 @@ describe('log page', () => {
 
     screenshot.clientWidth = 0
     pane.clientWidth = 360
-    image.props.onLoad({ target: { naturalWidth: 1080, naturalHeight: 1920 } })
-    await nextTick()
+    await publishScreenshot('blob:http://portrait', 9 / 16)
     expect(screenshotHeight()).toBe('640px')
     pane.clientWidth = 360
     pane.getBoundingClientRect = () => ({ top: 0, bottom: 220, height: 220 })
-    image.props.onLoad({ target: { naturalWidth: 1920, naturalHeight: 1080 } })
-    await nextTick()
+    await publishScreenshot('blob:http://landscape', 16 / 9)
     expect(screenshotHeight()).toBe('203px')
     expect(page.layout_preference.screenshot_height).toBeNull()
     expect(state.client.post).not.toHaveBeenCalled()
@@ -605,11 +811,7 @@ describe('log page', () => {
     pane.getBoundingClientRect = () => ({ top: 0, bottom: 900, height: 900 })
     pane.querySelector = (selector) =>
       selector === '.log-screenshot' ? { getBoundingClientRect: () => ({ top: 0 }) } : null
-    page.sc_blob = 'blob:http://latest'
-    await nextTick()
-    const image = find((target) => target.props.src === 'blob:http://latest')
-    image.props.onLoad({ target: { naturalWidth: 1920, naturalHeight: 1080 } })
-    await nextTick()
+    await publishScreenshot('blob:http://latest', 16 / 9)
     const screenshotHeight = () =>
       pane.style.setProperty.mock.calls.filter(([key]) => key === '--log-sc-h').at(-1)?.[1]
     expect(screenshotHeight()).toBe('270px')
@@ -624,8 +826,7 @@ describe('log page', () => {
     page.resize_log_pane({ preventDefault: vi.fn() }, 'screenshot')
     listeners.get('pointermove')({ clientY: 190 })
     listeners.get('pointerup')()
-    image.props.onLoad({ target: { naturalWidth: 1080, naturalHeight: 1920 } })
-    await nextTick()
+    await publishScreenshot('blob:http://portrait', 9 / 16)
     expect(screenshotHeight()).toBe('190px')
     expect(page.layout_preference.screenshot_height).toBe(190)
     expect(state.client.post).toHaveBeenCalledExactlyOnceWith('/ui-state/log-layout', {
@@ -1289,7 +1490,7 @@ describe('log page', () => {
       state.client.get.mockResolvedValue({ data: {} })
       onMounted.mock.lastCall[0]()
       component.layout_preference.task_height = 132
-      component.task_queue.value = queue
+      component.task_queue_elements.value = [queue]
       await nextTick()
       await nextTick()
 
@@ -1326,7 +1527,7 @@ describe('log page', () => {
     ]
     const { find } = mountWorkspace()
     const queue = find((target) => target.props.class === 'task-table-scroll')
-    const pane = queue.parent
+    const pane = queue.parent.parent
     pane.getBoundingClientRect = () => ({ top: 0, bottom: 900, height: 900 })
     pane.querySelector = (selector) => (selector === '.task-table-scroll' ? queue : null)
     queue.getBoundingClientRect = () => ({ top: 278, bottom: 410, height: 132 })
@@ -2055,6 +2256,53 @@ describe('log page', () => {
     expect(component.layout_preference.screenshot_height).toBe(500)
   })
 
+  it.each([
+    { mobile: false, width: 1000, imageWidth: 480, shot: 90 },
+    { mobile: true, width: 366, imageWidth: 360, shot: 640 }
+  ])('retains the panels in a short explicit single layout (mobile=$mobile)', (fixture) => {
+    const { mobile, width, imageWidth, shot } = fixture
+    state.mobile.value = mobile
+    useGuiStore().runningLogLayout = 'custom:single:log,daily,tasks,screenshot'
+    const sizes = new Map()
+    const component = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
+    component.sc_blob.value = 'blob:preview'
+    component.layout_preference.task_height = 132
+    component.log_layout.value = {
+      clientWidth: width,
+      getBoundingClientRect: () => ({ top: 0, bottom: 250, height: 250 }),
+      querySelector: (selector) => {
+        if (selector === '.log-screenshot') return { clientWidth: imageWidth }
+        if (selector === '.log-daily-module')
+          return { getBoundingClientRect: () => ({ height: 64 }) }
+        if (selector === '.task-table-scroll')
+          return { getBoundingClientRect: () => ({ top: 184 }) }
+        return null
+      },
+      style: { setProperty: (key, value) => sizes.set(key, value), removeProperty: vi.fn() }
+    }
+    component.screenshot_aspect = mobile ? 360 / 640 : 16 / 9
+    component.apply_log_layout()
+    expect(sizes.get('--log-sc-h')).toBe(`${shot}px`)
+    expect(sizes.get('--log-task-h')).toBe('90px')
+    expect(sizes.get('--log-min-h')).toBe('120px')
+  })
+
+  it('retains the saved task height below the log when the other column has no screenshot', async () => {
+    useGuiStore().runningLogLayout = 'custom:split:log,tasks,daily|screenshot'
+    state.mower.refs.task_list.value = [{ time: '2026-11-01T14:20:00', plan: {}, type: '跑单' }]
+    const { classes, find, page, pane, sizes } = mountWidePane()
+    const queue = find((target) => target.props.class === 'task-table-scroll')
+    pane.getBoundingClientRect = () => ({ top: 0, bottom: 600, height: 600 })
+    pane.querySelector = (selector) => (selector === '.task-table-scroll' ? queue : null)
+    queue.getBoundingClientRect = () => ({ top: 460 })
+    page.layout_preference.task_height = 132
+    page.apply_log_layout()
+    await nextTick()
+
+    expect(classes(pane)).not.toContain('log-pane--rail')
+    expect(sizes()['--log-task-h']).toBe('132px')
+  })
+
   it.each([1, 0.8, 1.25])(
     'saves the screenshot drag height in layout pixels at zoom %s',
     (zoom) => {
@@ -2181,6 +2429,7 @@ describe('log page', () => {
     const component = scope.run(() => LogPage.setup({}, { expose: vi.fn() }))
     component.log_layout.value = {
       clientWidth: 1290,
+      offsetWidth: 1290,
       getBoundingClientRect: () => ({ top: 0, bottom: 800, height: 800, width: 1290, right: 1290 }),
       querySelector: (selector) =>
         ['.log-screenshot', '.task-table-scroll'].includes(selector)
@@ -2406,7 +2655,9 @@ describe('log page', () => {
     const { callbacks, finishAnimations, skipTransition } = deferViewTransitions({
       holdAnimation: true
     })
-    const { find } = mountWidePane()
+    const { find, page } = mountWidePane()
+    page.apply_log_layout()
+    await nextTick()
     const toggle = viewControl(find, '任务列表')
     const queue = find((target) => target.props.class === 'task-table-scroll')
 
@@ -2562,7 +2813,7 @@ describe('log page', () => {
     pane.clientWidth = width
     pane.getBoundingClientRect = () => ({ top: 0, bottom: 800, height: 800 })
     const sizes = () => Object.fromEntries(pane.style.setProperty.mock.calls)
-    const classes = (target) => target.props.class.split(' ')
+    const classes = (target) => (target.props.class ?? '').split(' ')
     return { ...workspace, page: app._instance.setupState, pane, sizes, classes }
   }
 
@@ -2583,9 +2834,12 @@ describe('log page', () => {
     const screenshot = find((target) => target.props.src === 'blob:http://latest')
     const condition = find((target) => target.props.class === 'plan-condition')
     const queue = find((target) => target.props.class === 'task-table-scroll')
-    expect(condition.parent).toBe(pane)
-    expect(pane.children.indexOf(screenshot)).toBeLessThan(pane.children.indexOf(condition))
-    expect(pane.children.indexOf(condition)).toBeLessThan(pane.children.indexOf(queue))
+    const column = condition.parent
+    expect(column.parent).toBe(pane)
+    expect(screenshot.parent).toBe(column)
+    expect(queue.parent).toBe(column)
+    expect(column.children.indexOf(screenshot)).toBeLessThan(column.children.indexOf(condition))
+    expect(column.children.indexOf(condition)).toBeLessThan(column.children.indexOf(queue))
   })
 
   it('places the screenshot above the task list in a right column on a wide desktop pane', async () => {
@@ -2604,14 +2858,15 @@ describe('log page', () => {
 
     expect(classes(pane)).toContain('log-pane--rail')
     expect(classes(pane.parent)).toContain('home-container--rail')
-    expect(find((target) => target.props.class === 'task-table-scroll').parent).toBe(pane)
+    const queue = find((target) => target.props.class === 'task-table-scroll')
+    const columns = pane.children.filter((target) => classes(target).includes('log-column'))
+    expect(queue.parent).toBe(columns[1])
+    expect(find((target) => target.props['data-log-content']).parent).toBe(columns[0])
     expect(sizes()['--log-rail-w']).toBe('480px')
     expect(sizes()['--log-sc-h']).toBe('270px')
     expect(pane.style.removeProperty).toHaveBeenCalledWith('--log-task-h')
 
-    find((target) => target.props.src === 'blob:http://latest').props.onLoad({
-      target: { naturalWidth: 1600, naturalHeight: 1200 }
-    })
+    await publishScreenshot('blob:http://next', 4 / 3)
     expect(sizes()['--log-rail-w']).toBe('360px')
     expect(sizes()['--log-sc-h']).toBe('270px')
 
@@ -2622,6 +2877,110 @@ describe('log page', () => {
     expect(classes(pane.parent)).not.toContain('home-container--rail')
     expect(pane.style.removeProperty).toHaveBeenCalledWith('--log-rail-w')
     expect(state.client.post).not.toHaveBeenCalled()
+  })
+
+  it('moves real panels into the saved order and retains the log across rearrangement', async () => {
+    vi.setSystemTime(new Date('2026-11-01T05:00:00Z'))
+    state.mower.refs.running.value = true
+    state.config.report_enable = true
+    state.mower.refs.task_list.value = [{ time: '2026-11-01T14:20:00', plan: {}, type: '跑单' }]
+    mockDailyStatus(() => ({
+      game_day: '2026-11-01',
+      source: 'live',
+      records: { report: 'done' }
+    }))
+    const gui = useGuiStore()
+    const { pane, page, classes, find, all } = mountWidePane()
+    const log = find((target) => target.props['data-log-content'])
+    const panelOrder = () =>
+      pane.children
+        .filter(
+          (target) => classes(target).includes('log-column') && target.style.display !== 'none'
+        )
+        .map((column) =>
+          column.children.flatMap((target) =>
+            classes(target).filter((name) =>
+              ['log', 'log-screenshot', 'task-table-scroll', 'log-daily-module'].includes(name)
+            )
+          )
+        )
+    page.sc_blob = 'blob:preview'
+    page.apply_log_layout()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(panelOrder()).toEqual([['log'], ['log-screenshot', 'task-table-scroll']])
+    expect(all(log).some((target) => classes(target).includes('daily-status'))).toBe(true)
+
+    gui.runningLogLayout = 'custom:split:tasks,screenshot|log,daily'
+    await nextTick()
+    expect(panelOrder()).toEqual([
+      ['task-table-scroll', 'log-screenshot'],
+      ['log', 'log-daily-module']
+    ])
+    expect(find((target) => target.props['data-log-content'])).toBe(log)
+
+    gui.runningLogLayout = 'right_rail_log'
+    await nextTick()
+    expect(panelOrder()).toEqual([
+      ['log-daily-module', 'task-table-scroll'],
+      ['log-screenshot', 'log']
+    ])
+    expect(find((target) => target.props['data-log-content'])).toBe(log)
+
+    state.mobile.value = true
+    await nextTick()
+    expect(panelOrder()).toEqual([['log-screenshot', 'task-table-scroll', 'log']])
+    expect(find((target) => classes(target).includes('log-daily-toggle'))).toBeTruthy()
+
+    gui.runningLogLayout = 'custom:single:log,daily,tasks,screenshot'
+    await vi.advanceTimersByTimeAsync(0)
+    expect(panelOrder()).toEqual([
+      ['log', 'log-daily-module', 'task-table-scroll', 'log-screenshot']
+    ])
+    expect(all().some((target) => classes(target).includes('log-daily-toggle'))).toBe(false)
+    expect(find((target) => target.props['data-log-content'])).toBe(log)
+  })
+
+  it('applies a saved two-column layout when a scrollbar narrows the previous layout', async () => {
+    const gui = useGuiStore()
+    gui.loaded = true
+    gui.runningLogLayout = 'stacked'
+    state.client.put.mockImplementation(async (_url, data) => ({ data }))
+    state.mower.refs.task_list.value = [{ time: '2026-11-01T14:20:00', plan: {}, type: '跑单' }]
+    const { page, pane, classes, find } = mountWidePane(896)
+    Object.defineProperty(pane, 'offsetWidth', { value: 906 })
+    pane.ownerDocument = { documentElement: { style: { zoom: 1.5 } } }
+    pane.getBoundingClientRect = () => ({ width: 1359, top: 0, bottom: 420, height: 420 })
+    page.sc_blob = 'blob:preview'
+    page.apply_log_layout()
+    await nextTick()
+    const screenshot = () => find((target) => target.props.src === 'blob:preview')
+    const queue = () => find((target) => target.props.class === 'task-table-scroll')
+    expect(screenshot().parent).toBe(queue().parent)
+
+    expect(await gui.setRunningLogLayout('custom:split:screenshot|tasks,daily,log')).toBe(true)
+    await nextTick()
+    expect(classes(pane)).toContain('log-pane--rail-left')
+    expect(screenshot().parent).not.toBe(queue().parent)
+  })
+
+  it('reveals the task queue through its hash after moving it into the log column', async () => {
+    state.mower.refs.task_list.value = [{ time: '2026-11-01T14:20:00', plan: {}, type: '跑单' }]
+    const { find, page } = mountWidePane()
+    page.sc_blob = 'blob:preview'
+    page.apply_log_layout()
+    await nextTick()
+    const original = find((target) => target.props.class === 'task-table-scroll')
+
+    useGuiStore().runningLogLayout = 'custom:split:tasks,daily,log|screenshot'
+    await nextTick()
+    const queue = find((target) => target.props.class === 'task-table-scroll')
+    expect(queue).not.toBe(original)
+
+    state.route.hash = '#task-queue'
+    await nextTick()
+    await nextTick()
+    expect(queue.scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: 'nearest' })
+    expect(original.scrollIntoView).not.toHaveBeenCalled()
   })
 
   it.each([false, true])(
@@ -2727,7 +3086,7 @@ describe('log page', () => {
     const screenshot = find((target) => target.props.src === 'blob:http://latest')
     expect(screenshot.props['object-fit']).toBe('contain')
 
-    screenshot.props.onLoad({ target: { naturalWidth: 1600, naturalHeight: 1200 } })
+    await publishScreenshot('blob:http://next', 4 / 3)
     expect(sizes()['--log-sc-h']).toBe('480px')
   })
 

@@ -51,10 +51,14 @@ vi.mock('@/components/SoftwareVersionPreference.vue', () => ({
 vi.mock('@/components/VersionWatermarkPreference.vue', () => ({
   default: { setup: () => () => '' }
 }))
+vi.mock('@/components/RunningLogLayoutPreference.vue', () => ({
+  default: { setup: () => () => '' }
+}))
 vi.mock('@/components/LogBackgroundPreference.vue', () => ({ default: { setup: () => () => '' } }))
 vi.mock('@/components/HalloweenPreference.vue', () => ({ default: { setup: () => () => '' } }))
 vi.mock('@/components/SettingsSegmented.vue', () => ({ default: { setup: () => () => '' } }))
 vi.mock('@/components/Email.vue', () => ({ default: { setup: () => () => '' } }))
+vi.mock('@/components/ServerJang.vue', () => ({ default: { setup: () => () => '' } }))
 vi.mock('@/components/ProcessControl.vue', () => ({ default: { setup: () => () => '' } }))
 vi.mock('@/components/DepotHistorySettings.vue', () => ({ default: { setup: () => () => '' } }))
 vi.mock('@/components/MowerInputNumber.vue', () => ({ default: { setup: () => () => '' } }))

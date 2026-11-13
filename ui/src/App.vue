@@ -95,6 +95,7 @@
         <n-dialog-provider>
           <ConfigProfilesController :controller="configProfiles" />
           <SidebarEditor v-model:show="sidebarEditorOpen" :request="sidebarEditorRequest" />
+          <RunningLogLayoutDialog />
           <HelpDialog
             v-model:section="helpSection"
             :version="softwareVersion"
@@ -305,6 +306,7 @@ import HalloweenBackdrop from '@/components/HalloweenBackdrop.vue'
 import ConfigProfilesController from '@/components/ConfigProfilesController.vue'
 import SidebarUpdateChecks from '@/components/SidebarUpdateChecks.vue'
 import SidebarEditor from '@/components/SidebarEditor.vue'
+import RunningLogLayoutDialog from '@/components/RunningLogLayoutDialog.vue'
 import { useSidebarPreferences } from '@/composables/sidebarPreferences'
 import { useResolvedTheme } from '@/composables/theme'
 import { themeSelectionKey, useThemeSelection } from '@/composables/themeSelection'
@@ -323,6 +325,7 @@ import {
   formatWindowTitle,
   formatEmulatorLabel
 } from '@/window-shell/adapter.js'
+import { windowMinimizedKey } from '@/window-shell/context.js'
 import { createSaveCoordinator } from '@/utils/configPersistence'
 import { configProfilesKey, createConfigProfiles } from '@/composables/configProfiles'
 import { readProcessActionStatus, submitProcessAction } from '@/utils/processAction'
@@ -362,6 +365,10 @@ const {
   capabilities: windowShellCapabilities,
   state: windowShellState
 } = windowShell
+provide(
+  windowMinimizedKey,
+  computed(() => windowShellState.value.minimized)
+)
 
 let disposeModalDrag = null
 
@@ -416,6 +423,8 @@ function handleViewAction(action) {
     else sidebarHidden.value = !sidebarHidden.value
   } else if (action === 'edit-sidebar') {
     openSidebarEditor()
+  } else if (action === 'custom-log-layout') {
+    guiStore.openRunningLogLayoutDialog()
   }
 }
 const route = useRoute()
