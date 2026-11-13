@@ -2386,7 +2386,7 @@ async function db_delete(keys) {
       width: 3px;
       height: 0.9em;
       border-radius: 1px;
-      background: var(--lg-primary);
+      background: var(--lg-accent);
     }
   }
 
@@ -2456,7 +2456,7 @@ async function db_delete(keys) {
 }
 
 .task-subject {
-  color: var(--lg-primary);
+  color: var(--lg-accent);
   font-weight: 600;
 }
 
@@ -2525,7 +2525,7 @@ async function db_delete(keys) {
 }
 
 .plan-condition-name {
-  color: var(--lg-primary);
+  color: var(--lg-accent);
 }
 
 .task-operators {
@@ -3011,7 +3011,7 @@ html[data-window-shell-theme='dark'] .view-options-anchor::before {
     }
 
     &:active::before {
-      color: var(--lg-primary);
+      color: var(--lg-accent);
     }
   }
 
@@ -3354,7 +3354,9 @@ html[data-window-shell-theme='dark'] .view-options-anchor::before {
   --lg-surface-bottom: rgba(237, 241, 247, 0.94);
   --lg-action-surface: #edf1f7;
   --lg-line-base: #fafbfd;
-  --lg-primary: #4e648e;
+  --lg-primary: #2e7d5b;
+  /* 副表名与任务栏强调用主题色；--lg-primary 留给开始、完成等语义状态。 */
+  --lg-accent: #4e648e;
   --lg-error: #c93850;
   --lg-warning: #c47222;
   --lg-info: #4c73a8;
@@ -3375,7 +3377,7 @@ html[data-window-shell-theme='dark'] .view-options-anchor::before {
     color-mix(in srgb, var(--lg-primary) 4%, var(--lg-surface-bottom))
   );
   --lg-btn-primary-line: color-mix(in srgb, var(--lg-primary) 26%, var(--lg-line-base));
-  --lg-btn-primary-label: #3e4656;
+  --lg-btn-primary-label: #216346;
   --lg-btn-error-line: color-mix(in srgb, var(--lg-error) 26%, var(--lg-line-base));
   --lg-btn-error-label: #a8283e;
   --lg-btn-warning-bg: linear-gradient(
@@ -3396,7 +3398,8 @@ html[data-window-shell-theme='dark'] .home-container {
   --lg-surface-bottom: rgba(54, 59, 76, 0.94);
   --lg-action-surface: #363b4c;
   --lg-line-base: #363b4c;
-  --lg-primary: #88c0d0;
+  --lg-primary: #a3be8c;
+  --lg-accent: #88c0d0;
   --lg-error: #e28c96;
   --lg-warning: #ebcb8b;
   --lg-info: #88c0d0;
@@ -3409,7 +3412,7 @@ html[data-window-shell-theme='dark'] .home-container {
   );
   --lg-btn-neutral-line: rgba(216, 222, 233, 0.14);
   --lg-btn-neutral-label: #eceff4;
-  --lg-btn-primary-label: #88c0d0;
+  --lg-btn-primary-label: #a3be8c;
   --lg-btn-error-label: #e28c96;
   --lg-btn-warning-label: #ebcb8b;
   --lg-btn-info-label: #88c0d0;
