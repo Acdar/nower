@@ -1,22 +1,30 @@
+import base64
 import datetime
+import io
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+from PIL import Image
 
 from arknights_mower.tests import device_settings_route_tests as settings_routes
 from arknights_mower.tests.device_preflight_tests import PreflightIO
 from arknights_mower.utils import (
     config,
     crash_recovery,
+    resource_pkg,
     software_update,
     update_runtime,
 )
 from arknights_mower.utils.csleep import MowerExit
 from arknights_mower.utils.device.io_budget import budget_sleep
 from arknights_mower.utils.device.preflight import PreflightService
+from arknights_mower.utils.scheduler_task import SchedulerTask, TaskTypes
 
 
 class ServerStatusTests(unittest.TestCase):
@@ -346,3 +354,79 @@ class ServerStatusTests(unittest.TestCase):
         self.assertEqual(
             self.client.get("/status", headers=self.headers).json["status"], "stopped"
         )
+
+    def test_status_reports_task_detail_and_token_protected_circular_avatars(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "avatar").mkdir(parents=True)
+            sample = Image.new("RGBA", (64, 64), (120, 180, 220, 255))
+            sample.save(root / "avatar" / "但书.webp", format="WEBP")
+            secret = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+            secret.save(root / "secret.webp", format="WEBP")
+
+            when1 = datetime.datetime(2026, 11, 13, 12, 30)
+            when2 = datetime.datetime(2026, 11, 13, 13, 0)
+            task1 = SchedulerTask(
+                time=when1,
+                task_type=TaskTypes.RUN_ORDER,
+                task_plan={"room_2_1": ["Current", "但书", "龙舌兰"]},
+            )
+            task2 = SchedulerTask(
+                time=when2,
+                task_type=TaskTypes.SHIFT_OFF,
+                task_plan={"dormitory_1": ["Free", "Current"]},
+            )
+            scheduler = SimpleNamespace(
+                sleeping=True,
+                tasks=[task1, task2],
+                op_data=SimpleNamespace(
+                    plan_condition=[],
+                    backup_plans=[],
+                    facility_states={"room_2_1": {"facility": "trade"}},
+                    plan={},
+                ),
+            )
+            self.server._AVATAR_PNG_CACHE.clear()
+            with (
+                patch.object(self.main, "base_scheduler", scheduler),
+                patch.object(resource_pkg, "resource_ui_path", return_value=root),
+            ):
+                for bad_headers in ({}, {"token": "wrong-token"}):
+                    blocked = self.client.get(
+                        "/status?avatar_size=24&avatars=但书",
+                        headers=bad_headers,
+                    )
+                    self.assertEqual(blocked.status_code, 403)
+
+                plain = self.client.get("/status", headers=self.headers)
+                self.assertEqual(plain.status_code, 200)
+                self.assertEqual(
+                    plain.json["next_task_detail"],
+                    {
+                        "type": "跑单",
+                        "rooms": [{"room": "贸易站2_1", "operators": ["但书", "龙舌兰"]}],
+                    },
+                )
+                self.assertEqual(
+                    plain.json["next_next_task_detail"],
+                    {
+                        "type": "下班",
+                        "rooms": [{"room": "宿舍1", "operators": ["保持当前"]}],
+                    },
+                )
+                self.assertNotIn("task_avatars", plain.json)
+
+                with_avatars = self.client.get(
+                    "/status?avatar_size=24&avatars=但书,../secret,不存在干员",
+                    headers=self.headers,
+                )
+                self.assertEqual(with_avatars.status_code, 200)
+                avatars = with_avatars.json["task_avatars"]
+                self.assertEqual(list(avatars.keys()), ["但书"])
+                raw = base64.b64decode(avatars["但书"])
+                with Image.open(io.BytesIO(raw)) as decoded:
+                    self.assertEqual(decoded.format, "PNG")
+                    self.assertEqual(decoded.mode, "RGBA")
+                    self.assertEqual(decoded.size, (24, 24))
+                    self.assertEqual(decoded.getpixel((0, 0))[3], 0)
+                    self.assertGreater(decoded.getpixel((12, 12))[3], 200)

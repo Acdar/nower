@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import atexit
+import base64
 import datetime
 import hashlib
 import hmac
@@ -1948,22 +1949,27 @@ def _room_label(room: str, facility: str = "") -> str:
     return room
 
 
-def _roster(operators) -> str:
-    """干员名单：有真实干员时就只显示姓名（保持当前/清退标记不再刷屏）。"""
+def _roster_tokens(operators) -> list[str]:
+    """干员列表：有真实干员时只保留姓名；仅剩占位标记时返回去重中文标记。"""
     if not isinstance(operators, (list, tuple)):
-        return str(operators)
+        return [str(operators)] if operators else []
     kept = [
         str(name) for name in operators if name and str(name) not in _OPERATOR_SKIPPED
     ]
     real = [name for name in kept if name not in _OPERATOR_MARKS]
     if real:
-        return " ".join(real)
-    marks = []
+        return real
+    marks: list[str] = []
     for name in kept:
         label = _OPERATOR_MARKS.get(name)
         if label and label not in marks:
             marks.append(label)
-    return " ".join(marks)
+    return marks
+
+
+def _roster(operators) -> str:
+    """干员名单：有真实干员时就只显示姓名（保持当前/清退标记不再刷屏）。"""
+    return " ".join(_roster_tokens(operators))
 
 
 def _facility_names(op_data) -> dict:
@@ -2017,6 +2023,104 @@ def _describe_task(task, facilities: dict | None = None) -> str:
     return f"{type_name} {body}" if type_name else body
 
 
+def _describe_task_detail(task, facilities: dict | None = None) -> dict | None:
+    """生成结构化任务展示明细（动作类型 + 房间与干员列表），供倒计时挂件渲染。"""
+    try:
+        formatted = task.format()
+    except Exception:
+        return None
+    type_name = str(getattr(formatted, "type", "") or "")
+    plan = getattr(formatted, "plan", None) or {}
+    known = facilities or {}
+    rooms: list[dict] = []
+    if isinstance(plan, dict):
+        for room, operators in plan.items():
+            label = _room_label(str(room), known.get(str(room), ""))
+            tokens = _roster_tokens(operators)
+            rooms.append({"room": label, "operators": tokens})
+    if not rooms:
+        meta = getattr(formatted, "meta_data", None)
+        if isinstance(meta, str):
+            meta = meta.strip()
+            if meta in _ROOM_LABELS or re.fullmatch(
+                r"room_\d+_\d+|(?:dormitory|gaming)_\d+", meta
+            ):
+                rooms.append(
+                    {"room": _room_label(meta, known.get(meta, "")), "operators": []}
+                )
+    if not type_name and not rooms:
+        return None
+    return {"type": type_name, "rooms": rooms}
+
+
+_AVATAR_PNG_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def _find_avatar_file(name: str) -> Path | None:
+    """在当前有效资源目录或内置 UI 资源目录中安全查找干员头像 .webp。"""
+    if (
+        not isinstance(name, str)
+        or not name
+        or "/" in name
+        or "\\" in name
+        or ".." in name
+        or "\x00" in name
+        or len(name) > 64
+    ):
+        return None
+    from arknights_mower.utils.resource_pkg import resource_ui_path
+
+    selected = resource_ui_path("")
+    if selected is not None:
+        candidates = [Path(selected)]
+    else:
+        candidates = [
+            Path(app.static_folder),
+            Path(__file__).resolve().parent / "ui" / "public",
+        ]
+    for base_dir in candidates:
+        base = base_dir.resolve()
+        target = (base / "avatar" / f"{name}.webp").resolve()
+        if base in target.parents and target.is_file():
+            return target
+    return None
+
+
+def _render_avatar_png(name: str, size: int) -> str | None:
+    """将干员 .webp 头像裁剪为抗锯齿圆形透明 PNG（Base64），并做有界缓存。"""
+    clamped = max(16, min(64, int(size)))
+    path = _find_avatar_file(name)
+    if path is None:
+        return None
+    try:
+        key = (str(path), path.stat().st_mtime_ns, clamped)
+    except OSError:
+        return None
+    cached = _AVATAR_PNG_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        from PIL import Image, ImageDraw
+
+        ss = clamped * 4
+        with Image.open(path) as src:
+            rgba = src.convert("RGBA").resize((ss, ss), Image.Resampling.LANCZOS)
+        mask = Image.new("L", (ss, ss), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, ss - 1, ss - 1), fill=255)
+        out = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+        out.paste(rgba, (0, 0), mask)
+        final = out.resize((clamped, clamped), Image.Resampling.LANCZOS)
+        buf = BytesIO()
+        final.save(buf, format="PNG")
+        encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+    if len(_AVATAR_PNG_CACHE) >= 256:
+        _AVATAR_PNG_CACHE.clear()
+    _AVATAR_PNG_CACHE[key] = encoded
+    return encoded
+
+
 def runtime_deployment():
     from arknights_mower.utils.performance import is_android_runtime
     from arknights_mower.utils.update_runtime import frozen
@@ -2056,8 +2160,10 @@ def get_status():
         ),
         "next_task_time": None,
         "next_task_name": None,
+        "next_task_detail": None,
         "next_next_task_time": None,
         "next_next_task_name": None,
+        "next_next_task_detail": None,
         "task_count": 0,
         "remaining_seconds": None,
         "maintenance_pause": None,
@@ -2109,6 +2215,9 @@ def get_status():
                 response["next_task_name"] = _describe_task(
                     base_scheduler.tasks[0], facilities
                 )
+                response["next_task_detail"] = _describe_task_detail(
+                    base_scheduler.tasks[0], facilities
+                )
                 if len(base_scheduler.tasks) > 1:
                     response["next_next_task_time"] = base_scheduler.tasks[
                         1
@@ -2116,6 +2225,32 @@ def get_status():
                     response["next_next_task_name"] = _describe_task(
                         base_scheduler.tasks[1], facilities
                     )
+                    response["next_next_task_detail"] = _describe_task_detail(
+                        base_scheduler.tasks[1], facilities
+                    )
+    avatar_size_arg = request.args.get("avatar_size", "")
+    if avatar_size_arg.isdigit():
+        avatar_size = max(16, min(64, int(avatar_size_arg)))
+        requested = [
+            item.strip()
+            for item in request.args.get("avatars", "").split(",")
+            if item.strip()
+        ]
+        if not requested:
+            for detail in (
+                response["next_task_detail"],
+                response["next_next_task_detail"],
+            ):
+                if isinstance(detail, dict):
+                    for room in detail.get("rooms") or ():
+                        for name in room.get("operators") or ():
+                            if name and name not in _OPERATOR_MARKS.values():
+                                requested.append(name)
+        task_avatars: dict[str, str] = {}
+        for name in dict.fromkeys(requested[:32]):
+            if encoded := _render_avatar_png(name, avatar_size):
+                task_avatars[name] = encoded
+        response["task_avatars"] = task_avatars
     return response
 
 

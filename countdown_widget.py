@@ -44,7 +44,9 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import traceback
+import urllib.parse
 from pathlib import Path
 from tkinter import messagebox, simpledialog
 
@@ -67,32 +69,38 @@ STALE_RECORD_SECONDS = 120  # 超过这个时间没有心跳的实例登记视�
 
 THEMES = {
     "dark": {
-        "bg": "#1b1d23",
-        "fg": "#f5f7fa",
-        "sub": "#98a2b3",
-        "task": "#cbd5e1",
-        "ok": "#4ade80",
-        "warn": "#f0b429",
-        "flash": "#b45309",
-        "close": "#ff6b6b",
-        "tip_bg": "#232733",
-        "tip_fg": "#e5e9f0",
-        "border": "#303540",
-        "tip_border": "#3a4150",
+        "bg": "#2b2e3b",
+        "fg": "#eceff4",
+        "sub": "#949cb0",
+        "task": "#d8dee9",
+        "ok": "#a3be8c",
+        "warn": "#ebcb8b",
+        "flash": "#d08770",
+        "close": "#d07079",
+        "tip_bg": "#404659",
+        "tip_fg": "#eceff4",
+        "border": "#404659",
+        "tip_border": "#4a5268",
+        "time": "#88c0d0",
+        "chip_bg": "#353a4a",
+        "chip_border": "#4a5268",
     },
     "light": {
-        "bg": "#f7f8fa",
-        "fg": "#12161f",
-        "sub": "#6b7280",
-        "task": "#374151",
-        "ok": "#15803d",
-        "warn": "#b45309",
-        "flash": "#fdba74",
-        "close": "#dc2626",
+        "bg": "#f5f7fb",
+        "fg": "#2a303c",
+        "sub": "#6c768a",
+        "task": "#434c5e",
+        "ok": "#2e7d5b",
+        "warn": "#c47222",
+        "flash": "#f0d7a3",
+        "close": "#c93850",
         "tip_bg": "#ffffff",
-        "tip_fg": "#12161f",
-        "border": "#d8dbe2",
-        "tip_border": "#c7ccd6",
+        "tip_fg": "#2a303c",
+        "border": "#d8dfea",
+        "tip_border": "#cbd5e4",
+        "time": "#45689c",
+        "chip_bg": "#e9eef6",
+        "chip_border": "#cbd5e4",
     },
 }
 
@@ -111,6 +119,9 @@ TIP_BG = THEMES["dark"]["tip_bg"]
 TIP_FG = THEMES["dark"]["tip_fg"]
 BORDER = THEMES["dark"]["border"]
 TIP_BORDER = THEMES["dark"]["tip_border"]
+TIME_FG = THEMES["dark"]["time"]
+CHIP_BG = THEMES["dark"]["chip_bg"]
+CHIP_BORDER = THEMES["dark"]["chip_border"]
 
 STATUS_TEXT = {"stopped": "未运行", "sleeping": "休眠中", "working": "工作中"}
 
@@ -140,7 +151,7 @@ def resolve_theme(preference: str) -> str:
 def apply_theme(name: str):
     """按主题名更新模块级颜色常量（界面随后重绘即为新配色）。"""
     global BG, FG, SUB, TASK_FG, OK, WARN, FLASH, CLOSE_HOVER
-    global TIP_BG, TIP_FG, BORDER, TIP_BORDER
+    global TIP_BG, TIP_FG, BORDER, TIP_BORDER, TIME_FG, CHIP_BG, CHIP_BORDER
     palette = THEMES.get(name, THEMES["dark"])
     BG = palette["bg"]
     FG = palette["fg"]
@@ -154,6 +165,9 @@ def apply_theme(name: str):
     TIP_FG = palette["tip_fg"]
     BORDER = palette["border"]
     TIP_BORDER = palette["tip_border"]
+    TIME_FG = palette["time"]
+    CHIP_BG = palette["chip_bg"]
+    CHIP_BORDER = palette["chip_border"]
 
 
 # --- 小工具函数 ---
@@ -307,6 +321,29 @@ def queue_detail(when: str, name: str, when2: str, name2: str) -> str:
             continue
         lines.append(f"{stamp} {text}".strip())
     return "\n".join(lines)
+
+
+def wrap_lines(text: str, width: int = 52) -> list[str]:
+    """按显示宽度把多行文本切分成适合逐行渲染的单行列表（中文按 2 计）。"""
+    lines: list[str] = []
+    for paragraph in str(text).splitlines():
+        if not paragraph:
+            lines.append("")
+            continue
+        buf: list[str] = []
+        used = 0
+        for char in paragraph:
+            char_w = 2 if ord(char) > 0x2E80 else 1
+            if buf and used + char_w > width:
+                lines.append("".join(buf))
+                buf = [char]
+                used = char_w
+            else:
+                buf.append(char)
+                used += char_w
+        if buf:
+            lines.append("".join(buf))
+    return lines
 
 
 def rainbow_color(phase: float) -> str:
@@ -486,6 +523,19 @@ class StatusPoller(threading.Thread):
         self.endpoint_secure = False
         self._ssl_context: ssl.SSLContext | None = None
         self._wake = threading.Event()
+        self.avatar_size = 20
+        self._avatars: dict[tuple[str, int], str] = {}
+        self._missing_avatars: set[tuple[str, int]] = set()
+        self._avatar_lock = threading.Lock()
+
+    def set_avatar_size(self, size: int):
+        """设置需要的圆形头像像素尺寸（由界面按 DPI 缩放更新）。"""
+        self.avatar_size = max(16, min(48, int(size)))
+
+    def get_avatar(self, name: str, size: int) -> str | None:
+        """线程安全地读取已缓存的 Base64 PNG 圆形头像。"""
+        with self._avatar_lock:
+            return self._avatars.get((name, int(size)))
 
     def reset(self):
         """请求立即重新发现端口（右键菜单「重新连接」）。"""
@@ -514,6 +564,9 @@ class StatusPoller(threading.Thread):
         self.endpoint = None
         self.endpoint_secure = False
         self.snapshot = None
+        with self._avatar_lock:
+            self._avatars.clear()
+            self._missing_avatars.clear()
         self._wake.set()
 
     def _log(self, message: str):
@@ -531,7 +584,7 @@ class StatusPoller(threading.Thread):
             self._ssl_context = context
         return self._ssl_context
 
-    def _request(self, port: int, secure: bool = False) -> dict:
+    def _request(self, port: int, secure: bool = False, path: str = "/status") -> dict:
         """用标准库发一个 HTTP(S) GET。
 
         刻意不用 requests：它会把 cryptography/OpenSSL 等一大堆用不到的
@@ -545,7 +598,7 @@ class StatusPoller(threading.Thread):
             connection = http.client.HTTPConnection(self.host, port, timeout=1.3)
         try:
             headers = {"token": self.token} if self.token else {}
-            connection.request("GET", "/status", headers=headers)
+            connection.request("GET", path, headers=headers)
             response = connection.getresponse()
             body = response.read()
             if response.status == 403:
@@ -559,16 +612,62 @@ class StatusPoller(threading.Thread):
             raise ValueError("状态接口返回了非 JSON 对象")
         return data
 
+    def _sync_avatars(self, port: int, secure: bool, details: tuple):
+        """按需向 /status 拉取队列干员的圆形 PNG 头像并缓存在内存中。"""
+        size = max(16, min(48, int(self.avatar_size)))
+        needed: list[str] = []
+        with self._avatar_lock:
+            for detail in details:
+                if not isinstance(detail, dict):
+                    continue
+                for room in detail.get("rooms") or ():
+                    for name in room.get("operators") or ():
+                        if not name or name == "保持当前":
+                            continue
+                        key = (name, size)
+                        if (
+                            key not in self._avatars
+                            and key not in self._missing_avatars
+                            and name not in needed
+                        ):
+                            needed.append(name)
+        if not needed:
+            return
+        query = urllib.parse.urlencode(
+            {"avatar_size": str(size), "avatars": ",".join(needed[:32])}
+        )
+        try:
+            extra = self._request(port, secure, path=f"/status?{query}")
+        except Exception:
+            return
+        received = extra.get("task_avatars")
+        if not isinstance(received, dict):
+            return
+        with self._avatar_lock:
+            if len(self._avatars) > 256:
+                self._avatars.clear()
+            for name in needed[:32]:
+                encoded = received.get(name)
+                if isinstance(encoded, str) and encoded:
+                    self._avatars[(name, size)] = encoded
+                else:
+                    self._missing_avatars.add((name, size))
+
     def _adopt(self, port: int, data: dict, secure: bool = False):
         self.endpoint = port
         self.endpoint_secure = secure
+        next_detail = data.get("next_task_detail")
+        next_next_detail = data.get("next_next_task_detail")
+        self._sync_avatars(port, secure, (next_detail, next_next_detail))
         self.snapshot = {
             "status": data.get("status"),
             "remaining": data.get("remaining_seconds"),
             "next_task": data.get("next_task_time"),
             "next_task_name": data.get("next_task_name"),
+            "next_task_detail": next_detail,
             "next_next_task": data.get("next_next_task_time"),
             "next_next_task_name": data.get("next_next_task_name"),
+            "next_next_task_detail": next_next_detail,
             "task_count": data.get("task_count"),
             "plan_condition": data.get("plan_condition") or [],
             "received": time.monotonic(),
@@ -679,8 +778,11 @@ class CountdownWidget:
         self._drag = None
         self._toast_error = False
         self._detail_text = ""
+        self._last_snapshot = None
+        self._photo_cache: dict[tuple[str, int], tk.PhotoImage] = {}
         self._tip = None
         self._tip_job = None
+        self._scale = 1.0
 
         # 主题：先按偏好准备好调色板，再创建控件（创建时就会取到正确颜色）
         self.theme_pref = str(load_settings().get("theme") or "system")
@@ -742,23 +844,23 @@ class CountdownWidget:
         )
         self.info.pack(anchor="w", pady=(2, 0))
 
-        self.task = tk.Label(
+        self.task = tk.Canvas(
             self.frame,
-            text="　",
-            font=("Microsoft YaHei UI", 10),
-            fg=TASK_FG,
+            width=220,
+            height=24,
             bg=BG,
-            anchor="w",
+            bd=0,
+            highlightthickness=0,
         )
         self.task.pack(anchor="w", pady=(1, 0))
 
-        self.task2 = tk.Label(
+        self.task2 = tk.Canvas(
             self.frame,
-            text="　",
-            font=("Microsoft YaHei UI", 10),
-            fg=SUB,
+            width=220,
+            height=24,
             bg=BG,
-            anchor="w",
+            bd=0,
+            highlightthickness=0,
         )
         self.task2.pack(anchor="w")
 
@@ -791,6 +893,7 @@ class CountdownWidget:
         )
         self.min_button.place(relx=1.0, x=-16, y=7, anchor="ne")
         self.close_button.place(relx=1.0, x=0, y=7, anchor="ne")
+        self._apply_scale(force=True)
         self.min_button.bind("<Button-1>", lambda _event: self._minimize())
         self.close_button.bind("<Button-1>", lambda _event: self.quit())
         self.min_button.bind("<Enter>", lambda _event: self.min_button.configure(fg=FG))
@@ -885,6 +988,28 @@ class CountdownWidget:
             except Exception:
                 pass
         self.root.geometry(f"+{x}+{y}")
+
+    def _px(self, value: float) -> int:
+        return round(value * self._scale)
+
+    def _apply_scale(self, force: bool = False):
+        """按当前显示器缩放系数同步更新内边距、行间距与右上角按钮位置。"""
+        scale = window_scale(self.root)
+        if not force and abs(scale - self._scale) < 0.01:
+            return
+        self._scale = scale
+        self.frame.configure(padx=self._px(14), pady=self._px(10))
+        self.countdown.configure(pady=self._px(1))
+        self.countdown.pack_configure(pady=(0, self._px(2)))
+        self.info.configure(pady=self._px(2))
+        self.info.pack_configure(pady=(self._px(3), 0))
+        self.task.pack_configure(pady=(self._px(3), 0))
+        self.task2.pack_configure(pady=(self._px(3), 0))
+        self.poller.set_avatar_size(self._avatar_px())
+        self.link.configure(pady=self._px(2))
+        self.link.pack_configure(pady=(self._px(4), 0))
+        self.min_button.place(relx=1.0, x=-self._px(20), y=self._px(6), anchor="ne")
+        self.close_button.place(relx=1.0, x=0, y=self._px(6), anchor="ne")
 
     def _end_drag(self, event):
         self._drag = None
@@ -1016,12 +1141,204 @@ class CountdownWidget:
             self._system_theme = current
             self._apply_theme()
 
+    def _avatar_px(self, scale: float | None = None) -> int:
+        active = self._scale if scale is None else scale
+        return max(16, min(48, round(20 * active)))
+
+    def _avatar_photo(self, name: str, size: int) -> tk.PhotoImage | None:
+        key = (name, size)
+        cached = self._photo_cache.get(key)
+        if cached is not None:
+            return cached
+        encoded = self.poller.get_avatar(name, size)
+        if not encoded:
+            return None
+        try:
+            photo = tk.PhotoImage(master=self.root, data=encoded)
+        except tk.TclError:
+            return None
+        if len(self._photo_cache) > 256:
+            self._photo_cache.clear()
+        self._photo_cache[key] = photo
+        return photo
+
+    def _row_fonts(self, muted: bool):
+        return {
+            "time": tkfont.Font(root=self.root, family="Segoe UI", size=9, weight="bold"),
+            "type": tkfont.Font(
+                root=self.root,
+                family="Microsoft YaHei UI",
+                size=10,
+                weight="normal" if muted else "bold",
+            ),
+            "text": tkfont.Font(root=self.root, family="Microsoft YaHei UI", size=10),
+            "badge": tkfont.Font(root=self.root, family="Microsoft YaHei UI", size=8),
+        }
+
+    def _draw_stay_badge(self, canvas: tk.Canvas, x: int, cy: int, size: int, font):
+        r = size // 2
+        canvas.create_oval(
+            x,
+            cy - r,
+            x + size - 1,
+            cy + r - (0 if size % 2 else 1),
+            fill=CHIP_BG,
+            outline="",
+            width=0,
+        )
+        canvas.create_text(
+            x + size / 2,
+            cy,
+            text="留",
+            font=font,
+            fill=SUB,
+            anchor="center",
+        )
+        return size
+
+    def _draw_task_row(
+        self,
+        canvas: tk.Canvas,
+        *,
+        when: str,
+        text: str,
+        detail: dict | None,
+        muted: bool,
+    ):
+        avatar_px = self._avatar_px()
+        row_h = max(avatar_px + self._px(4), self._px(24))
+        rooms = detail.get("rooms") if isinstance(detail, dict) else None
+        avatar_states = tuple(
+            (name, bool(self._avatar_photo(name, avatar_px)))
+            for room in (rooms or ())
+            for name in (room.get("operators") or ())
+            if name and name != "保持当前"
+        )
+        sig = (
+            when,
+            text,
+            json.dumps(detail, sort_keys=True, ensure_ascii=False)
+            if isinstance(detail, dict)
+            else None,
+            muted,
+            avatar_states,
+            round(self._scale, 2),
+            BG,
+            SUB,
+            TASK_FG,
+            OK,
+            TIME_FG,
+            CHIP_BG,
+            CHIP_BORDER,
+        )
+        if getattr(canvas, "_render_sig", None) == sig:
+            return
+        canvas._render_sig = sig
+        canvas.delete("all")
+        canvas.configure(bg=BG)
+
+        fonts = self._row_fonts(muted)
+        cy = row_h // 2
+        x = 0
+        max_w = self._px(252)
+        min_w = self._px(196)
+        gap_sm = self._px(4)
+        gap_md = self._px(6)
+        ellipsis_w = fonts["text"].measure("…") + self._px(2)
+
+        def append_text(segment: str, font_key: str, color: str) -> bool:
+            nonlocal x
+            if not segment:
+                return True
+            w = fonts[font_key].measure(segment)
+            if x > 0 and x + w > max_w - ellipsis_w:
+                return False
+            canvas.create_text(x, cy, text=segment, font=fonts[font_key], fill=color, anchor="w")
+            x += w
+            return True
+
+        has_rooms = isinstance(detail, dict) and bool(rooms)
+        if not has_rooms:
+            if muted and when:
+                append_text(when, "time", TIME_FG)
+                x += gap_md
+            plain = shorten(text, TASK_NAME_WIDTH) if text else "　"
+            w = fonts["text"].measure(plain)
+            canvas.create_text(
+                x,
+                cy,
+                text=plain,
+                font=fonts["text"],
+                fill=SUB if (muted or not text) else TASK_FG,
+                anchor="w",
+            )
+            x += w
+            canvas.configure(width=max(min_w, x), height=row_h)
+            return
+
+        if muted and when:
+            if append_text(when, "time", TIME_FG):
+                x += gap_md
+
+        action_type = str(detail.get("type") or "")
+        truncated = False
+        if action_type:
+            if not append_text(action_type, "type", SUB if muted else TASK_FG):
+                truncated = True
+            else:
+                x += gap_md
+
+        for room_idx, room in enumerate(rooms):
+            if truncated:
+                break
+            if room_idx > 0:
+                if not append_text("·", "text", SUB):
+                    truncated = True
+                    break
+                x += gap_sm
+            room_name = str(room.get("room") or "")
+            if room_name:
+                if not append_text(room_name, "text", OK):
+                    truncated = True
+                    break
+                x += gap_sm
+            for op_idx, op_name in enumerate(room.get("operators") or ()):
+                if op_name == "保持当前":
+                    if x + avatar_px > max_w - ellipsis_w:
+                        truncated = True
+                        break
+                    self._draw_stay_badge(canvas, x, cy, avatar_px, fonts["badge"])
+                    x += avatar_px + gap_sm
+                    continue
+                photo = self._avatar_photo(op_name, avatar_px)
+                if photo is not None:
+                    if x + avatar_px > max_w - ellipsis_w:
+                        truncated = True
+                        break
+                    canvas.create_image(x, cy, image=photo, anchor="w")
+                    x += avatar_px + gap_sm
+                else:
+                    label = op_name if op_idx == 0 else f" {op_name}"
+                    if not append_text(label, "text", SUB if muted else TASK_FG):
+                        truncated = True
+                        break
+                    x += gap_sm
+
+        if truncated:
+            canvas.create_text(x, cy, text="…", font=fonts["text"], fill=SUB, anchor="w")
+            x += fonts["text"].measure("…")
+        canvas.configure(width=max(min_w, min(max_w, x + self._px(2))), height=row_h)
+
+    def _paint_task_canvas(self, canvas: tk.Canvas, color: str):
+        canvas.configure(bg=color)
+
     def _render(self, snapshot: dict | None, left: float | None):
+        self._last_snapshot = snapshot
         if snapshot is None:
             self._set(self.countdown, "--:--")
             self._set(self.info, "等待 mower 启动…")
-            self._set(self.task, "　")
-            self._set(self.task2, "　")
+            self._draw_task_row(self.task, when="", text="　", detail=None, muted=False)
+            self._draw_task_row(self.task2, when="", text="　", detail=None, muted=True)
             if self.poller.auth_failed:
                 self._set(self.link, "○ 需要访问令牌（右键 设置令牌…）", fg=WARN)
             else:
@@ -1036,6 +1353,8 @@ class CountdownWidget:
         when2 = clock_text(snapshot.get("next_next_task") or "")
         task_name = snapshot.get("next_task_name") or ""
         task2_name = snapshot.get("next_next_task_name") or ""
+        detail1 = snapshot.get("next_task_detail")
+        detail2 = snapshot.get("next_next_task_detail")
 
         if status == "sleeping" and left is not None:
             self._set(self.countdown, format_left(left))
@@ -1047,17 +1366,21 @@ class CountdownWidget:
             self._set(self.countdown, "--:--")
             self._set(self.info, STATUS_TEXT.get(status, "状态未知"))
 
-        # 队列两行：先写要做的事，下次任务的时间在状态行，下下个任务的时间在行首
+        # 队列两行：有结构化信息时按日志风格画圆形头像与绿色房间名；否则退回文本。
         self._detail_text = queue_detail(when, task_name, when2, task2_name)
-        self._set(
+        self._draw_task_row(
             self.task,
-            queue_line("", task_name, TASK_NAME_WIDTH) if task_name else "　",
+            when="",
+            text=task_name if task_name else "　",
+            detail=detail1,
+            muted=False,
         )
-        self._set(
+        self._draw_task_row(
             self.task2,
-            queue_line(when2, task2_name, TASK_NAME_WIDTH)
-            if task2_name
-            else "暂无后续任务",
+            when=when2 if task2_name else "",
+            text=task2_name if task2_name else "暂无后续任务",
+            detail=detail2 if task2_name else None,
+            muted=True,
         )
 
         # 目标文本限长：长 URL 会超过固定窗口宽度而被裁掉
@@ -1142,13 +1465,13 @@ class CountdownWidget:
         for label in (
             self.countdown,
             self.info,
-            self.task,
-            self.task2,
             self.link,
             self.min_button,
             self.close_button,
         ):
             label.configure(bg=color)
+        self._paint_task_canvas(self.task, color)
+        self._paint_task_canvas(self.task2, color)
 
     def _show_toast(self, title: str, message: str, with_sound: bool = True) -> bool:
         """弹出系统通知；返回是否成功（结果写入日志，便于排障）。"""
@@ -1232,8 +1555,6 @@ class CountdownWidget:
         for label in (
             self.countdown,
             self.info,
-            self.task,
-            self.task2,
             self.link,
             self.min_button,
             self.close_button,
@@ -1241,9 +1562,8 @@ class CountdownWidget:
             label.configure(bg=BG)
         self.countdown.configure(fg=FG)
         self.info.configure(fg=SUB)
-        self.task.configure(fg=TASK_FG)
-        self.task2.configure(fg=SUB)
         self.link.configure(fg=WARN if self._toast_error else OK)
+        self._render(self._last_snapshot, None)
         self._hide_tooltip()
 
     def _copy_task_name(self):
@@ -1273,6 +1593,10 @@ class CountdownWidget:
         text = self._detail_text
         if not text or self._tip is not None:
             return
+        scale = window_scale(self.root)
+
+        def px(value: float) -> int:
+            return round(value * scale)
         tip = tk.Toplevel(self.root)
         tip.overrideredirect(True)
         try:
@@ -1282,32 +1606,144 @@ class CountdownWidget:
         frame = tk.Frame(
             tip,
             bg=TIP_BG,
-            padx=10,
-            pady=6,
+            padx=px(12),
+            pady=px(8),
             highlightthickness=1,
             highlightbackground=TIP_BORDER,
         )
         frame.pack()
-        tk.Label(
-            frame,
-            text=text,
-            font=("Microsoft YaHei UI", 10),
-            fg=TIP_FG,
-            bg=TIP_BG,
-            justify="left",
-            anchor="w",
-            wraplength=520,
-        ).pack()
+        snapshot = self._last_snapshot or {}
+        structured = []
+        for stamp, detail, fallback in (
+            (
+                clock_text(snapshot.get("next_task") or ""),
+                snapshot.get("next_task_detail"),
+                snapshot.get("next_task_name") or "",
+            ),
+            (
+                clock_text(snapshot.get("next_next_task") or ""),
+                snapshot.get("next_next_task_detail"),
+                snapshot.get("next_next_task_name") or "",
+            ),
+        ):
+            if isinstance(detail, dict) and (detail.get("rooms") or detail.get("type")):
+                structured.append((stamp, detail))
+            elif stamp or fallback:
+                structured.append((stamp, {"type": fallback, "rooms": []}))
+
+        avatar_px = self._avatar_px(scale)
+        has_rich_rooms = any(d.get("rooms") for _, d in structured)
+        if has_rich_rooms:
+            tip_time_font = tkfont.Font(root=tip, family="Segoe UI", size=10, weight="bold")
+            tip_title_font = tkfont.Font(
+                root=tip, family="Microsoft YaHei UI", size=10, weight="bold"
+            )
+            tip_text_font = tkfont.Font(root=tip, family="Microsoft YaHei UI", size=10)
+            tip_badge_font = tkfont.Font(root=tip, family="Microsoft YaHei UI", size=8)
+            line_h = max(avatar_px + px(4), px(22))
+            for block_idx, (stamp, detail) in enumerate(structured):
+                header_row = tk.Frame(frame, bg=TIP_BG)
+                header_row.pack(anchor="w", pady=(px(6) if block_idx else 0, px(2)))
+                if stamp:
+                    tk.Label(
+                        header_row,
+                        text=stamp,
+                        font=tip_time_font,
+                        fg=TIME_FG,
+                        bg=TIP_BG,
+                    ).pack(side="left", padx=(0, px(6)))
+                if detail.get("type"):
+                    tk.Label(
+                        header_row,
+                        text=str(detail["type"]),
+                        font=tip_title_font,
+                        fg=TIP_FG,
+                        bg=TIP_BG,
+                    ).pack(side="left")
+                for room in detail.get("rooms") or ():
+                    operators = list(room.get("operators") or ())
+                    chunks = [operators[i : i + 4] for i in range(0, len(operators), 4)] or [[]]
+                    for chunk_idx, chunk in enumerate(chunks):
+                        row_canvas = tk.Canvas(
+                            frame,
+                            height=line_h,
+                            bg=TIP_BG,
+                            bd=0,
+                            highlightthickness=0,
+                        )
+                        row_canvas.pack(anchor="w", pady=(px(2), 0))
+                        cy = line_h // 2
+                        rx = px(6)
+                        if chunk_idx == 0 and room.get("room"):
+                            room_label = str(room["room"])
+                            row_canvas.create_text(
+                                rx,
+                                cy,
+                                text=room_label,
+                                font=tip_text_font,
+                                fill=OK,
+                                anchor="w",
+                            )
+                            rx += tip_text_font.measure(room_label) + px(6)
+                        elif room.get("room"):
+                            rx += tip_text_font.measure(str(room["room"])) + px(6)
+                        for op_name in chunk:
+                            if op_name == "保持当前":
+                                self._draw_stay_badge(
+                                    row_canvas, rx, cy, avatar_px, tip_badge_font
+                                )
+                                rx += avatar_px + px(4)
+                                row_canvas.create_text(
+                                    rx,
+                                    cy,
+                                    text=op_name,
+                                    font=tip_text_font,
+                                    fill=SUB,
+                                    anchor="w",
+                                )
+                                rx += tip_text_font.measure(op_name) + px(8)
+                                continue
+                            photo = self._avatar_photo(op_name, avatar_px)
+                            if photo is not None:
+                                row_canvas.create_image(rx, cy, image=photo, anchor="w")
+                                rx += avatar_px + px(4)
+                            row_canvas.create_text(
+                                rx,
+                                cy,
+                                text=op_name,
+                                font=tip_text_font,
+                                fill=TIP_FG,
+                                anchor="w",
+                            )
+                            rx += tip_text_font.measure(op_name) + px(8)
+                        row_canvas.configure(width=max(px(120), rx), height=line_h)
+        else:
+            for index, line in enumerate(wrap_lines(text, 52)):
+                tk.Label(
+                    frame,
+                    text=line,
+                    font=("Microsoft YaHei UI", 10),
+                    fg=TIP_FG,
+                    bg=TIP_BG,
+                    justify="left",
+                    anchor="w",
+                    pady=px(2),
+                ).pack(anchor="w", pady=(px(3) if index else 0, 0))
         tip.update_idletasks()
         width = tip.winfo_reqwidth()
         height = tip.winfo_reqheight()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        x = min(self.root.winfo_rootx() + 12, max(8, screen_w - width - 8))
-        y = self.root.winfo_rooty() + self.root.winfo_height() + 6
-        if y + height > screen_h - 8:
-            y = max(8, self.root.winfo_rooty() - height - 6)
-        tip.geometry(f"+{max(8, x)}+{y}")
+        margin = px(8)
+        gap = px(6)
+        x = min(
+            self.root.winfo_rootx() + px(12),
+            max(margin, screen_w - width - margin),
+        )
+        y = self.root.winfo_rooty() + self.root.winfo_height() + gap
+        if y + height > screen_h - margin:
+            y = max(margin, self.root.winfo_rooty() - height - gap)
+        tip.geometry(f"+{max(margin, x)}+{y}")
         self._tip = tip
 
     def _hide_tooltip(self):
