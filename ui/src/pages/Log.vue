@@ -1203,7 +1203,7 @@ const start_options = [
 const db_groups = [
   {
     key: 'mastery',
-    label: '全自动专精',
+    label: '全自动专精/合成',
     items: ['mastery_plan', 'mastery_route', 'mastery_notify']
   },
   {
@@ -2116,7 +2116,7 @@ async function db_delete(keys) {
   --log-mono-font:
     'Cascadia Mono', Consolas, 'Microsoft YaHei', 'SF Mono', 'Menlo', 'PingFang SC', monospace;
   --log-rule: rgb(128 128 128 / 18%);
-  --log-shot-shadow: 0 10px 28px -14px rgba(24, 25, 28, 0.45), 0 2px 6px rgba(24, 25, 28, 0.08);
+  --log-shot-shadow: drop-shadow(0 5px 8px rgba(24, 25, 28, 0.24));
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(120px, 1fr) auto;
@@ -2288,7 +2288,7 @@ async function db_delete(keys) {
     max-width: 100%;
     max-height: min(var(--log-sc-h, 270px), var(--log-stack-shot-max-height));
     border-radius: inherit;
-    box-shadow: var(--log-shot-shadow);
+    filter: var(--log-shot-shadow);
   }
 }
 
@@ -3348,7 +3348,7 @@ html[data-window-shell-theme='dark'] .home-container {
   --lg-btn-info-label: #88c0d0;
   --log-label-weight: 500;
   --log-rule: rgb(216 222 233 / 12%);
-  --log-shot-shadow: 0 12px 30px -14px rgba(18, 20, 28, 0.7), 0 0 0 1px rgba(216, 222, 233, 0.08);
+  --log-shot-shadow: drop-shadow(0 6px 9px rgba(18, 20, 28, 0.65));
 }
 
 .execution-control :deep(.n-button),
