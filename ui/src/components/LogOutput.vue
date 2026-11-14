@@ -781,14 +781,23 @@ function lineClasses(row) {
             v-for="sheen in sheenFilters"
             :id="sheen.id"
             :key="sheen.id"
-            x="0"
-            y="0"
-            width="1"
-            height="1"
+            x="-1"
+            y="-2"
+            width="3"
+            height="3"
             filterUnits="objectBoundingBox"
             primitiveUnits="objectBoundingBox"
             color-interpolation-filters="sRGB"
           >
+            <feFlood
+              x="0"
+              y="0"
+              width="1"
+              height="1"
+              flood-color="white"
+              flood-opacity="0"
+              result="sheen-canvas"
+            />
             <feImage
               v-for="(line, index) in sheen.lines"
               :key="index"
@@ -820,7 +829,8 @@ function lineClasses(row) {
                 repeatCount="indefinite"
               />
             </feImage>
-            <feMerge result="band">
+            <feMerge x="0" y="0" width="1" height="1" result="band">
+              <feMergeNode in="sheen-canvas" />
               <feMergeNode v-for="(_, index) in sheen.lines" :key="index" :in="`band-${index}`" />
             </feMerge>
             <feGaussianBlur
@@ -840,7 +850,7 @@ function lineClasses(row) {
                 flood-color="white"
                 :result="`protected-${index}`"
               />
-              <feMerge result="protected-shape">
+              <feMerge x="0" y="0" width="1" height="1" result="protected-shape">
                 <feMergeNode
                   v-for="(_, index) in sheen.protectedRegions"
                   :key="index"
@@ -848,14 +858,39 @@ function lineClasses(row) {
                 />
               </feMerge>
               <feFlood
+                x="0"
+                y="0"
+                width="1"
+                height="1"
                 flood-color="white"
                 flood-opacity="0.15"
                 style="flood-opacity: var(--log-sheen-protection)"
               />
-              <feComposite in2="protected-shape" operator="in" result="protected-mask" />
-              <feComposite in="soft-band" in2="protected-mask" operator="out" result="muted-band" />
+              <feComposite
+                in2="protected-shape"
+                operator="in"
+                x="0"
+                y="0"
+                width="1"
+                height="1"
+                result="protected-mask"
+              />
+              <feComposite
+                in="soft-band"
+                in2="protected-mask"
+                operator="out"
+                x="0"
+                y="0"
+                width="1"
+                height="1"
+                result="muted-band"
+              />
             </template>
             <feFlood
+              x="0"
+              y="0"
+              width="1"
+              height="1"
               flood-color="white"
               flood-opacity="0.85"
               style="flood-opacity: var(--log-sheen-opacity)"
@@ -863,9 +898,13 @@ function lineClasses(row) {
             <feComposite
               :in2="sheen.protectedRegions.length ? 'muted-band' : 'soft-band'"
               operator="in"
+              x="0"
+              y="0"
+              width="1"
+              height="1"
             />
-            <feComposite in2="SourceAlpha" operator="in" />
-            <feBlend in2="SourceGraphic" mode="screen" />
+            <feComposite in2="SourceAlpha" operator="in" x="0" y="0" width="1" height="1" />
+            <feBlend in2="SourceGraphic" mode="screen" x="0" y="0" width="1" height="1" />
           </filter>
         </defs>
       </svg>

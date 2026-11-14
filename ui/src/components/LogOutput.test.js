@@ -5494,6 +5494,100 @@ describe('log grouping, folding and scene waits', () => {
     expect(page.rows()[0]).toBe(initial[1])
     expect(page.rows()[1]).toBe(initial[2])
   })
+
+  it('keeps the sheen SVG filter region wide enough for WebKit while bounding compositing to the element', async () => {
+    const frames = []
+    vi.stubGlobal('requestAnimationFrame', (callback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    const event = {
+      type: 'facility-arrangement',
+      id: 'sheen-filter-region',
+      phase: 'started',
+      anchor: true,
+      room: 'room_1_1',
+      label: '贸易站 B101',
+      agents: ['但书'],
+      summary: '正在 贸易站 B101 安排 [[operator:但书]] 跑单'
+    }
+    const page = mount({
+      running: true,
+      lines: [
+        {
+          id: 913,
+          event,
+          text: '2026-11-13 23:16:54,730 INFO 正在 贸易站 B101 安排 [[operator:但书]] 跑单'
+        }
+      ]
+    })
+    const output = page.all().find((entry) => hasClass(entry, 'log-output'))
+    const summary = page.all().find((entry) => hasClass(entry, 'log-lifecycle-active'))
+    const doc = {
+      createRange() {
+        let selected
+        return {
+          selectNodeContents(entry) {
+            selected = entry
+          },
+          getClientRects: () => selected.rects
+        }
+      }
+    }
+    const box = (left, top, width, height) => ({
+      left,
+      top,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height
+    })
+    summary.ownerDocument = doc
+    summary.getBoundingClientRect = () => box(40, 20, 200, 20)
+    summary.style = { setProperty: vi.fn(), removeProperty: vi.fn() }
+    summary.childNodes = [
+      { nodeType: 3, textContent: '正在 ', rects: [box(40, 21, 30, 18)] },
+      {
+        tagName: 'SPAN',
+        matches: (selector) => selector.includes('.log-token--room'),
+        childNodes: [{ nodeType: 3, textContent: '贸易站 B101', rects: [box(70, 21, 70, 18)] }]
+      }
+    ]
+    output.querySelectorAll = (selector) => (selector === '.log-lifecycle-active' ? [summary] : [])
+    output.querySelector = () => null
+
+    for (const frame of frames.splice(0)) frame()
+    await nextTick()
+
+    const svg = page.all().find((entry) => hasClass(entry, 'log-sheen-filter'))
+    const filter = all(svg).find((entry) => entry.tag === 'filter')
+    const bounds = { x: '0', y: '0', width: '1', height: '1' }
+    expect(filter.props).toMatchObject({ x: '-1', y: '-2', width: '3', height: '3' })
+
+    const baseCanvas = all(filter).find(
+      (entry) => entry.tag === 'feFlood' && entry.props.result === 'sheen-canvas'
+    )
+    expect(baseCanvas.props).toMatchObject({ ...bounds, 'flood-opacity': '0' })
+
+    const merges = all(filter).filter((entry) => entry.tag === 'feMerge')
+    expect(merges.map((entry) => entry.props.result)).toEqual(['band', 'protected-shape'])
+    for (const merge of merges) expect(merge.props).toMatchObject(bounds)
+    expect(merges[0].children[0].props).toMatchObject({ in: 'sheen-canvas' })
+
+    const overlays = all(filter).filter(
+      (entry) => entry.tag === 'feFlood' && !String(entry.props.result ?? '').startsWith('protected-')
+    )
+    expect(overlays).toHaveLength(3)
+    for (const overlay of overlays) expect(overlay.props).toMatchObject(bounds)
+
+    const composites = all(filter).filter((entry) => entry.tag === 'feComposite')
+    expect(composites).toHaveLength(4)
+    for (const composite of composites) expect(composite.props).toMatchObject(bounds)
+
+    const blend = all(filter).find((entry) => entry.tag === 'feBlend')
+    expect(blend.props).toMatchObject({ ...bounds, in2: 'SourceGraphic', mode: 'screen' })
+  })
 })
 
 describe('runtime log navigation', () => {
