@@ -2023,6 +2023,24 @@ def _describe_task(task, facilities: dict | None = None) -> str:
     return f"{type_name} {body}" if type_name else body
 
 
+def _task_summary_title(
+    task, op_data, facilities: dict | None = None, *, predecessors=()
+) -> str:
+    """生成与主界面一致的简洁任务摘要（如「自动化下班；感知上班」），异常时回退到 _describe_task。"""
+    try:
+        from arknights_mower.utils.task_presentation import build_task_presentation
+
+        presentation = build_task_presentation(
+            task, op_data, predecessors=predecessors
+        )
+        title = str(presentation.get("title") or "").strip()
+        if title:
+            return title
+    except Exception:
+        logger.exception("生成任务摘要失败")
+    return _describe_task(task, facilities)
+
+
 def _describe_task_detail(task, facilities: dict | None = None) -> dict | None:
     """生成结构化任务展示明细（动作类型 + 房间与干员列表），供倒计时挂件渲染。"""
     try:
@@ -2212,8 +2230,8 @@ def get_status():
                         base_scheduler.tasks[0].time - datetime.datetime.now()
                     ).total_seconds()
                 )
-                response["next_task_name"] = _describe_task(
-                    base_scheduler.tasks[0], facilities
+                response["next_task_name"] = _task_summary_title(
+                    base_scheduler.tasks[0], op_data, facilities
                 )
                 response["next_task_detail"] = _describe_task_detail(
                     base_scheduler.tasks[0], facilities
@@ -2222,8 +2240,11 @@ def get_status():
                     response["next_next_task_time"] = base_scheduler.tasks[
                         1
                     ].time.strftime("%Y-%m-%d %H:%M:%S")
-                    response["next_next_task_name"] = _describe_task(
-                        base_scheduler.tasks[1], facilities
+                    response["next_next_task_name"] = _task_summary_title(
+                        base_scheduler.tasks[1],
+                        op_data,
+                        facilities,
+                        predecessors=(base_scheduler.tasks[0],),
                     )
                     response["next_next_task_detail"] = _describe_task_detail(
                         base_scheduler.tasks[1], facilities

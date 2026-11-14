@@ -2,7 +2,7 @@
 """独立倒计时挂件：显示距离 mower 下次任务的剩余时间，并在临界点弹桌面通知。
 
 数据来自 mower Web 服务的 /status 接口，该接口要求当前实例的访问令牌：
-先在 mower 设置里填写 Web UI token，再用右键菜单「设置令牌…」或 --token 填同一个值。
+先在 mower 设置里填写 Web UI token，再在挂件右键菜单「设置…」里填同一个值或用 --token 指定。
 
 端口默认自动发现：扫描实例登记文件（<数据目录>/tmp/updates/*/instances/*.json，
 兼容旧布局 <数据目录>/updates/*/instances/*.json），按心跳时间优先连接能响应的实例。
@@ -13,8 +13,8 @@
 - 置顶小窗（带系统标题栏，可最小化/关闭），实时倒计时（休眠中）/ 工作中 / 未运行；
 - 剩余 60 / 30 / 10 秒时弹 Windows 系统通知 + 提示音 + 窗口闪烁（阈值可用
   --thresholds 自定义），最后 10 秒倒计时数字平滑循环变色；
-- 显示下次任务名与时间；窗口可拖动（位置自动记忆），右键菜单可测试通知、
-  设置服务器、设置访问令牌、开关置顶/声音或退出；
+- 显示下次任务名与时间；窗口可拖动（位置自动记忆），右键菜单可开关置顶/声音、
+  重新连接、打开设置面板（主题、通知测试、服务器与令牌等）或退出；
 - 支持 HTTP / HTTPS：目标写成 https://host:port 即走 TLS（先试 http、失败再试
   https），自签名证书可勾选「忽略证书校验」（等价 curl -k）。
 
@@ -48,7 +48,6 @@ import tkinter.font as tkfont
 import traceback
 import urllib.parse
 from pathlib import Path
-from tkinter import messagebox, simpledialog
 
 IS_WINDOWS = sys.platform == "win32"
 if IS_WINDOWS:
@@ -753,6 +752,62 @@ class StatusPoller(threading.Thread):
 # --- 界面 ---
 
 
+class _ToggleSwitch(tk.Canvas):
+    """现代化胶囊开关（跟随当前主题与 DPI 缩放）。"""
+
+    def __init__(
+        self, master, variable: tk.BooleanVar, *, scale: float = 1.0, command=None
+    ):
+        self.variable = variable
+        self._command = command
+        w = max(32, round(38 * scale))
+        h = max(18, round(20 * scale))
+        self._switch_w = w
+        self._switch_h = h
+        super().__init__(
+            master,
+            width=w,
+            height=h,
+            bg=BG,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.bind("<Button-1>", self._toggle)
+        self._trace_id = self.variable.trace_add("write", lambda *_: self.redraw())
+        self.bind("<Destroy>", self._on_destroy, add="+")
+        self.redraw()
+
+    def _on_destroy(self, _event=None):
+        try:
+            self.variable.trace_remove("write", self._trace_id)
+        except tk.TclError:
+            pass
+
+    def _toggle(self, _event=None):
+        self.variable.set(not bool(self.variable.get()))
+        if self._command is not None:
+            self._command()
+
+    def redraw(self):
+        self.delete("all")
+        self.configure(bg=BG)
+        w, h = self._switch_w, self._switch_h
+        on = bool(self.variable.get())
+        track = OK if on else CHIP_BORDER
+        knob = "#ffffff" if on else FG
+        r = (h - 2) / 2
+        x0, y0, x1, y1 = 1, 1, w - 1, h - 1
+        d = y1 - y0
+        self.create_oval(x0, y0, x0 + d, y1, fill=track, outline="")
+        self.create_oval(x1 - d, y0, x1, y1, fill=track, outline="")
+        self.create_rectangle(x0 + r, y0, x1 - r, y1, fill=track, outline="")
+        pad = max(2, round(h * 0.14))
+        kd = h - pad * 2
+        kx = (w - pad - kd) if on else pad
+        self.create_oval(kx, pad, kx + kd, pad + kd, fill=knob, outline="")
+
+
 class CountdownWidget:
     """置顶小窗 + 临界提醒。"""
 
@@ -769,7 +824,10 @@ class CountdownWidget:
     ):
         self.poller = poller
         self.thresholds = tuple(sorted({int(t) for t in thresholds}, reverse=True))
-        self.toast_enabled = toast
+        settings = load_settings()
+        self.toast_enabled = bool(toast and settings.get("toast", True))
+        self._init_pin = bool(settings.get("pin", True))
+        self._init_sound = bool(sound and settings.get("sound", True))
         self.verbose = verbose
 
         self._prev = None
@@ -782,10 +840,12 @@ class CountdownWidget:
         self._photo_cache: dict[tuple[str, int], tk.PhotoImage] = {}
         self._tip = None
         self._tip_job = None
+        self._menu_win = None
+        self._settings_win = None
         self._scale = 1.0
 
         # 主题：先按偏好准备好调色板，再创建控件（创建时就会取到正确颜色）
-        self.theme_pref = str(load_settings().get("theme") or "system")
+        self.theme_pref = str(settings.get("theme") or "system")
         self._system_theme = system_theme()
         self._theme_check = 0
         apply_theme(resolve_theme(self.theme_pref))
@@ -796,7 +856,7 @@ class CountdownWidget:
         self.theme_var = tk.StringVar(value=self.theme_pref)
         install_exception_logging(self.root)
         try:
-            self.root.attributes("-topmost", True)
+            self.root.attributes("-topmost", self._init_pin)
         except tk.TclError:
             pass
         icon = resource_path("countdown_widget.ico")
@@ -922,43 +982,16 @@ class CountdownWidget:
             widget.bind("<Enter>", self._tooltip_enter, add="+")
             widget.bind("<Leave>", self._tooltip_leave, add="+")
 
-        self.pin_var = tk.BooleanVar(value=True)
-        self.sound_var = tk.BooleanVar(value=True)
+        self.pin_var = tk.BooleanVar(value=self._init_pin)
+        self.sound_var = tk.BooleanVar(value=self._init_sound)
+        self.toast_var = tk.BooleanVar(value=self.toast_enabled)
         self.secure_var = tk.BooleanVar(value=bool(self.poller.secure))
         self.insecure_var = tk.BooleanVar(value=bool(self.poller.insecure))
-        self.menu = tk.Menu(self.root, tearoff=False)
-        self.menu.add_checkbutton(
-            label="窗口置顶", variable=self.pin_var, command=self._toggle_pin
-        )
-        self.menu.add_checkbutton(label="声音提醒", variable=self.sound_var)
-        theme_menu = tk.Menu(self.menu, tearoff=False)
-        for value, label in THEME_LABELS:
-            theme_menu.add_radiobutton(
-                label=label,
-                value=value,
-                variable=self.theme_var,
-                command=self._change_theme,
-            )
-        self.menu.add_cascade(label="主题", menu=theme_menu)
-        self.menu.add_command(label="发送测试通知", command=self._test_toast)
-        self.menu.add_command(label="查看完整任务队列", command=self._copy_task_name)
-        self.menu.add_command(label="重新连接", command=self.poller.reset)
-        self.menu.add_command(label="设置服务器…", command=self._configure_server)
-        self.menu.add_command(label="设置令牌…", command=self._configure_token)
-        self.menu.add_checkbutton(
-            label="使用 HTTPS", variable=self.secure_var, command=self._toggle_secure
-        )
-        self.menu.add_checkbutton(
-            label="忽略证书校验（自签名证书）",
-            variable=self.insecure_var,
-            command=self._toggle_insecure,
-        )
-        self.menu.add_separator()
-        self.menu.add_command(label="退出", command=self.quit)
 
     # -- 窗口拖动与位置记忆 --
 
     def _start_drag(self, event):
+        self._close_menu()
         self._tooltip_leave()  # 拖动时收起悬停提示，避免提示框跟着乱跑
         self._drag = (
             event.x_root - self.root.winfo_x(),
@@ -1208,11 +1241,22 @@ class CountdownWidget:
         avatar_px = self._avatar_px()
         row_h = max(avatar_px + self._px(4), self._px(24))
         rooms = detail.get("rooms") if isinstance(detail, dict) else None
+        operators: list[str] = []
+        seen_ops: set[str] = set()
+        has_stay = False
+        for room in rooms or ():
+            for name in room.get("operators") or ():
+                if not name:
+                    continue
+                if name == "保持当前":
+                    has_stay = True
+                    continue
+                if name not in seen_ops:
+                    seen_ops.add(name)
+                    operators.append(name)
+
         avatar_states = tuple(
-            (name, bool(self._avatar_photo(name, avatar_px)))
-            for room in (rooms or ())
-            for name in (room.get("operators") or ())
-            if name and name != "保持当前"
+            (name, bool(self._avatar_photo(name, avatar_px))) for name in operators
         )
         sig = (
             when,
@@ -1240,93 +1284,83 @@ class CountdownWidget:
         fonts = self._row_fonts(muted)
         cy = row_h // 2
         x = 0
-        max_w = self._px(252)
-        min_w = self._px(196)
+        max_w = self._px(208)
+        min_w = self._px(180)
         gap_sm = self._px(4)
         gap_md = self._px(6)
-        ellipsis_w = fonts["text"].measure("…") + self._px(2)
-
-        def append_text(segment: str, font_key: str, color: str) -> bool:
-            nonlocal x
-            if not segment:
-                return True
-            w = fonts[font_key].measure(segment)
-            if x > 0 and x + w > max_w - ellipsis_w:
-                return False
-            canvas.create_text(x, cy, text=segment, font=fonts[font_key], fill=color, anchor="w")
-            x += w
-            return True
-
-        has_rooms = isinstance(detail, dict) and bool(rooms)
-        if not has_rooms:
-            if muted and when:
-                append_text(when, "time", TIME_FG)
-                x += gap_md
-            plain = shorten(text, TASK_NAME_WIDTH) if text else "　"
-            w = fonts["text"].measure(plain)
-            canvas.create_text(
-                x,
-                cy,
-                text=plain,
-                font=fonts["text"],
-                fill=SUB if (muted or not text) else TASK_FG,
-                anchor="w",
-            )
-            x += w
-            canvas.configure(width=max(min_w, x), height=row_h)
-            return
 
         if muted and when:
-            if append_text(when, "time", TIME_FG):
-                x += gap_md
+            w = fonts["time"].measure(when)
+            canvas.create_text(
+                x, cy, text=when, font=fonts["time"], fill=TIME_FG, anchor="w"
+            )
+            x += w + gap_md
 
-        action_type = str(detail.get("type") or "")
-        truncated = False
-        if action_type:
-            if not append_text(action_type, "type", SUB if muted else TASK_FG):
-                truncated = True
-            else:
-                x += gap_md
+        # 收集可显示的堆叠头像（最多叠 3 个，多于 1 人时附带总人数）
+        photos = [
+            photo
+            for op_name in operators
+            if (photo := self._avatar_photo(op_name, avatar_px)) is not None
+        ]
+        shown_photos = photos[:3]
+        step = max(6, round(avatar_px * 0.55))
+        count_text = f"×{len(operators)}" if len(operators) > 1 and shown_photos else ""
+        count_w = fonts["badge"].measure(count_text) if count_text else 0
 
-        for room_idx, room in enumerate(rooms):
-            if truncated:
-                break
-            if room_idx > 0:
-                if not append_text("·", "text", SUB):
-                    truncated = True
-                    break
-                x += gap_sm
-            room_name = str(room.get("room") or "")
-            if room_name:
-                if not append_text(room_name, "text", OK):
-                    truncated = True
-                    break
-                x += gap_sm
-            for op_idx, op_name in enumerate(room.get("operators") or ()):
-                if op_name == "保持当前":
-                    if x + avatar_px > max_w - ellipsis_w:
-                        truncated = True
-                        break
-                    self._draw_stay_badge(canvas, x, cy, avatar_px, fonts["badge"])
-                    x += avatar_px + gap_sm
-                    continue
-                photo = self._avatar_photo(op_name, avatar_px)
-                if photo is not None:
-                    if x + avatar_px > max_w - ellipsis_w:
-                        truncated = True
-                        break
-                    canvas.create_image(x, cy, image=photo, anchor="w")
-                    x += avatar_px + gap_sm
-                else:
-                    label = op_name if op_idx == 0 else f" {op_name}"
-                    if not append_text(label, "text", SUB if muted else TASK_FG):
-                        truncated = True
-                        break
+        stack_w = 0
+        if shown_photos:
+            stack_w = avatar_px + (len(shown_photos) - 1) * step
+        elif has_stay and not operators:
+            stack_w = avatar_px
+
+        right_w = stack_w + (gap_sm + count_w if count_text else 0)
+
+        display_text = text if (text and text != "　") else ""
+        if not display_text and isinstance(detail, dict):
+            display_text = str(detail.get("type") or "")
+        if not display_text:
+            display_text = "　"
+
+        avail_text_w = max_w - x - (gap_md + right_w if right_w > 0 else 0)
+        if display_text != "　" and avail_text_w > 0:
+            if fonts["text"].measure(display_text) > avail_text_w:
+                trimmed = display_text
+                while trimmed and fonts["text"].measure(trimmed + "…") > avail_text_w:
+                    trimmed = trimmed[:-1]
+                display_text = (trimmed + "…") if trimmed else "…"
+
+        text_color = SUB if (muted or not text or text == "　") else TASK_FG
+        text_w = fonts["text"].measure(display_text)
+        canvas.create_text(
+            x, cy, text=display_text, font=fonts["text"], fill=text_color, anchor="w"
+        )
+        x += text_w
+
+        if right_w > 0:
+            x += gap_md
+            if shown_photos:
+                for idx in range(len(shown_photos) - 1, -1, -1):
+                    px_x = x + idx * step
+                    canvas.create_oval(
+                        px_x - 1,
+                        cy - avatar_px // 2 - 1,
+                        px_x + avatar_px + 1,
+                        cy + avatar_px // 2 + 1,
+                        fill=BG,
+                        outline="",
+                    )
+                    canvas.create_image(px_x, cy, image=shown_photos[idx], anchor="w")
+                x += stack_w
+                if count_text:
                     x += gap_sm
+                    canvas.create_text(
+                        x, cy, text=count_text, font=fonts["badge"], fill=SUB, anchor="w"
+                    )
+                    x += count_w
+            elif has_stay and not operators:
+                self._draw_stay_badge(canvas, x, cy, avatar_px, fonts["badge"])
+                x += avatar_px
 
-        if truncated:
-            canvas.create_text(x, cy, text="…", font=fonts["text"], fill=SUB, anchor="w")
-            x += fonts["text"].measure("…")
         canvas.configure(width=max(min_w, min(max_w, x + self._px(2))), height=row_h)
 
     def _paint_task_canvas(self, canvas: tk.Canvas, color: str):
@@ -1340,7 +1374,7 @@ class CountdownWidget:
             self._draw_task_row(self.task, when="", text="　", detail=None, muted=False)
             self._draw_task_row(self.task2, when="", text="　", detail=None, muted=True)
             if self.poller.auth_failed:
-                self._set(self.link, "○ 需要访问令牌（右键 设置令牌…）", fg=WARN)
+                self._set(self.link, "○ 需要访问令牌（右键 设置…）", fg=WARN)
             else:
                 self._set(self.link, "○ 未连接（自动重试）", fg=SUB)
             self._detail_text = ""
@@ -1512,40 +1546,18 @@ class CountdownWidget:
         else:
             self._toast_error = True
 
-    def _test_toast(self):
-        """右键菜单：手动发一条测试通知，失败时直接给出日志。"""
-        sound_on = bool(self.sound_var.get())
-        ok = self._show_toast(
-            "Mower 倒计时",
-            "测试通知：看到这条说明通知功能正常（若未出现请检查系统通知/专注助手设置）",
-            sound_on,
-        )
-        if ok:
-            messagebox.showinfo(
-                "测试通知", "已发送，请查看屏幕右下角的通知。", parent=self.root
-            )
-            return
-        try:
-            tail = "\n".join(LOG_PATH.read_text(encoding="utf-8").splitlines()[-5:])
-        except OSError:
-            tail = "（没有日志）"
-        messagebox.showwarning(
-            "测试通知", f"发送失败，日志最后几行：\n\n{tail}", parent=self.root
-        )
-
     # -- 交互 --
 
     def _toggle_pin(self):
+        pin = bool(self.pin_var.get())
         try:
-            self.root.attributes("-topmost", self.pin_var.get())
+            self.root.attributes("-topmost", pin)
         except tk.TclError:
             pass
+        save_settings(pin=pin)
 
-    def _change_theme(self):
-        """右键菜单切换主题：记住偏好并立即重绘。"""
-        self.theme_pref = self.theme_var.get()
-        save_settings(theme=self.theme_pref)
-        self._apply_theme()
+    def _toggle_sound(self):
+        save_settings(sound=bool(self.sound_var.get()))
 
     def _apply_theme(self):
         """把当前主题应用到所有控件（含提示框）。"""
@@ -1565,16 +1577,7 @@ class CountdownWidget:
         self.link.configure(fg=WARN if self._toast_error else OK)
         self._render(self._last_snapshot, None)
         self._hide_tooltip()
-
-    def _copy_task_name(self):
-        """右键菜单：显示并复制完整任务队列（窗口内单行显示，超出部分截断）。"""
-        text = self._detail_text
-        if not text:
-            messagebox.showinfo("任务队列", "当前没有待执行任务。", parent=self.root)
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        messagebox.showinfo("任务队列", f"已复制到剪贴板：\n\n{text}", parent=self.root)
+        self._close_menu()
 
     # -- 悬停提示（显示完整任务名） --
 
@@ -1681,7 +1684,7 @@ class CountdownWidget:
                                 cy,
                                 text=room_label,
                                 font=tip_text_font,
-                                fill=OK,
+                                fill=TIP_FG,
                                 anchor="w",
                             )
                             rx += tip_text_font.measure(room_label) + px(6)
@@ -1751,80 +1754,518 @@ class CountdownWidget:
             self._tip.destroy()
             self._tip = None
 
-    def _configure_server(self):
-        """手动指定 mower 地址（绿色版拷到其它机器、连不上时使用）。"""
-        current = self.poller.host
+    def _close_menu(self):
+        if self._menu_win is not None:
+            try:
+                self._menu_win.destroy()
+            except tk.TclError:
+                pass
+            self._menu_win = None
+
+    def _popup_menu(self, event):
+        self._close_menu()
+        self._tooltip_leave()
+        px = self._px
+        menu = tk.Toplevel(self.root)
+        try:
+            menu.overrideredirect(True)
+            menu.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        menu.configure(bg=BORDER)
+
+        panel = tk.Frame(menu, bg=BG, padx=px(4), pady=px(4))
+        panel.pack(padx=1, pady=1)
+
+        def add_item(label: str, command, *, checked: bool | None = None, danger: bool = False):
+            row = tk.Frame(panel, bg=BG, cursor="hand2")
+            row.pack(fill="x", pady=px(1))
+            mark = tk.Label(
+                row,
+                text="✓" if checked else "",
+                width=2,
+                font=("Segoe UI", 9, "bold"),
+                fg=OK,
+                bg=BG,
+                anchor="center",
+                cursor="hand2",
+            )
+            mark.pack(side="left", padx=(px(4), 0), pady=px(4))
+            lbl = tk.Label(
+                row,
+                text=label,
+                font=("Microsoft YaHei UI", 9),
+                fg=FG,
+                bg=BG,
+                anchor="w",
+                cursor="hand2",
+            )
+            lbl.pack(side="left", fill="x", expand=True, padx=(px(2), px(16)), pady=px(4))
+
+            def on_enter(_e):
+                row.configure(bg=CHIP_BG)
+                mark.configure(bg=CHIP_BG)
+                lbl.configure(bg=CHIP_BG, fg=CLOSE_HOVER if danger else FG)
+
+            def on_leave(_e):
+                row.configure(bg=BG)
+                mark.configure(bg=BG)
+                lbl.configure(bg=BG, fg=FG)
+
+            def on_click(_e):
+                self._close_menu()
+                command()
+
+            for widget in (row, mark, lbl):
+                widget.bind("<Enter>", on_enter)
+                widget.bind("<Leave>", on_leave)
+                widget.bind("<Button-1>", on_click)
+
+        def add_sep():
+            tk.Frame(panel, bg=BORDER, height=1).pack(fill="x", padx=px(6), pady=px(4))
+
+        add_item(
+            "窗口置顶",
+            lambda: (self.pin_var.set(not self.pin_var.get()), self._toggle_pin()),
+            checked=bool(self.pin_var.get()),
+        )
+        add_item(
+            "声音提醒",
+            lambda: (self.sound_var.set(not self.sound_var.get()), self._toggle_sound()),
+            checked=bool(self.sound_var.get()),
+        )
+        add_sep()
+        add_item("重新连接", self.poller.reset)
+        add_item("设置…", self._open_settings)
+        add_sep()
+        add_item("退出", self.quit, danger=True)
+
+        menu.update_idletasks()
+        width = menu.winfo_reqwidth()
+        height = menu.winfo_reqheight()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x = min(event.x_root, max(0, screen_w - width - px(6)))
+        y = min(event.y_root, max(0, screen_h - height - px(6)))
+        menu.geometry(f"+{x}+{y}")
+        menu.bind("<Escape>", lambda _e: self._close_menu())
+        menu.bind("<FocusOut>", lambda _e: self._close_menu())
+        menu.focus_force()
+        self._menu_win = menu
+
+    def _close_settings(self):
+        if self._settings_win is not None:
+            try:
+                self._settings_win.destroy()
+            except tk.TclError:
+                pass
+            self._settings_win = None
+
+    def _open_settings(self):
+        """打开现代化设置窗口（主题、提醒、服务器与令牌统一管理）。"""
+        if self._settings_win is not None:
+            try:
+                if self._settings_win.winfo_exists():
+                    self._settings_win.lift()
+                    self._settings_win.focus_force()
+                    return
+            except tk.TclError:
+                self._settings_win = None
+
+        px = self._px
+        active_theme = resolve_theme(self.theme_pref)
+        accent_fg = "#ffffff" if active_theme == "light" else "#1e222d"
+
+        win = tk.Toplevel(self.root)
+        win.title("设置 - Mower 倒计时")
+        try:
+            win.overrideredirect(True)
+            win.attributes("-topmost", bool(self.pin_var.get()))
+        except tk.TclError:
+            pass
+        win.configure(bg=BORDER)
+        self._settings_win = win
+
+        container = tk.Frame(win, bg=BG)
+        container.pack(padx=1, pady=1, fill="both", expand=True)
+
+        # -- 标题栏（支持拖动） --
+        header = tk.Frame(container, bg=BG, padx=px(16), pady=px(10))
+        header.pack(fill="x")
+        title_lbl = tk.Label(
+            header,
+            text="设置",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            fg=FG,
+            bg=BG,
+            anchor="w",
+        )
+        title_lbl.pack(side="left")
+        close_btn = tk.Label(
+            header,
+            text="✕",
+            font=("Segoe UI", 10),
+            fg=SUB,
+            bg=BG,
+            cursor="hand2",
+            padx=px(4),
+        )
+        close_btn.pack(side="right")
+        close_btn.bind("<Enter>", lambda _e: close_btn.configure(fg=CLOSE_HOVER))
+        close_btn.bind("<Leave>", lambda _e: close_btn.configure(fg=SUB))
+        close_btn.bind("<Button-1>", lambda _e: self._close_settings())
+
+        drag_pos = {"offset": None}
+
+        def start_drag(event):
+            drag_pos["offset"] = (
+                event.x_root - win.winfo_x(),
+                event.y_root - win.winfo_y(),
+            )
+
+        def do_drag(event):
+            if drag_pos["offset"] is None:
+                return
+            dx, dy = drag_pos["offset"]
+            win.geometry(f"+{event.x_root - dx}+{event.y_root - dy}")
+
+        def end_drag(_event):
+            drag_pos["offset"] = None
+
+        for w in (header, title_lbl):
+            w.bind("<ButtonPress-1>", start_drag)
+            w.bind("<B1-Motion>", do_drag)
+            w.bind("<ButtonRelease-1>", end_drag)
+
+        tk.Frame(container, bg=BORDER, height=1).pack(fill="x")
+
+        # -- 表单状态 --
+        current_server = ""
         target = self.poller.fixed_port or self.poller.endpoint
         if target:
             scheme = "https://" if self.poller.endpoint_secure else ""
-            current = f"{scheme}{current}:{target}"
-        text = simpledialog.askstring(
-            "设置 Mower 服务器",
-            "输入端口（如 58000）或地址：\n"
-            "58000 / 192.168.1.5:58000 / https://mower.example.com\n"
-            "留空表示自动发现；https:// 开头会启用加密连接",
-            initialvalue=current,
-            parent=self.root,
-        )
-        if text is None:
-            return
-        host, port, secure = parse_endpoint(text)
-        if host is None:
-            messagebox.showerror(
-                "设置失败",
-                "地址格式不对，示例：58000 / 192.168.1.5:58000 / https://host:8443",
-                parent=self.root,
+            current_server = f"{scheme}{self.poller.host}:{target}"
+        elif self.poller.host and self.poller.host != "127.0.0.1":
+            current_server = self.poller.host
+
+        draft_theme = tk.StringVar(value=self.theme_pref)
+        draft_pin = tk.BooleanVar(value=bool(self.pin_var.get()))
+        draft_sound = tk.BooleanVar(value=bool(self.sound_var.get()))
+        draft_toast = tk.BooleanVar(value=bool(self.toast_var.get()))
+        draft_server = tk.StringVar(value=current_server)
+        draft_token = tk.StringVar(value=self.poller.token or "")
+        draft_secure = tk.BooleanVar(value=bool(self.poller.secure))
+        draft_insecure = tk.BooleanVar(value=bool(self.poller.insecure))
+
+        body = tk.Frame(container, bg=BG, padx=px(16), pady=px(12))
+        body.pack(fill="both", expand=True)
+
+        def section_title(text: str, top_pad: int = 0):
+            tk.Label(
+                body,
+                text=text,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                fg=SUB,
+                bg=BG,
+                anchor="w",
+            ).pack(fill="x", pady=(px(top_pad), px(6)))
+
+        def switch_row(label: str, variable: tk.BooleanVar, extra=None):
+            row = tk.Frame(body, bg=BG)
+            row.pack(fill="x", pady=px(4))
+            lbl = tk.Label(
+                row,
+                text=label,
+                font=("Microsoft YaHei UI", 10),
+                fg=FG,
+                bg=BG,
+                anchor="w",
             )
-            return
-        self.poller.configure(host, port, secure=secure)
-        self.secure_var.set(bool(secure))
-        save_settings(host=host, port=port, secure=secure)
+            lbl.pack(side="left")
+            sw = _ToggleSwitch(row, variable, scale=self._scale)
+            sw.pack(side="right")
+            if extra is not None:
+                extra(row)
+            return row
 
-    def _configure_token(self):
-        """填写 mower 的 Web UI token：/status 需要它才能读取状态。"""
-        token = simpledialog.askstring(
-            "设置访问令牌",
-            "输入 mower 设置里的 Web UI token：\n"
-            "留空表示不使用令牌；令牌保存在用户主目录的 .mower-countdown.json",
-            initialvalue=self.poller.token,
-            show="*",
-            parent=self.root,
+        # -- 外观与提醒 --
+        section_title("外观与提醒")
+
+        theme_row = tk.Frame(body, bg=BG)
+        theme_row.pack(fill="x", pady=px(4))
+        tk.Label(
+            theme_row,
+            text="主题",
+            font=("Microsoft YaHei UI", 10),
+            fg=FG,
+            bg=BG,
+            anchor="w",
+        ).pack(side="left")
+        seg_wrap = tk.Frame(
+            theme_row,
+            bg=CHIP_BG,
+            highlightthickness=1,
+            highlightbackground=CHIP_BORDER,
+            padx=px(2),
+            pady=px(2),
         )
-        if token is None:
-            return
-        token = token.strip()
-        self.poller.configure(
-            self.poller.host,
-            self.poller.fixed_port,
-            secure=self.poller.secure,
-            token=token,
+        seg_wrap.pack(side="right")
+        seg_buttons: dict[str, tk.Label] = {}
+
+        def refresh_theme_seg():
+            selected = draft_theme.get()
+            for val, btn in seg_buttons.items():
+                if val == selected:
+                    btn.configure(bg=TIME_FG, fg=accent_fg)
+                else:
+                    btn.configure(bg=CHIP_BG, fg=SUB)
+
+        for val, text in THEME_LABELS:
+            btn = tk.Label(
+                seg_wrap,
+                text=text,
+                font=("Microsoft YaHei UI", 9),
+                padx=px(8),
+                pady=px(3),
+                cursor="hand2",
+            )
+            btn.pack(side="left", padx=px(1))
+            btn.bind("<Button-1>", lambda _e, v=val: (draft_theme.set(v), refresh_theme_seg()))
+            seg_buttons[val] = btn
+        refresh_theme_seg()
+
+        switch_row("窗口置顶", draft_pin)
+        switch_row("声音提醒", draft_sound)
+
+        status_var = tk.StringVar(value="")
+
+        def send_test_toast():
+            ok = self._show_toast(
+                "Mower 倒计时",
+                "测试通知：看到这条说明通知功能正常（若未出现请检查系统通知/专注助手设置）",
+                bool(draft_sound.get()),
+            )
+            if ok:
+                status_lbl.configure(fg=OK)
+                status_var.set("✓ 已发送测试通知，请查看屏幕右下角")
+            else:
+                status_lbl.configure(fg=WARN)
+                status_var.set("测试通知发送失败，详情见 ~/.mower-countdown.log")
+
+        def add_test_btn(row):
+            test_btn = tk.Label(
+                row,
+                text="测试通知",
+                font=("Microsoft YaHei UI", 8),
+                fg=SUB,
+                bg=CHIP_BG,
+                highlightthickness=1,
+                highlightbackground=CHIP_BORDER,
+                padx=px(8),
+                pady=px(2),
+                cursor="hand2",
+            )
+            test_btn.pack(side="right", padx=(0, px(8)))
+            test_btn.bind("<Enter>", lambda _e: test_btn.configure(fg=FG))
+            test_btn.bind("<Leave>", lambda _e: test_btn.configure(fg=SUB))
+            test_btn.bind("<Button-1>", lambda _e: send_test_toast())
+
+        switch_row("桌面通知", draft_toast, extra=add_test_btn)
+
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(px(10), px(10)))
+
+        # -- 服务器连接 --
+        section_title("服务器连接")
+
+        tk.Label(
+            body,
+            text="服务器地址",
+            font=("Microsoft YaHei UI", 9),
+            fg=FG,
+            bg=BG,
+            anchor="w",
+        ).pack(fill="x", pady=(0, px(3)))
+        server_entry = tk.Entry(
+            body,
+            textvariable=draft_server,
+            font=("Segoe UI", 10),
+            fg=FG,
+            bg=CHIP_BG,
+            insertbackground=FG,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=CHIP_BORDER,
+            highlightcolor=TIME_FG,
+            width=32,
         )
-        save_settings(token=token)
+        server_entry.pack(fill="x", ipady=px(5))
+        tk.Label(
+            body,
+            text="留空自动发现；支持 58000 / host:port / https://host:port",
+            font=("Microsoft YaHei UI", 8),
+            fg=SUB,
+            bg=BG,
+            anchor="w",
+        ).pack(fill="x", pady=(px(2), px(8)))
 
-    def _toggle_secure(self):
-        """右键菜单：在 HTTP / HTTPS 之间切换，改完立即重连。"""
-        secure = bool(self.secure_var.get())
-        self.poller.configure(self.poller.host, self.poller.fixed_port, secure=secure)
-        save_settings(secure=secure)
-
-    def _toggle_insecure(self):
-        """右键菜单：自签名证书时跳过证书校验（等价 curl -k）。"""
-        insecure = bool(self.insecure_var.get())
-        self.poller.configure(
-            self.poller.host,
-            self.poller.fixed_port,
-            secure=self.poller.secure,
-            insecure=insecure,
+        tk.Label(
+            body,
+            text="访问令牌（Web UI token）",
+            font=("Microsoft YaHei UI", 9),
+            fg=FG,
+            bg=BG,
+            anchor="w",
+        ).pack(fill="x", pady=(0, px(3)))
+        token_wrap = tk.Frame(body, bg=BG)
+        token_wrap.pack(fill="x", pady=(0, px(8)))
+        token_entry = tk.Entry(
+            token_wrap,
+            textvariable=draft_token,
+            font=("Segoe UI", 10),
+            fg=FG,
+            bg=CHIP_BG,
+            insertbackground=FG,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=CHIP_BORDER,
+            highlightcolor=TIME_FG,
+            show="•",
         )
-        save_settings(insecure=insecure)
+        token_entry.pack(side="left", fill="x", expand=True, ipady=px(5))
+        token_shown = {"value": False}
 
-    def _popup_menu(self, event):
-        try:
-            self.menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.menu.grab_release()
+        def toggle_token_vis():
+            token_shown["value"] = not token_shown["value"]
+            token_entry.configure(show="" if token_shown["value"] else "•")
+            eye_btn.configure(text="隐藏" if token_shown["value"] else "显示")
+
+        eye_btn = tk.Label(
+            token_wrap,
+            text="显示",
+            font=("Microsoft YaHei UI", 9),
+            fg=SUB,
+            bg=CHIP_BG,
+            highlightthickness=1,
+            highlightbackground=CHIP_BORDER,
+            padx=px(10),
+            pady=px(5),
+            cursor="hand2",
+        )
+        eye_btn.pack(side="right", padx=(px(6), 0))
+        eye_btn.bind("<Enter>", lambda _e: eye_btn.configure(fg=FG))
+        eye_btn.bind("<Leave>", lambda _e: eye_btn.configure(fg=SUB))
+        eye_btn.bind("<Button-1>", lambda _e: toggle_token_vis())
+
+        switch_row("使用 HTTPS", draft_secure)
+        switch_row("忽略证书校验（自签名证书）", draft_insecure)
+
+        # -- 底部状态与按钮 --
+        status_lbl = tk.Label(
+            body,
+            textvariable=status_var,
+            font=("Microsoft YaHei UI", 8),
+            fg=CLOSE_HOVER,
+            bg=BG,
+            anchor="w",
+        )
+        status_lbl.pack(fill="x", pady=(px(6), px(6)))
+
+        footer = tk.Frame(body, bg=BG)
+        footer.pack(fill="x")
+
+        def save_and_close(_event=None):
+            host, port, parsed_secure = parse_endpoint(draft_server.get())
+            if host is None:
+                status_lbl.configure(fg=CLOSE_HOVER)
+                status_var.set("地址格式不对，示例：58000 / 192.168.1.5:58000 / https://host:8443")
+                server_entry.focus_set()
+                return
+            secure = parsed_secure if parsed_secure is not None else bool(draft_secure.get())
+            insecure = bool(draft_insecure.get())
+            token = draft_token.get().strip()
+            theme = draft_theme.get()
+            pin = bool(draft_pin.get())
+            sound = bool(draft_sound.get())
+            toast = bool(draft_toast.get())
+
+            self.pin_var.set(pin)
+            self._toggle_pin()
+            self.sound_var.set(sound)
+            self.toast_var.set(toast)
+            self.toast_enabled = toast
+            self.secure_var.set(bool(secure))
+            self.insecure_var.set(insecure)
+
+            self.theme_var.set(theme)
+            self.theme_pref = theme
+            self._apply_theme()
+
+            self.poller.configure(
+                host,
+                port,
+                secure=secure,
+                insecure=insecure,
+                token=token,
+            )
+            save_settings(
+                host=host,
+                port=port,
+                secure=secure,
+                insecure=insecure,
+                token=token,
+                theme=theme,
+                pin=pin,
+                sound=sound,
+                toast=toast,
+            )
+            self._close_settings()
+
+        save_btn = tk.Label(
+            footer,
+            text="保存",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            fg=accent_fg,
+            bg=TIME_FG,
+            padx=px(18),
+            pady=px(5),
+            cursor="hand2",
+        )
+        save_btn.pack(side="right")
+        save_btn.bind("<Button-1>", save_and_close)
+
+        cancel_btn = tk.Label(
+            footer,
+            text="取消",
+            font=("Microsoft YaHei UI", 9),
+            fg=FG,
+            bg=CHIP_BG,
+            highlightthickness=1,
+            highlightbackground=CHIP_BORDER,
+            padx=px(14),
+            pady=px(5),
+            cursor="hand2",
+        )
+        cancel_btn.pack(side="right", padx=(0, px(8)))
+        cancel_btn.bind("<Button-1>", lambda _e: self._close_settings())
+
+        win.bind("<Escape>", lambda _e: self._close_settings())
+        win.bind("<Return>", save_and_close)
+
+        win.update_idletasks()
+        w = win.winfo_reqwidth()
+        h = win.winfo_reqheight()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        rx = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+        ry = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 2
+        x = min(max(px(12), rx), max(px(12), sw - w - px(12)))
+        y = min(max(px(12), ry), max(px(12), sh - h - px(12)))
+        win.geometry(f"+{x}+{y}")
+        win.focus_force()
 
     def quit(self):
+        self._close_menu()
+        self._close_settings()
         self._save_position()
         self.root.destroy()
 
