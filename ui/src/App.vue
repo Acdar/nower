@@ -33,6 +33,9 @@
       :busy="windowShellBusy"
       :sidebar-collapsed="sidebarCollapsed || sidebarHidden"
       :sidebar-visible="sidebarVisible"
+      :log-view-options="logViewOptions"
+      :zoom-availability="zoomAvailability"
+      :zoom-shortcuts="zoomShortcuts"
       :show-sidebar-toggle="!isMobileNav"
       :mower-port="mowerPort"
       :emulator-name="emulatorName"
@@ -185,15 +188,13 @@
                   <Feedback />
                   <GlobalUpdateDrop v-if="loaded && updates_enabled === true" />
                   <n-modal
-                    v-model:show="showUpdateNoticeModal"
+                    :show="showUpdateNoticeModal"
+                    @update:show="!$event && handleUpdateNoticeAck()"
                     preset="card"
                     style="width: min(720px, calc(100vw - 32px))"
                     title="版本更新"
                     content-style="display: flex; flex-direction: column; overflow: hidden"
-                    :mask-closable="false"
-                    :close-on-esc="false"
                     closable
-                    @close="handleUpdateNoticeAck"
                   >
                     <div style="flex: none; font-size: 18px; font-weight: 600">
                       {{ `已更新到 ${updateNotice.current_version}` }}
@@ -308,6 +309,8 @@ import SidebarUpdateChecks from '@/components/SidebarUpdateChecks.vue'
 import SidebarEditor from '@/components/SidebarEditor.vue'
 import RunningLogLayoutDialog from '@/components/RunningLogLayoutDialog.vue'
 import { useSidebarPreferences } from '@/composables/sidebarPreferences'
+import { interfaceZoomShortcuts, useInterfaceZoom } from '@/composables/interfaceZoom'
+import { logViewMenuKey } from '@/stores/logWorkspace'
 import { useResolvedTheme } from '@/composables/theme'
 import { themeSelectionKey, useThemeSelection } from '@/composables/themeSelection'
 import { provideHalloweenSeason } from '@/composables/halloween'
@@ -417,6 +420,11 @@ const fallbackAppMenu = computed(
 const appMenuVisible = computed(
   () => isMobileNav.value || sidebarHidden.value || !sidebarCollapsed.value
 )
+const logViewController = shallowRef(null)
+provide(logViewMenuKey, logViewController)
+const logViewOptions = computed(() =>
+  route.name === 'log' ? (logViewController.value?.options.value ?? []) : []
+)
 function handleViewAction(action) {
   if (action === 'toggle-sidebar') {
     if (isMobileNav.value) mobileMenuOpen.value = !mobileMenuOpen.value
@@ -425,6 +433,10 @@ function handleViewAction(action) {
     openSidebarEditor()
   } else if (action === 'custom-log-layout') {
     guiStore.openRunningLogLayoutDialog()
+  } else if (action?.startsWith('log-view-')) {
+    if (route.name === 'log') logViewController.value?.toggle(action)
+  } else {
+    changeZoom(action)
   }
 }
 const route = useRoute()
@@ -515,6 +527,21 @@ const {
   webview,
   adb
 } = storeToRefs(config_store)
+const loaded = inject('loaded')
+const { changeZoom, canZoomIn, canZoomOut, canResetZoom } = useInterfaceZoom(
+  webview,
+  windowShell.connected,
+  windowShell.platform,
+  loaded
+)
+const zoomAvailability = computed(() => ({
+  'zoom-in': canZoomIn.value,
+  'zoom-out': canZoomOut.value,
+  'actual-size': canResetZoom.value
+}))
+const zoomShortcuts = computed(() =>
+  windowShell.connected.value ? interfaceZoomShortcuts(windowShell.platform.value) : null
+)
 const theme = useResolvedTheme(themePreference)
 const logBackground = useLogBackgroundStore()
 watch(theme, (value) => logBackground.setTheme(value), { immediate: true })
@@ -638,7 +665,10 @@ const appMenuProps = computed(() => ({
   profileState: configProfiles.state.value,
   profileWriteDisabled: configProfiles.writeDisabled.value,
   profileReadDisabled: configProfiles.readDisabled.value,
-  sidebarVisible: sidebarVisible.value
+  sidebarVisible: sidebarVisible.value,
+  logViewOptions: logViewOptions.value,
+  zoomAvailability: zoomAvailability.value,
+  zoomShortcuts: zoomShortcuts.value
 }))
 const appMenuListeners = {
   'connection-action': openDeviceConnection,
@@ -830,8 +860,6 @@ function actions_on_resize() {
   }
 }
 
-const loaded = inject('loaded')
-
 const renderedChangelog = ref('')
 let changelogRendered = false
 async function renderChangelog() {
@@ -849,13 +877,10 @@ async function renderChangelog() {
 }
 
 async function handleUpdateNoticeAck() {
-  if (!updateNotice.value.current_version) {
-    showUpdateNoticeModal.value = false
-    return
-  }
+  showUpdateNoticeModal.value = false
+  if (!updateNotice.value.current_version) return
   try {
     await ackUpdateNotice(updateNotice.value.current_version)
-    showUpdateNoticeModal.value = false
   } catch (error) {
     console.error('failed to acknowledge update notice', error)
   }

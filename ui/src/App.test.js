@@ -20,6 +20,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import App from './App.vue'
 import { configProfilesKey } from '@/composables/configProfiles'
 import { themeSelectionKey } from '@/composables/themeSelection'
+import { logViewMenuKey } from '@/stores/logWorkspace'
 import { windowMinimizedKey } from '@/window-shell/context.js'
 import { routes } from './routes'
 
@@ -42,6 +43,8 @@ const state = vi.hoisted(() => ({
   gui: null,
   loaded: null,
   loadUpdateNotice: vi.fn(),
+  updateNotice: null,
+  ackUpdateNotice: vi.fn(),
   loadWatermark: vi.fn(async () => 'mower'),
   closeWindow: vi.fn(),
   route: null,
@@ -90,9 +93,9 @@ vi.mock('@/stores/logBackground', () => ({
 vi.mock('@/stores/gui', () => ({ useGuiStore: () => state.gui }))
 vi.mock('@/stores/updateNotice', () => ({
   useUpdateNoticeStore: () => ({
-    notice: { changelog: '' },
+    notice: state.updateNotice,
     loadUpdateNotice: state.loadUpdateNotice,
-    ackUpdateNotice: vi.fn()
+    ackUpdateNotice: state.ackUpdateNotice
   })
 }))
 vi.mock('@/stores/watermark', () => ({
@@ -120,6 +123,7 @@ vi.mock('@/window-shell/adapter.js', () => ({
     metadata: state.shellMetadata,
     active: ref(state.shellActive),
     connected: state.shellConnected,
+    platform: ref('windows'),
     capabilities: ref({ enabled: true, move: 'bridge', resize: 'native' }),
     state: state.shellState,
     initialize: vi.fn(),
@@ -276,6 +280,8 @@ describe('desktop page startup', () => {
         return () => state.navigated.splice(state.navigated.indexOf(callback), 1)
       }
     }
+    state.updateNotice = reactive({ changelog: '', current_version: '4.1.6-alpha.15' })
+    state.ackUpdateNotice.mockReset().mockResolvedValue()
     state.client.post.mockResolvedValue({ data: {} })
     state.responseRejected = null
     state.client.interceptors.response.use.mockImplementation((_success, failure) => {
@@ -403,6 +409,34 @@ describe('desktop page startup', () => {
   it('shares the title-bar profile controller with settings actions', async () => {
     const component = await mount()
     expect(provide).toHaveBeenCalledWith(configProfilesKey, component.configProfiles)
+  })
+
+  it('dispatches View commands to the mounted log controls and applies the shared scale', async () => {
+    state.route.name = 'log'
+    const component = await mount()
+    const [, logMenu] = provide.mock.calls.find(([key]) => key === logViewMenuKey)
+    const toggle = vi.fn()
+    logMenu.value = {
+      options: ref([{ key: 'log-view-screenshot-toggle', checked: true }]),
+      toggle
+    }
+    expect(component.logViewOptions.value).toEqual(logMenu.value.options.value)
+    component.handleViewAction('log-view-screenshot-toggle')
+    expect(toggle).toHaveBeenCalledExactlyOnceWith('log-view-screenshot-toggle')
+    state.route.name = 'settings'
+    expect(component.logViewOptions.value).toEqual([])
+    state.route.name = 'log'
+    logMenu.value = null
+    expect(component.logViewOptions.value).toEqual([])
+
+    state.loaded.value = true
+    component.handleViewAction('zoom-in')
+    await nextTick()
+    expect(state.config.webview.scale).toBe(1.25)
+    expect(document.documentElement.style.zoom).toBe(1.25)
+    component.handleViewAction('actual-size')
+    await nextTick()
+    expect(document.documentElement.style.zoom).toBe(1)
   })
 
   it('provides the native minimized state to page components', async () => {
@@ -1321,6 +1355,42 @@ describe('desktop page startup', () => {
     state.loadUpdateNotice.mockResolvedValue({ should_show: true })
     await mount()
     expect(component.showUpdateNoticeModal.value).toBe(true)
+  })
+
+  it('dismisses the update notice immediately and acknowledges the displayed version', async () => {
+    const acknowledgement = deferred()
+    state.ackUpdateNotice.mockReturnValue(acknowledgement.promise)
+    const component = await mount()
+    component.showUpdateNoticeModal.value = true
+    const closing = component.handleUpdateNoticeAck()
+    expect(component.showUpdateNoticeModal.value).toBe(false)
+    expect(state.ackUpdateNotice).toHaveBeenCalledExactlyOnceWith('4.1.6-alpha.15')
+    acknowledgement.resolve()
+    await closing
+  })
+
+  it('keeps the interface accessible when acknowledging an update notice fails', async () => {
+    const error = new Error('offline')
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    state.ackUpdateNotice.mockRejectedValue(error)
+    const component = await mount()
+    component.showUpdateNoticeModal.value = true
+    try {
+      await component.handleUpdateNoticeAck()
+      expect(component.showUpdateNoticeModal.value).toBe(false)
+      expect(logged).toHaveBeenCalledWith('failed to acknowledge update notice', error)
+    } finally {
+      logged.mockRestore()
+    }
+  })
+
+  it('dismisses an update notice without a version without sending an acknowledgement', async () => {
+    const component = await mount()
+    state.updateNotice.current_version = ''
+    component.showUpdateNoticeModal.value = true
+    await component.handleUpdateNoticeAck()
+    expect(component.showUpdateNoticeModal.value).toBe(false)
+    expect(state.ackUpdateNotice).not.toHaveBeenCalled()
   })
 
   it('loads the schedule in parallel and retains the complete initialization barrier', async () => {
