@@ -2044,6 +2044,7 @@ onBeforeUnmount(() => {
 }
 .composer :deep(.n-input) {
   --n-color: transparent !important;
+  --n-color-hover: transparent !important;
   --n-color-focus: transparent !important;
   --n-box-shadow-focus: none !important;
 }

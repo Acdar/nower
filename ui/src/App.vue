@@ -1249,9 +1249,9 @@ html[data-window-shell-theme='dark'] .provider--window-shell {
   --n-border: 1px solid #d8dfea !important;
   --n-border-hover: 1px solid #5c6f94 !important;
   --n-border-focus: 1px solid #3e4656 !important;
-  --n-color: #ffffff !important;
-  --n-color-hover: #ffffff !important;
-  --n-color-focus: #ffffff !important;
+  --n-color: #edf1f7 !important;
+  --n-color-hover: #edf1f7 !important;
+  --n-color-focus: #edf1f7 !important;
   --n-padding-left: 12px !important;
   --n-padding-right: 12px !important;
   --n-padding-vertical: 0 !important;
@@ -1279,8 +1279,8 @@ html[data-mower-theme='dark'] .n-input {
   --n-border-hover: 1px solid #5c6f94 !important;
   --n-border-focus: 1px solid #3e4656 !important;
   --n-border-active: 1px solid #3e4656 !important;
-  --n-color: #ffffff !important;
-  --n-color-active: #ffffff !important;
+  --n-color: #edf1f7 !important;
+  --n-color-active: #edf1f7 !important;
   --n-box-shadow-focus: 0 0 0 2px rgba(78, 100, 142, 0.22) !important;
   --n-box-shadow-active: 0 0 0 2px rgba(78, 100, 142, 0.22) !important;
   --n-text-color: #2a303c !important;
