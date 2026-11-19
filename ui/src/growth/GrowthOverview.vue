@@ -30,7 +30,6 @@ const props = defineProps({
   },
   workshopStatusRevision: { type: Number, default: 0 },
   workshopLoading: Boolean,
-  hasChipShortage: Boolean,
   chipFarmingLoading: Boolean
 })
 const emit = defineEmits([
@@ -149,7 +148,7 @@ function formatCount(value) {
         <div v-else class="gp-empty gp-overview__empty">
           <p class="gp-empty__title">队列还是空的</p>
           <p class="gp-muted">
-            选择干员并设置养成目标；全自动专精/合成负责训练和备料，MAA
+            选择干员并设置养成目标；自动合成负责备料，自动专精负责训练，MAA
             干员培养负责材料齐全后的精英化与基础技能升级。晋升后继续提升等级及模组仍需手动完成。
           </p>
           <div class="gp-empty__actions">
@@ -253,7 +252,6 @@ function formatCount(value) {
               生成合成任务
             </n-button>
             <button
-              v-if="hasChipShortage"
               type="button"
               class="gp-link"
               :disabled="chipFarmingLoading"

@@ -30,6 +30,7 @@ export const useConfigStore = defineStore('config', () => {
   }
   const drone_interval = ref(4)
   const enable_party = ref(true)
+  const clue_message_board_enable = ref(true)
   const leifeng_mode = ref(true)
   const free_blacklist = ref([])
   const maa_adb_path = ref('')
@@ -37,9 +38,9 @@ export const useConfigStore = defineStore('config', () => {
   const stage_plan_enable = ref(true)
   const stage_plan_runner = ref('maa')
   const maa_mall_enable = ref(true)
-  const maa_mall_mode = ref('maa')
-  const clue_credit_on_demand = ref(false)
-  const credit_shop_by_value = ref(false)
+  const maa_mall_mode = ref('mower')
+  const clue_credit_on_demand = ref(true)
+  const credit_shop_by_value = ref(true)
   const credit_shop_value_threshold = ref(0.045)
   const maa_path = ref('')
   const maa_mirrorchyan_token = ref('')
@@ -52,6 +53,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_restore_theme_enable = ref(false)
   const maa_restore_theme = ref('')
   const medicine_expire_days = ref(0)
+  const medicine_use_all_date = ref(null)
   const maa_report_to_yituliu = ref(false)
   const maa_yituliu_id = ref('')
   const maa_report_to_penguin = ref(false)
@@ -60,6 +62,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_weekly_plan = ref([])
   const maa_weekly_plan_options = ref([])
   const maa_weekly_plan_active = ref('')
+  const filterStageByAvailability = ref(true)
   const maa_weekly_plan_activity_fallbacks = ref({})
   const maa_weekly_plan_activity_switch_times = ref({})
   const maa_weekly_plan_activity_end_times = ref({})
@@ -142,6 +145,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_mall_ignore_blacklist_when_full = ref(false)
   const maa_mall_only_buy_discount = ref(false)
   const maa_mall_reserve_max_credit = ref(false)
+  const maa_long_task_extra_windows = ref([])
   const maa_rg_sleep_min = ref('00:00')
   const maa_rg_sleep_max = ref('00:00')
   const maa_credit_fight = ref(true)
@@ -152,6 +156,7 @@ export const useConfigStore = defineStore('config', () => {
   const maa_rcl_theme = ref('Tales')
   const rcl = ref({})
   const rogue = ref({})
+  const garrison = ref({ mode: 'medals', match_limit: 1, target_wins: 3, run_id: '' })
   const sss = ref({ type: 1, ec: 1, scripts: [], run_id: '' })
   const paradox = ref({ scripts: [], run_id: '' })
   const copilot = ref({
@@ -220,6 +225,7 @@ export const useConfigStore = defineStore('config', () => {
   const fia_fool = ref(true)
   const assistant_follows_schedule = ref(false)
   const mastery_consecutive_skills = ref(false)
+  const enable_crafting = ref(true)
   const enable_mastery = ref(true)
   const maa_growth_enable = ref(false)
   const save_mastery_screenshots = ref(false)
@@ -227,7 +233,7 @@ export const useConfigStore = defineStore('config', () => {
   const droidcast = ref({})
   const mumu12IPC = ref(false)
   const visit_friend_enable = ref(true)
-  const visit_friend_mode = ref('maa')
+  const visit_friend_mode = ref('mower')
   const credit_fight = ref({})
   const custom_screenshot = ref({})
   const resource_update_enable = ref(false)
@@ -539,6 +545,7 @@ export const useConfigStore = defineStore('config', () => {
       drone_room.value = response.data.drone_room
       drone_interval.value = response.data.drone_interval
       enable_party.value = response.data.enable_party != 0
+      clue_message_board_enable.value = response.data.clue_message_board_enable ?? true
       leifeng_mode.value = response.data.leifeng_mode != 0
       free_blacklist.value =
         response.data.free_blacklist == '' ? [] : response.data.free_blacklist.split(',')
@@ -553,9 +560,9 @@ export const useConfigStore = defineStore('config', () => {
         response.data.maa_mall_enable !== undefined
           ? Boolean(response.data.maa_mall_enable)
           : response.data.maa_enable != 0
-      maa_mall_mode.value = response.data.maa_mall_mode === 'mower' ? 'mower' : 'maa'
-      clue_credit_on_demand.value = response.data.clue_credit_on_demand ?? false
-      credit_shop_by_value.value = response.data.credit_shop_by_value ?? false
+      maa_mall_mode.value = 'mower'
+      clue_credit_on_demand.value = true
+      credit_shop_by_value.value = true
       credit_shop_value_threshold.value = response.data.credit_shop_value_threshold ?? 0.045
       maa_path.value = response.data.maa_path
       maa_mirrorchyan_token.value = response.data.maa_mirrorchyan_token || ''
@@ -571,6 +578,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_rg_enable.value = response.data.maa_rg_enable == 1
       maa_long_task_type.value = response.data.maa_long_task_type
       medicine_expire_days.value = response.data.medicine_expire_days
+      medicine_use_all_date.value = response.data.medicine_use_all_date ?? null
       maa_report_to_yituliu.value = response.data.maa_report_to_yituliu ?? false
       maa_yituliu_id.value = response.data.maa_yituliu_id ?? ''
       maa_report_to_penguin.value = response.data.maa_report_to_penguin ?? false
@@ -617,9 +625,10 @@ export const useConfigStore = defineStore('config', () => {
       close_simulator_when_idle.value = response.data.close_simulator_when_idle
       maa_conn_preset.value = response.data.maa_conn_preset
       maa_touch_option.value = response.data.maa_touch_option
-      maa_mall_ignore_blacklist_when_full.value = response.data.maa_mall_ignore_blacklist_when_full
-      maa_mall_only_buy_discount.value = response.data.maa_mall_only_buy_discount ?? false
-      maa_mall_reserve_max_credit.value = response.data.maa_mall_reserve_max_credit ?? false
+      maa_mall_ignore_blacklist_when_full.value = false
+      maa_mall_only_buy_discount.value = false
+      maa_mall_reserve_max_credit.value = false
+      maa_long_task_extra_windows.value = response.data.maa_long_task_extra_windows ?? []
       maa_rg_sleep_max.value = response.data.maa_rg_sleep_max
       maa_rg_sleep_min.value = response.data.maa_rg_sleep_min
       maa_credit_fight.value = response.data.maa_credit_fight
@@ -630,6 +639,13 @@ export const useConfigStore = defineStore('config', () => {
       maa_rcl_theme.value = response.data.maa_rcl_theme
       rcl.value = response.data.rcl
       rogue.value = response.data.rogue
+      garrison.value = {
+        mode: 'medals',
+        match_limit: 1,
+        target_wins: 3,
+        run_id: '',
+        ...response.data.garrison
+      }
       sss.value = { scripts: [], run_id: '', ...response.data.sss }
       paradox.value = { scripts: [], run_id: '', ...(response.data.paradox ?? {}) }
       copilot.value = {
@@ -715,6 +731,7 @@ export const useConfigStore = defineStore('config', () => {
       fia_fool.value = response.data.fia_fool
       assistant_follows_schedule.value = response.data.assistant_follows_schedule
       mastery_consecutive_skills.value = response.data.mastery_consecutive_skills ?? false
+      enable_crafting.value = response.data.enable_crafting ?? response.data.enable_mastery ?? true
       enable_mastery.value = response.data.enable_mastery ?? true
       maa_growth_enable.value = response.data.maa_growth_enable ?? false
       save_mastery_screenshots.value = response.data.save_mastery_screenshots ?? false
@@ -727,7 +744,7 @@ export const useConfigStore = defineStore('config', () => {
       droidcast.value = response.data.droidcast
       mumu12IPC.value = response.data.mumu12IPC
       visit_friend_enable.value = response.data.visit_friend_enable ?? true
-      visit_friend_mode.value = response.data.visit_friend_mode ?? 'maa'
+      visit_friend_mode.value = 'mower'
       credit_fight.value = response.data.credit_fight
       custom_screenshot.value = response.data.custom_screenshot
       load_workshop_config(response.data)
@@ -769,20 +786,17 @@ export const useConfigStore = defineStore('config', () => {
       right_side_room_order: [...right_side_room_order.value],
       drone_interval: drone_interval.value,
       enable_party: enable_party.value ? 1 : 0,
+      clue_message_board_enable: clue_message_board_enable.value,
       leifeng_mode: leifeng_mode.value ? 1 : 0,
       free_blacklist: free_blacklist.value.join(','),
       maa_adb_path: maa_adb_path.value,
-      maa_enable:
-        (stage_plan_enable.value && stage_plan_runner.value === 'maa') ||
-        (maa_mall_enable.value && maa_mall_mode.value === 'maa')
-          ? 1
-          : 0,
+      maa_enable: stage_plan_enable.value && stage_plan_runner.value === 'maa' ? 1 : 0,
       stage_plan_enable: stage_plan_enable.value,
       stage_plan_runner: stage_plan_runner.value,
       maa_mall_enable: maa_mall_enable.value,
-      maa_mall_mode: maa_mall_mode.value,
-      clue_credit_on_demand: clue_credit_on_demand.value,
-      credit_shop_by_value: credit_shop_by_value.value,
+      maa_mall_mode: 'mower',
+      clue_credit_on_demand: true,
+      credit_shop_by_value: true,
       credit_shop_value_threshold: credit_shop_value_threshold.value,
       maa_path: maa_path.value,
       maa_mirrorchyan_token: maa_mirrorchyan_token.value,
@@ -797,6 +811,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_rg_enable: maa_rg_enable.value ? 1 : 0,
       maa_long_task_type: maa_long_task_type.value,
       medicine_expire_days: medicine_expire_days.value,
+      medicine_use_all_date: medicine_use_all_date.value,
       maa_report_to_yituliu: maa_report_to_yituliu.value,
       maa_yituliu_id: maa_yituliu_id.value,
       maa_report_to_penguin: maa_report_to_penguin.value,
@@ -853,9 +868,10 @@ export const useConfigStore = defineStore('config', () => {
           }),
       maa_conn_preset: maa_conn_preset.value,
       maa_touch_option: maa_touch_option.value,
-      maa_mall_ignore_blacklist_when_full: maa_mall_ignore_blacklist_when_full.value,
-      maa_mall_only_buy_discount: maa_mall_only_buy_discount.value,
-      maa_mall_reserve_max_credit: maa_mall_reserve_max_credit.value,
+      maa_mall_ignore_blacklist_when_full: false,
+      maa_mall_only_buy_discount: false,
+      maa_mall_reserve_max_credit: false,
+      maa_long_task_extra_windows: maa_long_task_extra_windows.value,
       maa_rg_sleep_max: maa_rg_sleep_max.value,
       maa_rg_sleep_min: maa_rg_sleep_min.value,
       maa_credit_fight: maa_credit_fight.value,
@@ -866,6 +882,7 @@ export const useConfigStore = defineStore('config', () => {
       maa_rcl_theme: maa_rcl_theme.value,
       rcl: rcl.value,
       rogue: rogue.value,
+      garrison: garrison.value,
       sss: sss.value,
       copilot: copilot.value,
       paradox: paradox.value,
@@ -923,6 +940,7 @@ export const useConfigStore = defineStore('config', () => {
       fia_fool: fia_fool.value,
       assistant_follows_schedule: assistant_follows_schedule.value,
       mastery_consecutive_skills: mastery_consecutive_skills.value,
+      enable_crafting: enable_crafting.value,
       enable_mastery: enable_mastery.value,
       maa_growth_enable: maa_growth_enable.value,
       save_mastery_screenshots: save_mastery_screenshots.value,
@@ -930,7 +948,7 @@ export const useConfigStore = defineStore('config', () => {
       droidcast: droidcast.value,
       mumu12IPC: mumu12IPC.value,
       visit_friend_enable: visit_friend_enable.value,
-      visit_friend_mode: visit_friend_mode.value,
+      visit_friend_mode: 'mower',
       credit_fight: credit_fight.value,
       custom_screenshot: custom_screenshot.value,
       workshop_manual_settings: workshop_manual_settings.value,
@@ -1173,6 +1191,7 @@ export const useConfigStore = defineStore('config', () => {
     swap_right_side_facilities,
     drone_interval,
     enable_party,
+    clue_message_board_enable,
     leifeng_mode,
     free_blacklist,
     maa_adb_path,
@@ -1197,6 +1216,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_rg_enable,
     maa_long_task_type,
     medicine_expire_days,
+    medicine_use_all_date,
     maa_report_to_yituliu,
     maa_yituliu_id,
     maa_report_to_penguin,
@@ -1204,6 +1224,7 @@ export const useConfigStore = defineStore('config', () => {
     ap_fallback,
     maa_weekly_plan,
     maa_weekly_plan_options,
+    filterStageByAvailability,
     maa_weekly_plan_active,
     maa_weekly_plan_activity_fallbacks,
     maa_weekly_plan_activity_switch_times,
@@ -1271,6 +1292,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_mall_ignore_blacklist_when_full,
     maa_mall_only_buy_discount,
     maa_mall_reserve_max_credit,
+    maa_long_task_extra_windows,
     maa_rg_sleep_min,
     maa_rg_sleep_max,
     maa_credit_fight,
@@ -1281,6 +1303,7 @@ export const useConfigStore = defineStore('config', () => {
     maa_rcl_theme,
     rcl,
     rogue,
+    garrison,
     sss,
     copilot,
     paradox,
@@ -1338,6 +1361,7 @@ export const useConfigStore = defineStore('config', () => {
     fia_fool,
     assistant_follows_schedule,
     mastery_consecutive_skills,
+    enable_crafting,
     enable_mastery,
     maa_growth_enable,
     save_mastery_screenshots,

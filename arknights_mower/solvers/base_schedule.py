@@ -60,6 +60,8 @@ from arknights_mower.solvers.record import (
     load_maa_copilot_progress,
     load_maa_paradox_progress,
     load_maa_sss_progress,
+    maa_event_shop_completed,
+    mark_maa_event_shop_complete,
     save_agent_action,
     save_current_state,
     save_exception,
@@ -100,6 +102,7 @@ from arknights_mower.utils.datetime import (
     format_time,
     get_server_time,
     get_server_weekday,
+    is_game_date,
 )
 from arknights_mower.utils.device.adb_client.server import (
     SharedADBError,
@@ -125,6 +128,7 @@ from arknights_mower.utils.email import maa_template, send_message, task_templat
 from arknights_mower.utils.graph import SceneGraphSolver
 from arknights_mower.utils.image import cropimg, loadres, thres2
 from arknights_mower.utils.log import log_parent_context, logger
+from arknights_mower.utils.long_task_windows import long_task_window
 from arknights_mower.utils.maa_callback import (
     REPORT_REQUEST,
     MaaCallbackLog,
@@ -237,6 +241,7 @@ from arknights_mower.utils.workshop_ui import (
 
 _backup_timing_runtime = threading.local()
 _LONG_IDLE_SECONDS = 300
+_MAA_UNLIMITED_MEDICINE = 2**31 - 1
 
 
 class _BackupCalculationTiming:
@@ -390,7 +395,7 @@ def _stop_if_scheduled_trainee(
         or getattr(room_state.panel, "countdown_state", None) != "active"
     ):
         return
-    if config.conf.enable_mastery:
+    if config.conf.mastery_enabled:
         return
     from arknights_mower.utils.mastery_support_data import trainee_schedule_conflict
 
@@ -953,7 +958,7 @@ class BaseSchedulerSolver(
                 profession = None
             snapshot["mastery"] = {
                 "observation": getattr(self, "last_mastery_observation", None),
-                "enabled": config.conf.enable_mastery,
+                "enabled": config.conf.mastery_enabled,
                 "assistant_follows_schedule": config.conf.assistant_follows_schedule,
                 "plan": plan,
                 "route": get_route(profession) if profession else None,
@@ -1547,7 +1552,7 @@ class BaseSchedulerSolver(
         """待开始的专精保留原任务，等待副表实际换人完成。"""
         task = self.task
         if (
-            not config.conf.enable_mastery
+            not config.conf.mastery_enabled
             or task is None
             or task.type != TaskTypes.SKILL_UPGRADE
             or getattr(task, "plan_key", None) is None
@@ -3939,7 +3944,7 @@ class BaseSchedulerSolver(
                         or (
                             self.tasks[0].type == TaskTypes.RUN_ORDER
                             and id(self.tasks[0]) not in blocked_orders
-                            or config.conf.enable_mastery
+                            or config.conf.mastery_enabled
                             and self.tasks[0].type == TaskTypes.SWAP_SUPPORT
                         )
                     )
@@ -4502,7 +4507,10 @@ class BaseSchedulerSolver(
             self.planned = True
         elif not self.todo_task:
             if (
-                self.enable_party
+                (
+                    self.enable_party
+                    or getattr(config.conf, "should_run_mower_mall", False)
+                )
                 and (
                     self.last_clue is None
                     or datetime.now() - self.last_clue > timedelta(hours=1)
@@ -4513,7 +4521,9 @@ class BaseSchedulerSolver(
             ):
                 clue_started_at = datetime.now()
                 try:
-                    clue_result = self.clue_new()
+                    clue_result = (
+                        self.clue_new() if self.enable_party else self._run_clue_shop()
+                    )
                 except CreditShopIncomplete as e:
                     task = SchedulerTask(time=clue_started_at, task_type=TaskTypes.CLUE)
                     self.tasks.append(task)
@@ -4756,7 +4766,7 @@ class BaseSchedulerSolver(
                         self.enter_room(room)
                     room_entered = True
                     if room == "train":
-                        if config.conf.enable_mastery:
+                        if config.conf.mastery_enabled:
                             # #94 统一读取：一次 read_room_state(want_mood=True) 开一次
                             # 浮窗读全（协助位+训练位+心情）+ 左下角面板，消除原来
                             # get_agent_from_room（读心情）后再开一次浮窗读槽位的重复
@@ -4890,7 +4900,7 @@ class BaseSchedulerSolver(
 
     def _is_startup_priority_task(self, task):
         return task.type == TaskTypes.RUN_ORDER or (
-            config.conf.enable_mastery
+            config.conf.mastery_enabled
             and task.type in (TaskTypes.SKILL_UPGRADE, TaskTypes.SWAP_SUPPORT)
         )
 
@@ -5517,7 +5527,7 @@ class BaseSchedulerSolver(
         # 最后如果有任何高效组心情没有记录 或者高效组在宿舍
         # 宿舍绑组成员由组状态纠错处理；下班期间离开固定位置是正常状态。
         if (
-            not config.conf.enable_mastery
+            not config.conf.mastery_enabled
             and getattr(self, "train_room_state", None) is not None
         ):
             self.train_room_state = None
@@ -5807,11 +5817,11 @@ class BaseSchedulerSolver(
                 return "self_correction"
 
     def _train_mastery_active(self) -> bool:
-        """训练室是否受专精管理：enable_mastery 开 + DB 有 active 计划 或 队列有专精任务。
+        """训练室是否受专精管理：自动专精生效，且 DB 有 active 计划或队列有专精任务。
 
         #59：队列重启后可能没补回来，DB 为准；队列补队覆盖「idle 计划即将排」的竞态窗口。
         """
-        if not config.conf.enable_mastery:
+        if not config.conf.mastery_enabled:
             return False
         try:
             from arknights_mower.utils.mastery_db import get_active_plan
@@ -5827,7 +5837,7 @@ class BaseSchedulerSolver(
 
     def _train_protected(self) -> bool:
         """复用可靠的空闲保护深读；缺少当前观察时按协助位保守保护。"""
-        if not config.conf.enable_mastery:
+        if not config.conf.mastery_enabled:
             return False
         state = getattr(self, "train_room_state", None)
         # 空闲房间的保护结论来自本次可靠的两槽读取和技能深读。此时不能再用
@@ -5866,7 +5876,7 @@ class BaseSchedulerSolver(
             return False
         state = getattr(self, "train_room_state", None)
         if not (
-            config.conf.enable_mastery
+            config.conf.mastery_enabled
             and getattr(state, "state", None)
             in ("empty", "training", "waiting_collect")
             and getattr(state, "slots_read", False) is True
@@ -5880,7 +5890,7 @@ class BaseSchedulerSolver(
 
     def _suppress_train_correction(self, fix_plan: dict) -> None:
         """纠错使用统一训练室保护范围。"""
-        if "train" in fix_plan and not config.conf.enable_mastery:
+        if "train" in fix_plan and not config.conf.mastery_enabled:
             self.train_room_state = None
         if self._suppress_facility_arrangement(fix_plan):
             self._notify_train_correction_skipped()
@@ -5894,7 +5904,7 @@ class BaseSchedulerSolver(
 
     def _protected_training_slots(self):
         """专精接管的岗位不参与普通排班；开启跟随时保留协助位。"""
-        if not config.conf.enable_mastery:
+        if not config.conf.mastery_enabled:
             return set()
         state = getattr(self, "train_room_state", None)
         protected = (
@@ -6409,7 +6419,7 @@ class BaseSchedulerSolver(
                         # Finish Deer's current fodder/T4 cycle before replacing
                         # its bounded quota or dispatching prepared training.
                         finish_deer_cycle = is_9colored and not is_crit
-                        if config.conf.enable_mastery and not finish_deer_cycle:
+                        if config.conf.mastery_enabled and not finish_deer_cycle:
                             from arknights_mower.utils.mastery_recommendation import (
                                 auto_schedule_mastery_tasks,
                             )
@@ -6922,7 +6932,7 @@ class BaseSchedulerSolver(
                 and pending.meta_data
                 and not getattr(pending, "run_order_restore_pending", False)
                 or pending.type == TaskTypes.SWAP_SUPPORT
-                and config.conf.enable_mastery
+                and config.conf.mastery_enabled
                 or getattr(pending, "strict_mood_limit", False)
                 and pending.plan
             )
@@ -12889,6 +12899,10 @@ class BaseSchedulerSolver(
                 if scene == Scene.INFRA_DETAILS:
                     logger.debug("INFRA_DETAILS", extra={"log_group": "clue"})
                     if ctm.task == "message_board":
+                        if not config.conf.clue_message_board_enable:
+                            self._prepare_clue_room()
+                            ctm.complete("message_board")
+                            continue
                         if self._clue_credit_enabled():
                             if get_server_weekday() == 6:
                                 logger.info(
@@ -13006,7 +13020,10 @@ class BaseSchedulerSolver(
 
                 elif scene == Scene.INFRA_CONFIDENTIAL:
                     logger.debug("INFRA_CONFIDENTIAL", extra={"log_group": "clue"})
-                    if ctm.task == "daily":
+                    if ctm.task == "message_board":
+                        # 进房后可能已在线索板，先返回房间处理信息板，再继续领取和摆放。
+                        self.back()
+                    elif ctm.task == "daily":
                         # 检查是否领过线索
                         daily_scope = ((1815, 200), (1895, 250))
                         if self.find("clue/badge_new", scope=daily_scope):
@@ -14626,8 +14643,6 @@ class BaseSchedulerSolver(
             (item["available_drones"] for item in accelerated_manufacture),
             default=planned_drones,
         )
-        if available == 201:
-            raise RecognizeError("无人机数量识别异常")
         logger.info(
             f"制造站批量切产物计划共需至多{planned_drones}架无人机，"
             f"当前可用{available}架"
@@ -14676,8 +14691,6 @@ class BaseSchedulerSolver(
                 (item["available_drones"] for item in accelerated_manufacture),
                 default=planned_drones,
             )
-            if available == 201:
-                raise RecognizeError("无人机数量识别异常")
             insufficient_drones = planned_drones > available
             if insufficient_drones:
                 rooms = [item["room"] for item in accelerated_manufacture]
@@ -14912,8 +14925,7 @@ class BaseSchedulerSolver(
                 if not_customize:
                     drone_count = self.digit_reader.get_drone(self.recog.gray)
                     logger.info(f"当前无人机数量为：{drone_count}")
-                    # 200 为识别错误
-                    if drone_count < self.drone_count_limit or drone_count == 201:
+                    if drone_count < self.drone_count_limit:
                         logger.info(f"无人机数量小于{self.drone_count_limit}->停止")
                         break
                 accelerate = self.find("bill_accelerate")
@@ -17571,24 +17583,21 @@ class BaseSchedulerSolver(
                 or slots.get(operator.current_index) == name
             ):
                 continue
-            measured_release = False
-            if confirmed_release:
-                target = operator.upper_limit
-                if getattr(task, "emergency_recovery_release", False):
-                    target = (
-                        (getattr(self, "emergency_state", None) or {})
-                        .get("targets", {})
-                        .get(name)
-                        if name in getattr(task, "emergency_staffing_members", ())
-                        else None
-                    )
-                measured_release = (
-                    name not in slots.values()
-                    and target is not None
-                    and has_resting_mood(operator)
-                    and not operator.mood_is_prediction
-                    and operator.mood >= target
-                )
+            confirmed_departure = confirmed_release or (
+                room.startswith("dorm")
+                and complete
+                and getattr(task, "strict_mood_limit", False)
+                and task.meta_data == name
+                and self.op_data.has_rest_mood_limit(name)
+                and getattr(task, "mood_limit", None) in (None, operator.upper_limit)
+            )
+            retain_dorm_sample = (
+                confirmed_departure
+                and name not in slots.values()
+                and operator.time_stamp is not None
+                and has_resting_mood(operator)
+                and not operator.mood_is_prediction
+            )
             if room.startswith("dorm"):
                 _, bed = self.op_data.get_dorm_by_name(
                     name, group_transitions=group_transitions
@@ -17600,13 +17609,6 @@ class BaseSchedulerSolver(
                     and self.task.meta_data == name
                 ):
                     operator.rest_mood_release_limit = operator.upper_limit
-                    measured_release = measured_release or (
-                        self.op_data.has_rest_mood_limit(name)
-                        and getattr(self.task, "mood_limit", None)
-                        in (None, operator.upper_limit)
-                        and has_resting_mood(operator)
-                        and not operator.mood_is_prediction
-                    )
             operator.current_room, operator.current_index = "", -1
             if (
                 confirmed_release
@@ -17617,8 +17619,8 @@ class BaseSchedulerSolver(
                 and getattr(task, "mood_limit", None) in (None, operator.upper_limit)
             ):
                 self._cancel_released_group_shift_targets(name)
-            if measured_release:
-                # 已确认离宿保留实测心情，待命后不再按宿舍速度恢复。
+            if retain_dorm_sample:
+                # 离宿保留原实读及采样时间，待命后停止沿用宿舍恢复速度。
                 operator.depletion_rate = 0
             else:
                 operator.time_stamp = None
@@ -18433,7 +18435,7 @@ class BaseSchedulerSolver(
                             logger.warning(f"训练室状态读取失败: {e}")
                             room_state = None
                         self.train_room_state = (
-                            room_state if config.conf.enable_mastery else None
+                            room_state if config.conf.mastery_enabled else None
                         )
                         if getattr(self.task, "emergency_staffing", False) and (
                             self._emergency_protect_training(plan, room_state)
@@ -18449,7 +18451,7 @@ class BaseSchedulerSolver(
                             self._prepare_group_shift_execution_targets(self.task)
                             self.back()
                             return new_plan
-                        if config.conf.enable_mastery:
+                        if config.conf.mastery_enabled:
                             if room_state is None:
                                 from arknights_mower.solvers.mastery_reader import (
                                     RoomState,
@@ -18472,7 +18474,7 @@ class BaseSchedulerSolver(
                             self._prepare_group_shift_execution_targets(self.task)
                             self.back()
                             return new_plan
-                        if room_state is not None and config.conf.enable_mastery:
+                        if room_state is not None and config.conf.mastery_enabled:
                             # #61 短动作排班路径内联：顺路核实/帮收/重置/更新状态，并据截图
                             # 修正 DB（空闲×DB active 冲突 → 重置 idle，以截图为准）。不
                             # 开始训练；退出训练室由本 gate 的跳过/冻结分支统一负责。
@@ -18505,9 +18507,9 @@ class BaseSchedulerSolver(
                                     except Exception:
                                         room_state = None
                                 self.train_room_state = (
-                                    room_state if config.conf.enable_mastery else None
+                                    room_state if config.conf.mastery_enabled else None
                                 )
-                        if config.conf.enable_mastery:
+                        if config.conf.mastery_enabled:
                             self.task.training_skipped_slots.update(
                                 self._protected_training_slots()
                             )
@@ -19570,7 +19572,7 @@ class BaseSchedulerSolver(
             for name in row
         ) and (
             getattr(self.task, "emergency_staffing", False)
-            or config.conf.enable_mastery
+            or config.conf.mastery_enabled
         ):
             # 先核实源岗位，不能通过其他房间的换人间接打断训练。
             from arknights_mower.solvers.mastery_reader import (
@@ -19585,7 +19587,7 @@ class BaseSchedulerSolver(
             except Exception as e:
                 logger.warning(f"换人前训练室状态读取失败: {e}")
                 room_state = None
-            if config.conf.enable_mastery:
+            if config.conf.mastery_enabled:
                 self.train_room_state = room_state or RoomState(read_failed=True)
                 self._suppress_facility_arrangement(plan)
             if getattr(self.task, "emergency_staffing", False):
@@ -20062,28 +20064,6 @@ class BaseSchedulerSolver(
         if msg == 3:
             tasks.clear()
 
-    def _record_maa_event_shop_callback(self, msg, details):
-        task = getattr(self, "maa_event_shop_task", None)
-        if (
-            task is None
-            or type(details.get("taskid")) is not int
-            or details["taskid"] != task["id"]
-            or details.get("taskchain") != "Custom"
-            or task["finished"]
-        ):
-            return
-        if msg == 20002 and details.get("subtask") == "ProcessTask":
-            inner = details.get("details")
-            if (
-                isinstance(inner, dict)
-                and inner.get("task") == "SS@Store@CheckUnlimited"
-            ):
-                task["finite_done"] = True
-        elif msg in (10000, 10004, 20000):
-            task["finished"] = True
-        elif msg == 10002:
-            task.update(completed=True, finished=True)
-
     def run_maa_event_shop(self, deadline, *, manual=False):
         from time import monotonic
 
@@ -20094,7 +20074,10 @@ class BaseSchedulerSolver(
         from arknights_mower.utils.config_backup import backup_lock
         from arknights_mower.utils.device.io_budget import device_io_budget
         from arknights_mower.utils.maa_event_shop import (
+            SHOP_SWIPE_LIMIT,
+            ShopTaskProgress,
             select_shop,
+            shop_identity,
             shop_params,
             switch_after_shop,
         )
@@ -20108,12 +20091,7 @@ class BaseSchedulerSolver(
                 return True
             return False
 
-        if defer_for_refresh():
-            return False
-        if (
-            config.stop_maa.is_set()
-            or (deadline() - datetime.now()).total_seconds() <= 300
-        ):
+        if config.stop_maa.is_set():
             return
         with backup_lock:
             settings = config.conf.maa_event_shop.model_copy(deep=True)
@@ -20121,23 +20099,28 @@ class BaseSchedulerSolver(
                 return
             manager = get_weekly_plan_manager()
             shop = select_shop(manager, manager._current_server_timestamp())
+            if shop is None:
+                logger.info(
+                    "没有符合当前理智周计划的当期 SS 活动，跳过商店兑换",
+                    extra={"log_group": "maa-integration"},
+                )
+                return
+            activity_key = shop_identity(shop)
+            if maa_event_shop_completed(*activity_key):
+                logger.debug(
+                    "活动「%s」的商店兑换已完成，跳过本次兑换", shop["activity"]
+                )
+                return
+            source = manager.get_active_plan_key()
             task = {
                 "settings": settings.model_dump(),
-                "activity": shop["activity"] if shop else None,
-                "source": manager.get_active_plan_key(),
-                "target": manager.get_activity_fallbacks().get(
-                    manager.get_active_plan_key(), ""
-                ),
+                "source": source,
+                "target": manager.get_activity_fallbacks().get(source, ""),
                 "revision": manager.get_active_plan_revision(),
-                "finite_done": False,
-                "completed": False,
-                "finished": False,
             }
-        if shop is None:
-            logger.info(
-                "没有符合当前理智周计划的当期 SS 活动，跳过商店兑换",
-                extra={"log_group": "maa-integration"},
-            )
+        if defer_for_refresh():
+            return False
+        if (deadline() - datetime.now()).total_seconds() <= 300:
             return
         self.release_maa()
         navigation_end = monotonic() + min(
@@ -20177,10 +20160,10 @@ class BaseSchedulerSolver(
             if (
                 manager.get_active_plan_revision() != task["revision"]
                 or current_shop is None
-                or current_shop["activity"] != task["activity"]
+                or shop_identity(current_shop) != activity_key
             ):
                 logger.info(
-                    "理智周计划已更改，跳过本次活动商店兑换",
+                    "理智周计划或当期活动已更改，跳过本次活动商店兑换",
                     extra={"log_group": "maa-integration"},
                 )
                 return
@@ -20188,10 +20171,10 @@ class BaseSchedulerSolver(
             self.initialize_maa()
             if defer_for_refresh():
                 return False
-            task["id"] = self.MAA.append_task("Custom", shop_params(settings))
-            if not task["id"]:
+            task_id = self.MAA.append_task("Custom", shop_params(settings))
+            if not task_id:
                 raise ValueError("MAA 未接受活动商店任务，请检查核心与资源版本")
-            self.maa_event_shop_task = task
+            progress = self.maa_event_shop_task = ShopTaskProgress(task_id)
             if defer_for_refresh():
                 return False
             if not self.MAA.start():
@@ -20211,8 +20194,28 @@ class BaseSchedulerSolver(
             if not config.stop_maa.is_set():
                 # Close the native handle before applying a configuration change.
                 self.release_maa()
+                if (
+                    not progress.completed
+                    or progress.underfunded
+                    or not (progress.finite_done or progress.scan_exhausted)
+                ):
+                    return
                 with backup_lock:
-                    if switch_after_shop(task, config.conf.maa_event_shop, manager):
+                    mark_maa_event_shop_complete(*activity_key)
+                    reason = (
+                        "已遇到无限商品"
+                        if progress.finite_done
+                        else f"连续滑动 {SHOP_SWIPE_LIMIT} 次后仍未选中下一件商品"
+                    )
+                    logger.info(
+                        "活动「%s」的商店%s，已记录兑换完成",
+                        shop["activity"],
+                        reason,
+                        extra={"log_group": "maa-integration"},
+                    )
+                    if progress.finite_done and switch_after_shop(
+                        task, config.conf.maa_event_shop, manager
+                    ):
                         logger.info(
                             "活动商店有限商品已兑换完毕，刷理智方案从 %s 切换为 %s",
                             task["source"],
@@ -20415,7 +20418,8 @@ class BaseSchedulerSolver(
             logger.exception(
                 "保存 MAA 自动战斗作业进度失败", extra={"log_group": "maa-integration"}
             )
-        self._record_maa_event_shop_callback(msg, d)
+        if (shop_task := getattr(self, "maa_event_shop_task", None)) is not None:
+            shop_task.record(msg, d)
         try:
             self._record_maa_sss_callback(msg, d)
         except Exception:
@@ -20551,7 +20555,7 @@ class BaseSchedulerSolver(
                 or not all(isinstance(task, dict) for task in tasks.values())
             ):
                 raise ValueError("MAA 活动导航必须是非空任务定义对象")
-            if getattr(config.conf, "maa_growth_enable", False):
+            if getattr(config.conf, "maa_growth_enabled", False):
                 from arknights_mower.utils.growth_execution import merge_growth_tasks
 
                 tasks = merge_growth_tasks(tasks)
@@ -20572,7 +20576,7 @@ class BaseSchedulerSolver(
         if (
             isinstance(cached, dict)
             and cached
-            and getattr(config.conf, "maa_growth_enable", False)
+            and getattr(config.conf, "maa_growth_enabled", False)
         ):
             from arknights_mower.utils.growth_execution import merge_growth_tasks
 
@@ -20617,7 +20621,7 @@ class BaseSchedulerSolver(
             navigation = self.update_maa_navigation(
                 pathlib.Path(resolve_config_path(config.conf.maa_path))
             )
-            if getattr(config.conf, "maa_growth_enable", False):
+            if getattr(config.conf, "maa_growth_enabled", False):
                 from arknights_mower.utils.growth_execution import merge_growth_tasks
 
                 navigation = merge_growth_tasks(navigation or {})
@@ -20701,21 +20705,34 @@ class BaseSchedulerSolver(
                 {"client_type": _maa_client_type(getattr(self, "device", None))},
             )
         elif type == "Fight":
-            self.maybe_switch_expired_activity_plan()
-            conf = config.conf
-            server_weekday = get_server_weekday()
-            _plan = conf.maa_weekly_plan[server_weekday]
-            logger.info(
-                f"现在服务器是{_plan.weekday}", extra={"log_group": "maa-integration"}
-            )
-            stages = self.apply_maa_stage_inventory_rules(_plan.stage)
+            from arknights_mower.utils.config_backup import backup_lock
+            from arknights_mower.utils.growth_farming import active_chip_farming_target
             from arknights_mower.utils.maa_stage_inventory import (
                 load_inventory_snapshot,
                 maa_fight_drop_targets,
             )
 
+            with backup_lock:
+                filter_by_availability = self.maybe_switch_expired_activity_plan()
+                conf = config.conf
+                _plan = conf.maa_weekly_plan[get_server_weekday()]
+                use_all_medicine = is_game_date(
+                    getattr(conf, "medicine_use_all_date", None)
+                )
+            logger.info(
+                f"现在服务器是{_plan.weekday}", extra={"log_group": "maa-integration"}
+            )
+            growth = active_chip_farming_target(_plan.weekday, filter_by_availability)
+            growth_rules = growth.rules if growth else {}
+            stages = (
+                (["Annihilation"] if "Annihilation" in _plan.stage else [])
+                + list(growth_rules)
+                if growth_rules
+                else self.apply_maa_stage_inventory_rules(_plan.stage)
+            )
+
             inventory, _ = load_inventory_snapshot()
-            rules = (
+            saved_rules = (
                 copy.deepcopy(conf.maa_stage_limit_rules)
                 if conf.maa_stage_inventory_enable
                 else []
@@ -20723,6 +20740,10 @@ class BaseSchedulerSolver(
             if not hasattr(self, "maa_inventory_tasks"):
                 self.maa_inventory_tasks = {}
             for stage in stages:
+                if growth_rules:
+                    rules = [growth_rules[stage]] if stage in growth_rules else []
+                else:
+                    rules = saved_rules
                 targets = maa_fight_drop_targets(stage, rules, inventory)
                 if targets["reached"]:
                     continue
@@ -20731,7 +20752,9 @@ class BaseSchedulerSolver(
                     # 空值表示上一次
                     # 'stage': '',
                     "stage": stage,
-                    "medicine": _plan.medicine,
+                    "medicine": _MAA_UNLIMITED_MEDICINE
+                    if use_all_medicine
+                    else _plan.medicine,
                     "stone": 999 if conf.maa_eat_stone else 0,
                     "times": 999,
                     "series": 0,
@@ -20819,7 +20842,7 @@ class BaseSchedulerSolver(
             )
 
     def maybe_switch_expired_activity_plan(self):
-        """刷理智实际选关前，根据活动方案的切换时间更新周计划。"""
+        """Apply any due plan switch and read the selected plan's growth setting."""
         try:
             from arknights_mower.utils.config.weekly_plan_loader import (
                 get_weekly_plan_manager,
@@ -20827,7 +20850,11 @@ class BaseSchedulerSolver(
             from arknights_mower.utils.config_backup import backup_lock
 
             with backup_lock:
-                return get_weekly_plan_manager().maybe_switch_expired_activity_plan()
+                manager = get_weekly_plan_manager()
+                manager.maybe_switch_expired_activity_plan()
+                return manager.get_growth_chip_farming().get(
+                    manager.get_active_plan_key()
+                )
         except Exception:
             logger.exception(
                 "检测活动结束并切换刷理智周计划失败，继续使用当前方案",
@@ -21025,6 +21052,7 @@ class BaseSchedulerSolver(
         manual=False,
         long_task=None,
         mall_action=None,
+        outer_idle_loop=False,
     ):
         """清日常"""
         copilot_run = None
@@ -21251,21 +21279,17 @@ class BaseSchedulerSolver(
                     None,
                 )
             )
+            now = datetime.now()
+            cutoff, _ = long_task_window(conf, now)
+            if not manual:
+                long_limit = min(long_limit, cutoff)
+                if cutoff - now < timedelta(minutes=9):
+                    selected_long = None
             running_long_task = True
             if selected_long and (refresh := self._maa_refresh_deadline()) is not None:
                 return defer_refresh(refresh)
             if selected_long and deadline() - datetime.now() < timedelta(seconds=30):
                 selected_long = None
-            now_time = datetime.now().time()
-            try:
-                min_time = datetime.strptime(conf.maa_rg_sleep_min, "%H:%M").time()
-                max_time = datetime.strptime(conf.maa_rg_sleep_max, "%H:%M").time()
-                if max_time < min_time:
-                    rg_sleep = now_time > min_time or now_time < max_time
-                else:
-                    rg_sleep = min_time < now_time < max_time
-            except ValueError:
-                rg_sleep = False
             paradox = selected_long == "paradox"
             from arknights_mower.utils.maa_long_task import blackflow_preserved_run
 
@@ -21273,19 +21297,18 @@ class BaseSchedulerSolver(
                 selected_long == "rogue"
                 and conf.maa_rg_theme == "BlackFlow"
                 and blackflow_preserved_run(conf.rogue) is not None
-                and (manual or not rg_sleep)
             ):
                 blackflow_run = self._maa_blackflow_run(conf.rogue)
                 if blackflow_run.get("completed") is True:
                     selected_long = None
-            if selected_long in ("copilot", "paradox") and (manual or not rg_sleep):
+            if selected_long in ("copilot", "paradox"):
                 copilot_conf = conf.paradox if paradox else conf.copilot
                 copilot_run = (
                     self._maa_paradox_run(copilot_conf)
                     if paradox
                     else self._maa_copilot_run(copilot_conf)
                 )
-            if selected_long == "sss" and (manual or not rg_sleep):
+            if selected_long == "sss":
                 sss_run = self._maa_sss_run(conf.sss)
             if (
                 selected_long in ("rogue", "rcl")
@@ -21299,7 +21322,7 @@ class BaseSchedulerSolver(
                     and not copilot_run["failed"]
                     and copilot_run["next"] < len(copilot_conf.scripts)
                 )
-            ) and (manual or not rg_sleep):
+            ):
                 logger.info(
                     "准备开始 MAA 大型任务", extra={"log_group": "maa-integration"}
                 )
@@ -21726,7 +21749,7 @@ class BaseSchedulerSolver(
                 if refresh_deferred:
                     return False
 
-            elif manual or not rg_sleep:
+            elif not outer_idle_loop:
                 if selected_long == "ra":
                     self.back_to_index()
                     ra_solver = ReclamationAlgorithm(self.device, self.recog)
@@ -21818,14 +21841,15 @@ class BaseSchedulerSolver(
                 large_task_started = False
             running_long_task = False
             self.recog.last_scene = None
-            self.rest_until_next_task()
+            if not outer_idle_loop:
+                self.rest_until_next_task()
         else:
             # 空闲唤醒故障交回设备恢复，不能作为 MAA 任务故障报告。
             battle_inventory_active.clear()
             if large_task_started:
                 resume_dorm_releases(self)
                 large_task_started = False
-            if not manual:
+            if not manual and not outer_idle_loop:
                 self.rest_until_next_task()
         finally:
             if large_task_started:
@@ -22007,18 +22031,38 @@ class BaseSchedulerSolver(
             },
         )
 
-    def mower_stage_plan(self, excluded_stages=()) -> list[str]:
-        self.maybe_switch_expired_activity_plan()
-        plan = config.conf.maa_weekly_plan[get_server_weekday()]
-        stages = []
-        for stage in plan.stage:
-            if not isinstance(stage, str):
-                continue
-            stage = stage.strip()
-            if not stage or stage in excluded_stages:
-                continue
-            stages.append(stage)
-        return self.apply_maa_stage_inventory_rules(stages)
+    def mower_stage_plan(self, excluded_stages=(), attempted_growth=()):
+        from arknights_mower.utils.config_backup import backup_lock
+        from arknights_mower.utils.growth_farming import active_chip_farming_target
+
+        with backup_lock:
+            filter_by_availability = self.maybe_switch_expired_activity_plan()
+            plan = config.conf.maa_weekly_plan[get_server_weekday()]
+        growth = None
+        if type(filter_by_availability) is bool:
+            growth = active_chip_farming_target(plan.weekday, filter_by_availability)
+        if growth and growth.rules:
+            stages = [
+                stage
+                for stage in growth.rules
+                if (growth.char_id, stage) not in attempted_growth
+            ]
+            if stages:
+                if (
+                    "Annihilation" in plan.stage
+                    and "Annihilation" not in excluded_stages
+                ):
+                    stages.insert(0, "Annihilation")
+                return stages, growth
+        excluded = set(excluded_stages) | {stage for _, stage in attempted_growth}
+        stages = [
+            stage.strip()
+            for stage in plan.stage
+            if isinstance(stage, str)
+            and stage.strip()
+            and stage.strip() not in excluded
+        ]
+        return self.apply_maa_stage_inventory_rules(stages), None
 
     def mower_stage_ap_cost(self, stage_id: str) -> int | None:
         stage_meta = next(
@@ -22144,6 +22188,7 @@ class BaseSchedulerSolver(
         target_total_runs: int | None,
         mode: str,
         threshold: int | None = None,
+        inventory_limit_rules=None,
     ):
         remaining_runs = target_total_runs
         executed_any = False
@@ -22255,6 +22300,7 @@ class BaseSchedulerSolver(
                 simulated_current_ap=simulated_current_ap,
                 ap_cost=ap_cost,
                 sanity_threshold=threshold,
+                inventory_limit_rules=inventory_limit_rules,
             )
             executed_runs += result["executed_runs"]
             reason = next(
@@ -22451,7 +22497,7 @@ class BaseSchedulerSolver(
             else:
                 observe_activity(self, "stage-plan", "mower", "running")
                 activity_started = True
-                stages = self.mower_stage_plan()
+                stages, _ = self.mower_stage_plan()
                 logger.debug(
                     f"local operation plan: {stages}",
                     extra={"log_group": "local-operation"},
@@ -22485,7 +22531,16 @@ class BaseSchedulerSolver(
                 simulated_current_ap = None
                 threshold = 0
 
-                if stages:
+                if stages and is_game_date(
+                    getattr(conf, "medicine_use_all_date", None)
+                ):
+                    threshold_control_failed = True
+                    threshold_control_reason = "use_all_medicine"
+                    logger.info(
+                        "今天允许使用全部理智药，按游戏内剩余理智刷关",
+                        extra={"log_group": "local-operation"},
+                    )
+                elif stages:
                     player_info = PlayerInfoClient()
                     snapshot = player_info.get_first_available_snapshot()
                     if snapshot is None:
@@ -22564,13 +22619,20 @@ class BaseSchedulerSolver(
                         self.clear_local_operation_followups()
 
                     attempted_stages = set()
+                    attempted_growth = set()
                     while True:
-                        # Confirmed drops can cap later stages or unlock fallback stages.
-                        stages = self.mower_stage_plan(excluded_stages=attempted_stages)
+                        stages, growth = self.mower_stage_plan(
+                            excluded_stages=attempted_stages,
+                            attempted_growth=attempted_growth,
+                        )
                         if not stages:
                             break
                         stage = stages[0]
-                        attempted_stages.add(stage)
+                        growth_rule = growth.rules.get(stage) if growth else None
+                        if growth_rule:
+                            attempted_growth.add((growth.char_id, stage))
+                        else:
+                            attempted_stages.add(stage)
                         if manual:
                             next_task_time = manual_task_deadline(self)
                         if next_task_time - datetime.now() < timedelta(minutes=5):
@@ -22658,6 +22720,9 @@ class BaseSchedulerSolver(
                             target_total_runs=target_total_runs,
                             mode=mode,
                             threshold=None if threshold_control_failed else threshold,
+                            inventory_limit_rules=[growth_rule]
+                            if growth_rule
+                            else None,
                         )
                         simulated_current_ap = stage_run_result["simulated_current_ap"]
                         executed_any = executed_any or stage_run_result["executed_any"]
@@ -22671,7 +22736,7 @@ class BaseSchedulerSolver(
 
                     # A skipped Annihilation stage gets no follow-up from this
                     # dispatch; the next dispatch checks it again.
-                    remaining_stages = self.mower_stage_plan(
+                    remaining_stages, _ = self.mower_stage_plan(
                         excluded_stages=skipped_stages
                     )
                     if not remaining_stages:
@@ -22956,7 +23021,7 @@ class BaseSchedulerSolver(
             )
 
             # 扫描确认材料后，复用单个开始任务的派发入口。
-            if config.conf.enable_mastery:
+            if config.conf.mastery_enabled:
                 self._dispatch_scan_start_tasks(res.get("scheduled", []))
 
             from arknights_mower.utils.workshop_automation import update_workshop_config
@@ -22976,7 +23041,7 @@ class BaseSchedulerSolver(
         跳过已观测保护不允许的干员，重复触发保留已排任务及时间。
         材料等待计划仍优先于其他待执行计划。
         """
-        if not scheduled or not config.conf.enable_mastery:
+        if not scheduled or not config.conf.mastery_enabled:
             return
         from arknights_mower.solvers.mastery_reader import (
             _notify_protected,
@@ -23199,7 +23264,7 @@ class BaseSchedulerSolver(
             scheduling(self.tasks, op_data=self.op_data)
 
     def rest_until_next_task(self):
-        """完成本轮任务后休息到 `tasks[0].time`，是调度器唯一的「任务间空闲」收尾。
+        """完成本轮任务后，休息到下个可派发任务或大型任务时段开始。
 
         发休息通知、累计任务计数、并真正睡到下个任务。
         maa_plan_solver / mower_plan_solver / __main__ 主循环此前各自复制了
@@ -23233,7 +23298,13 @@ class BaseSchedulerSolver(
         if first is None:
             self._stop_after_round()
             return
-        remaining_time = (first.time - datetime.now()).total_seconds()
+        now = datetime.now()
+        wake_at = first.time
+        if config.conf.maa_rg_enable:
+            _, opening = long_task_window(config.conf, now)
+            if opening is not None:
+                wake_at = min(wake_at, opening)
+        remaining_time = (wake_at - now).total_seconds()
         if remaining_time <= 0:
             return
         for pending in self.tasks:
@@ -23255,18 +23326,26 @@ class BaseSchedulerSolver(
             base_scheduler=self,
         )
         self._stop_after_round(body)
-        presentation = build_task_presentation(first, getattr(self, "op_data", None))
+        window_opens_first = wake_at < first.time
+        presentation = (
+            {}
+            if window_opens_first
+            else build_task_presentation(first, getattr(self, "op_data", None))
+        )
         forecast_now = datetime.now()
-        display_remaining = max(0, (first.time - forecast_now).total_seconds())
-        next_time = first.time.strftime(
-            "%m-%d %H:%M:%S" if first.time.date() != forecast_now.date() else "%H:%M:%S"
+        display_remaining = max(0, (wake_at - forecast_now).total_seconds())
+        next_time = wake_at.strftime(
+            "%m-%d %H:%M:%S" if wake_at.date() != forecast_now.date() else "%H:%M:%S"
         )
         header = f"休息 {format_wait_duration(display_remaining)}，至 {next_time}"
         agents = []
-        if presentation["title"]:
+        if window_opens_first:
+            header += "，随后进入大型任务执行时段"
+        elif presentation["title"]:
             header += f"，随后执行「{presentation['title']}」"
         if (
-            first.type == TaskTypes.EXHAUST_OFF
+            not window_opens_first
+            and first.type == TaskTypes.EXHAUST_OFF
             and not presentation["rooms"]
             and isinstance(first.meta_data, str)
             and first.meta_data
@@ -23276,7 +23355,9 @@ class BaseSchedulerSolver(
                 f"[[operator:{name}]]" for name in agents
             )
         logger.info(
-            format_task_log_message(presentation, header),
+            header
+            if window_opens_first
+            else format_task_log_message(presentation, header),
             extra={
                 "log_agents": agents,
                 "log_task": {
@@ -23288,14 +23369,15 @@ class BaseSchedulerSolver(
         )
         send_message(
             body,
-            f"休息 {format_time(remaining_time)}，到{first.format(timezone_offset).time.strftime('%H:%M:%S')}开始工作",
+            f"休息 {format_time(remaining_time)}，到{(wake_at + timedelta(hours=timezone_offset)).strftime('%H:%M:%S')}开始工作",
             body_is_html=True,
         )
-        if remaining_time > 0:
-            self._idle_sleep(remaining_time, round_end=True)
-            if config.maintenance_recheck.is_set():
-                return
-            self.check_current_focus()
+        if window_opens_first:
+            remaining_time = max(0, (wake_at - datetime.now()).total_seconds())
+        self._idle_sleep(remaining_time, round_end=True)
+        if config.maintenance_recheck.is_set():
+            return
+        self.check_current_focus()
 
     def _get_idle_action(self, remaining_time=0):
         if (

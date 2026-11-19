@@ -1,4 +1,4 @@
-"""双 Mower 模式的信息板领取；原有线索、访友和购物入口负责调度。"""
+"""Mower 购物按需领取信息板信用，线索流程与独立购物共用入口。"""
 
 from datetime import datetime, timedelta
 
@@ -31,7 +31,7 @@ class ClueCreditMixin:
         return None
 
     def _run_on_demand_clue_shop(self, *, settlement_checked=None, resume=None):
-        """线索流程结束后购物；不发起访友，也不安排额外购物任务。"""
+        """按需购物；不发起访友，也不安排额外定时购物任务。"""
         if config.stop_mower.is_set():
             raise MowerExit
         if getattr(self, "_clue_access_record_exhausted", False):
@@ -126,6 +126,8 @@ class ClueCreditMixin:
         )
 
     def _visit_clue_message_board(self, *, collect_current):
+        if not config.conf.clue_message_board_enable:
+            return False
         self.scene_graph_navigation(Scene.INFRA_MAIN)
         if (
             getattr(self, "_clue_access_record_exhausted", False)
@@ -153,6 +155,8 @@ class ClueCreditMixin:
 
     def _open_clue_message_board(self):
         """唤出家具交互入口后打开信息板，仅在确认仍在房间时补救一次。"""
+        if not config.conf.clue_message_board_enable:
+            return False
         self.recog.update()
         if (
             self.scene() == Scene.CLUE_MESSAGE_BOARD
@@ -291,6 +295,8 @@ class ClueCreditMixin:
 
     def _collect_clue_message_board(self, *, collect_current=True):
         """打开信息板并按需领取本周信用，确认页面处理和返回结果。"""
+        if not config.conf.clue_message_board_enable:
+            return False
         if self._open_clue_message_board():
             completed = True
             if collect_current and (collect := self.find("clue/message_board_collect")):

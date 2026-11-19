@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -9,6 +10,7 @@ from pydantic import (
     Field,
     StrictBool,
     TypeAdapter,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -22,6 +24,7 @@ from arknights_mower.utils.config.device_profile import (
     profile_from_legacy,
     updated_legacy_profile_fields,
 )
+from arknights_mower.utils.datetime import get_server_time
 from arknights_mower.utils.performance import (
     PERFORMANCE_PRESETS,
     default_performance_mode,
@@ -83,17 +86,19 @@ class CluePart(ConfModel):
     credit_fight: CreditFightConf = Field(default_factory=CreditFightConf)
     "信用作战设置"
     enable_party: int = 1
-    "线索收集"
+    "线索搜集"
     leifeng_mode: int = 1
     "雷锋模式"
+    clue_message_board_enable: bool = True
+    "在线索流程和购物中进入会客室信息板领取信用"
     maa_mall_enable: bool = True
     "信用商店购物开关"
-    maa_mall_mode: Literal["maa", "mower"] = "maa"
-    "信用商店购物处理方式：maa / mower"
-    clue_credit_on_demand: bool = False
+    maa_mall_mode: Literal["maa", "mower"] = "mower"
+    "信用商店购物处理方式，旧配置统一使用 Mower"
+    clue_credit_on_demand: bool = True
     "仅在 Mower 访友及购物均启用时按需领取信息板信用"
-    credit_shop_by_value: bool = False
-    "按性价比购物开关，仅在 Mower 访问好友及购物均启用时适用"
+    credit_shop_by_value: bool = True
+    "信用商店购物固定按性价比执行"
     credit_shop_value_threshold: float = Field(default=0.045, ge=0, allow_inf_nan=False)
     "购物性价比阈值，单位为理智/信用"
     maa_mall_blacklist: str = "加急许可,碳,碳素,家具零件"
@@ -213,7 +218,22 @@ class RogueRecruitConf(ConfModel):
     use_support: bool = False
 
 
+class LongTaskWindow(ConfModel):
+    start: Annotated[str, Field(pattern=r"^(?:[01]?[0-9]|2[0-3]):[0-5][0-9]$")]
+    end: Annotated[str, Field(pattern=r"^(?:[01]?[0-9]|2[0-3]):[0-5][0-9]$")]
+
+
 class LongTaskPart(ConfModel):
+    maa_long_task_extra_windows: list[LongTaskWindow] = Field(default_factory=list)
+
+    class GarrisonConf(ConfModel):
+        mode: Literal["medals", "matches"] = "medals"
+        match_limit: int = Field(default=1, ge=0, strict=True)
+        target_wins: Literal[3, 6] = 3
+        run_id: str = Field(default="", max_length=128)
+
+    garrison: GarrisonConf = Field(default_factory=GarrisonConf)
+
     class ParadoxQueueItem(ConfModel):
         id: str = Field(pattern=r"^[a-f0-9]{64}$")
 
@@ -550,6 +570,12 @@ class MaaStageRatioRule(ConfModel):
     members: list[MaaStageRatioMember] = []
 
 
+def _unexpired_medicine_date(value: str | None) -> str | None:
+    if value is not None and value < get_server_time().date().isoformat():
+        return None
+    return value
+
+
 class RegularTaskPart(ConfModel):
     class MaaDailyPlan(BaseModel):
         medicine: int = 0
@@ -573,6 +599,8 @@ class RegularTaskPart(ConfModel):
     "日常任务间隔"
     medicine_expire_days: int = 0
     "自动使用将要过期的理智药（剩余天数，0 表示不使用）"
+    medicine_use_all_date: str | None = None
+    "允许使用全部理智药的游戏日"
     ap_fallback: int = 0
     "关卡体力消耗默认值（数据中找不到关卡时的兜底，0 表示不启用）"
     maa_eat_stone: bool = False
@@ -609,8 +637,8 @@ class RegularTaskPart(ConfModel):
     "仓库历史保留条数：扫描记录最多留多少条，超出的从最早的删起，0 表示一直留着"
     visit_friend_enable: bool = True
     "访问好友"
-    visit_friend_mode: str = "maa"
-    "访问好友处理方式：mower 原生 / maa 交 MAA"
+    visit_friend_mode: str = "mower"
+    "访问好友处理方式，旧配置统一使用 Mower"
     report_enable: bool = True
     "读取基报"
     trust_rotation_enable: bool = False
@@ -621,6 +649,17 @@ class RegularTaskPart(ConfModel):
     "优先信赖阈值（百分比）"
     trust_rotation_interval: float = Field(default=24, ge=1, le=168)
     "信赖检查间隔（小时）"
+
+    @field_validator("medicine_use_all_date")
+    @classmethod
+    def validate_medicine_use_all_date(cls, value: str | None) -> str | None:
+        if value is not None and date.fromisoformat(value).isoformat() != value:
+            raise ValueError("日期格式须为 YYYY-MM-DD")
+        return _unexpired_medicine_date(value)
+
+    @field_serializer("medicine_use_all_date")
+    def serialize_medicine_use_all_date(self, value: str | None) -> str | None:
+        return _unexpired_medicine_date(value)
 
 
 class WorkShopItem(ConfModel):
@@ -824,7 +863,7 @@ class RIICPart(ConfModel):
     workshop_manual_backup: list[WorkShopSetting] | None = None
     "独立保存、可编辑的手动加工表单；None 表示尚未初始化"
     workshop_auto_active: bool = False
-    "自动专精是否正在接管运行配置"
+    "自动合成是否正在接管运行配置"
     growth_crafting_order: list[str] = Field(default_factory=list)
     "养成项目的合成顺序；空列表按专精计划优先，训练中的计划固定在前"
     workshop_manual_revision: int = 0
@@ -872,10 +911,32 @@ class RIICPart(ConfModel):
     "不养闲人合并间隔"
     assistant_follows_schedule: bool = False
     "协助位跟随排班（专精时协助位不固定，由排班系统管理）"
+    enable_crafting: bool = True
+    "自动合成养成材料；关闭时同时禁用自动专精和 MAA 干员培养"
     enable_mastery: bool = True
-    "全自动专精全局开关：OFF 时禁用全部训练室动作/通知/守卫，仅保留仓库材料扫描"
+    "自动专精开关：关闭时禁用全部训练室动作、通知和守卫，不影响自动合成"
     maa_growth_enable: bool = False
     "MAA 干员培养：成品材料齐全时执行精英化及基础技能升级"
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_growth_automation(cls, data):
+        if (
+            isinstance(data, dict)
+            and "enable_crafting" not in data
+            and "enable_mastery" in data
+        ):
+            data = {**data, "enable_crafting": data["enable_mastery"]}
+        return data
+
+    @property
+    def mastery_enabled(self) -> bool:
+        return self.enable_crafting and self.enable_mastery
+
+    @property
+    def maa_growth_enabled(self) -> bool:
+        return self.enable_crafting and self.maa_growth_enable
+
     mastery_consecutive_skills: bool = False
     "同干员技能接续训练"
     save_mastery_screenshots: bool = False
@@ -1302,15 +1363,11 @@ class Conf(
             data.pop("device", None)
         if not isinstance(data, dict):
             return data
-        # visit_friend(bool) 已退役：迁移为 visit_friend_enable(bool)。原 true 语义是 mower
-        # 原生访问好友，迁移保留该行为（mode=mower），避免非 MAA 用户在迁移后静默失去访问
-        # 好友；未配置过旧键的新用户才取默认 maa。
+        # 旧访友开关只迁移启用状态，访友和购物统一交给 Mower。
         old_visit_friend = data.pop("visit_friend", None)
         if old_visit_friend is not None:
             if "visit_friend_enable" not in data:
                 data["visit_friend_enable"] = old_visit_friend
-            if "visit_friend_mode" not in data:
-                data["visit_friend_mode"] = "mower" if old_visit_friend else "maa"
         if "maa_enable" in data:
             old_maa_enable = bool(data["maa_enable"])
             if "stage_plan_enable" not in data:
@@ -1319,8 +1376,17 @@ class Conf(
                 data["stage_plan_runner"] = "maa" if old_maa_enable else "mower"
             if "maa_mall_enable" not in data:
                 data["maa_mall_enable"] = old_maa_enable
-            if "maa_mall_mode" not in data:
-                data["maa_mall_mode"] = "maa"
+        # 已移除的策略选项回到固定默认值，兼容旧配置、档案导入及部分更新。
+        for key in (
+            "visit_friend_mode",
+            "maa_mall_mode",
+            "clue_credit_on_demand",
+            "credit_shop_by_value",
+            "maa_mall_ignore_blacklist_when_full",
+            "maa_mall_only_buy_discount",
+            "maa_mall_reserve_max_credit",
+        ):
+            data.pop(key, None)
         for old, new in _LEGACY_KEY_MIGRATIONS.items():
             if old not in data:
                 continue
@@ -1362,6 +1428,10 @@ class Conf(
         return self.maa_rg_enable == 1 and self.maa_long_task_type == "sf"
 
     @property
+    def GARRISON(self):
+        return self.maa_rg_enable == 1 and self.maa_long_task_type == "garrison"
+
+    @property
     def RCL(self):
         return self.maa_rg_enable == 1 and self.maa_long_task_type == "rcl"
 
@@ -1384,7 +1454,8 @@ class Conf(
     @property
     def should_defer_clue_credit(self) -> bool:
         return bool(
-            self.clue_credit_on_demand
+            self.clue_message_board_enable
+            and self.clue_credit_on_demand
             and self.should_run_mower_mall
             and self.visit_friend_enable
             and self.visit_friend_mode == "mower"
@@ -1392,12 +1463,7 @@ class Conf(
 
     @property
     def should_use_credit_shop_value(self) -> bool:
-        return bool(
-            self.credit_shop_by_value
-            and self.should_run_mower_mall
-            and self.visit_friend_enable
-            and self.visit_friend_mode == "mower"
-        )
+        return bool(self.credit_shop_by_value and self.should_run_mower_mall)
 
     @property
     def should_run_maa_visit_friend(self) -> bool:
@@ -1433,7 +1499,7 @@ class Conf(
     def has_maa_tasks(self) -> bool:
         return (
             self.has_maa_daily_tasks
-            or self.maa_growth_enable
+            or self.maa_growth_enabled
             or self.RG
             or self.SSS
             or self.RCL

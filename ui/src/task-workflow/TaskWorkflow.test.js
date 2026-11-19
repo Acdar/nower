@@ -327,6 +327,19 @@ afterEach(() => {
 })
 
 describe('production task checklist interactions', () => {
+  it('disables mastery in all settings until automatic crafting is enabled', async () => {
+    state.config.enable_crafting = false
+    await mount()
+    expect(checkbox('training').props.disabled).toBe(true)
+    await check('training', true)
+    expect(state.config.enable_mastery).toBe(false)
+    state.config.enable_crafting = true
+    await nextTick()
+    expect(checkbox('training').props.disabled).toBe(false)
+    await check('training', true)
+    expect(state.config.enable_mastery).toBe(true)
+  })
+
   it.each(['checklist', 'waterfall'])(
     'omits managed connection navigation in %s layout',
     async (layout) => {
@@ -356,11 +369,11 @@ describe('production task checklist interactions', () => {
       find((node) => node.props['data-active-editor'] !== undefined).props['data-checklist']
     ).toBe(false)
     const navigation = find((node) => node.tag === 'nav')
-    for (const label of ['连接与启动', '基建任务', '日常任务', '作战与空闲', '运行配置'])
+    for (const label of ['连接与启动', '常用设置', '基建任务', '日常任务', '运行配置'])
       expect(text(navigation)).toContain(label)
     expect(
       nodes(navigation).filter((node) => node.props['data-ui-icon'] !== undefined)
-    ).toHaveLength(2)
+    ).toHaveLength(1)
     expect(nodes(navigation).filter((node) => node.tag === 'small')).toHaveLength(0)
     expect(nodes(navigation).some((node) => node.text.trim() === '自动')).toBe(false)
     for (const button of nodes(navigation).filter((node) => node.tag === 'button'))
@@ -574,10 +587,37 @@ describe('production task checklist interactions', () => {
     expect(state.config.workshop_manual_settings[0].enabled).toBe(true)
   })
 
+  it('shows default favorites while keeping the original settings entries and switches', async () => {
+    await mount()
+    const navigation = find((node) => node.tag === 'nav')
+    const group = nodes(navigation).find((node) => node.tag === 'section')
+    expect(text(group)).toContain('常用设置')
+    const favorites = () =>
+      nodes(group)
+        .filter((node) => node.props['data-favorite-id'])
+        .map((node) => node.props['data-favorite-id'])
+    expect(favorites()).toEqual(['device', 'stage-plan', 'long'])
+    expect(checkbox('stage-plan')).toBeTruthy()
+    expect(checkbox('long')).toBeTruthy()
+    await click(task('stage-plan'))
+    expect(selected()).toBe('stage-plan')
+    await click(
+      find((node) => node.props['data-favorite-id'] === 'long').children.find(
+        (node) => node.tag === 'button'
+      )
+    )
+    expect(selected()).toBe('long')
+
+    state.gui.settingsFavorites = ['recruit', 'accounts']
+    await flush()
+    expect(favorites()).toEqual(['recruit', 'accounts'])
+    for (const id of ['stage-plan', 'long', 'recruit', 'accounts']) expect(task(id)).toBeTruthy()
+  })
+
   it('uses noninteractive group headings and a separate interval editor while retaining legacy destinations', async () => {
     const page = await mount()
     const before = JSON.stringify(state.config)
-    for (const title of ['基建任务', '日常任务', '作战与空闲']) {
+    for (const title of ['常用设置', '基建任务', '日常任务']) {
       const groupHeading = find((node) => node.tag === 'h3' && text(node) === title)
       await click(groupHeading)
       expect(selected()).toBe('base')

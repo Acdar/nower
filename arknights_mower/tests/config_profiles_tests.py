@@ -902,42 +902,42 @@ def test_group_resting_thresholds_follow_base_profile_group(storage, inherit):
             {"maa_enable": False},
             {"maa_enable": True},
             ["daily"],
-            (True, "maa", True, "maa"),
+            (True, "maa", True, "mower"),
             id="retain-daily-disabled",
         ),
         pytest.param(
             {"maa_enable": True},
             {"maa_enable": False},
             ["daily"],
-            (False, "mower", False, "maa"),
+            (False, "mower", False, "mower"),
             id="retain-daily-enabled",
         ),
         pytest.param(
             {"maa_enable": False},
             {"maa_enable": True},
             ["weekly_plan"],
-            (False, "mower", True, "maa"),
+            (False, "mower", True, "mower"),
             id="retain-legacy-weekly-plan",
         ),
         pytest.param(
             {"maa_enable": True},
             {"maa_enable": False},
             ["credit"],
-            (False, "mower", True, "maa"),
+            (False, "mower", True, "mower"),
             id="retain-legacy-credit",
         ),
         pytest.param(
             {"maa_enable": False},
             {},
             ["daily"],
-            (True, "maa", True, "maa"),
+            (True, "maa", True, "mower"),
             id="incoming-defaults",
         ),
         pytest.param(
             {},
             {"maa_enable": False},
             ["weekly_plan", "credit"],
-            (True, "maa", True, "maa"),
+            (True, "maa", True, "mower"),
             id="retained-defaults",
         ),
         pytest.param(
@@ -1759,3 +1759,26 @@ def test_api_protocol_follows_model_service_profile_group(storage, inherit):
     assert config.conf.ai_base_url == "https://relay.example/v1"
     assert config.conf.ai_context_tokens == 64000
     assert config.conf.ai_deepseek_context_tokens == 512000
+
+
+@pytest.mark.parametrize("keep", [[], ["clue"], ["credit"]])
+def test_information_board_preference_follows_clue_group_on_legacy_import(
+    storage, keep
+):
+    config.conf.clue_message_board_enable = False
+    config.conf.enable_party = 0
+    config.save_conf()
+    files = backup.read_archive(backup.export_archive(include_tmp=False))
+    files["conf.yml"] = yaml.safe_dump({"enable_party": 0}).encode("utf-8")
+
+    profiles.import_profile(
+        backup._archive_bytes(files, {}),
+        "信息板设置",
+        keep,
+        expected_generation="0",
+    )
+
+    saved = config.Conf(**yaml.safe_load(config.conf_path.read_text(encoding="utf-8")))
+    for conf in (config.conf, saved):
+        assert conf.clue_message_board_enable is ("clue" not in keep)
+        assert conf.enable_party == 0

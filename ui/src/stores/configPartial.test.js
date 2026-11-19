@@ -84,6 +84,29 @@ function selectedLabels(html) {
 }
 
 describe('partial configuration saves', () => {
+  it('defaults information-board collection on without saving defaults', async () => {
+    await setup()
+    expect(store.clue_message_board_enable).toBe(true)
+    expect(axios.patch).not.toHaveBeenCalled()
+  })
+
+  it('preserves information-board false and saves only its edited key', async () => {
+    const { data } = await setup({ clue_message_board_enable: false, enable_party: 0 })
+    expect(store.clue_message_board_enable).toBe(false)
+    expect(store.build_config().clue_message_board_enable).toBe(false)
+    expect(axios.patch).not.toHaveBeenCalled()
+    store.clue_message_board_enable = true
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
+      clue_message_board_enable: true
+    })
+    expect(store.enable_party).toBe(false)
+    data.clue_message_board_enable = false
+    await store.load_config()
+    expect(store.clue_message_board_enable).toBe(false)
+  })
+
   it('persists all group thresholds across additions, edits, removals and reloads', async () => {
     const { data } = await setup({ resting_threshold: 0.65, group_resting_thresholds: {} })
     axios.patch.mockImplementation(async (_url, patch) => {
@@ -237,98 +260,52 @@ describe('partial configuration saves', () => {
     }
   )
 
-  it('defaults value shopping off at 0.045 and saves only an explicit toggle', async () => {
-    await setup()
-    expect(store.credit_shop_by_value).toBe(false)
-    expect(store.credit_shop_value_threshold).toBe(0.045)
-    expect(axios.patch).not.toHaveBeenCalled()
-    store.credit_shop_by_value = true
-    await nextTick()
-    await store.flush_config_saves()
-    expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
-      credit_shop_by_value: true
-    })
-    expect(store.clue_credit_on_demand).toBe(false)
-  })
-
-  it.each([0, 0.036])(
-    'loads and saves threshold %s without changing other settings',
-    async (threshold) => {
-      await setup({ credit_shop_value_threshold: threshold })
-      expect(store.credit_shop_value_threshold).toBe(threshold)
-      expect(store.build_config().credit_shop_value_threshold).toBe(threshold)
-      expect(axios.patch).not.toHaveBeenCalled()
-      store.credit_shop_value_threshold = 0.043
-      await nextTick()
-      await store.flush_config_saves()
-      expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
-        credit_shop_value_threshold: 0.043
-      })
-      expect(store.credit_shop_by_value).toBe(false)
+  it.each([
+    {},
+    {
+      visit_friend_mode: 'maa',
+      maa_mall_mode: 'maa',
+      clue_credit_on_demand: false,
+      credit_shop_by_value: false
     }
-  )
-
-  it.each(['visit_friend_mode', 'maa_mall_mode'])(
-    'retains shopping selections when changing %s',
-    async (key) => {
-      await setup({
-        visit_friend_enable: true,
-        visit_friend_mode: 'mower',
-        maa_mall_enable: true,
-        maa_mall_mode: 'mower',
-        credit_shop_by_value: true,
-        credit_shop_value_threshold: 0.032,
-        clue_credit_on_demand: false,
-        maa_mall_ignore_blacklist_when_full: true,
-        maa_mall_buy: '招聘许可',
-        maa_mall_blacklist: '家具零件'
-      })
-      store[key] = 'maa'
-      await nextTick()
-      await store.flush_config_saves()
-      expect(axios.patch.mock.lastCall[1][key]).toBe('maa')
-      const saved = axios.patch.mock.lastCall[1]
-      for (const unchanged of [
-        'credit_shop_by_value',
-        'credit_shop_value_threshold',
-        'clue_credit_on_demand',
-        'maa_mall_ignore_blacklist_when_full',
-        'maa_mall_buy',
-        'maa_mall_blacklist'
-      ]) {
-        expect(saved).not.toHaveProperty(unchanged)
-      }
-      expect(store.build_config()).toMatchObject({
-        credit_shop_by_value: true,
-        credit_shop_value_threshold: 0.032,
-        clue_credit_on_demand: false,
-        maa_mall_ignore_blacklist_when_full: true,
-        maa_mall_buy: '招聘许可',
-        maa_mall_blacklist: '家具零件'
-      })
-    }
-  )
-
-  it('defaults deferred clue credit off and saves only its explicit selection', async () => {
-    await setup()
-    expect(store.clue_credit_on_demand).toBe(false)
-    store.clue_credit_on_demand = true
-    await nextTick()
-    await store.flush_config_saves()
-    expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
-      clue_credit_on_demand: true
+  ])('uses fixed credit policies for new and old responses %s', async (legacy) => {
+    await setup({
+      ...legacy,
+      visit_friend_enable: false,
+      maa_mall_enable: false,
+      credit_shop_value_threshold: 0.032,
+      maa_mall_buy: '招聘许可',
+      maa_mall_blacklist: '家具零件'
     })
-  })
-
-  it('retains the clue credit selection when changing the friend runner', async () => {
-    await setup({ clue_credit_on_demand: true, visit_friend_mode: 'mower' })
+    expect(store.visit_friend_mode).toBe('mower')
+    expect(store.maa_mall_mode).toBe('mower')
     expect(store.clue_credit_on_demand).toBe(true)
-    store.visit_friend_mode = 'maa'
+    expect(store.credit_shop_by_value).toBe(true)
+    expect(store.build_config()).toMatchObject({
+      visit_friend_enable: false,
+      maa_mall_enable: false,
+      visit_friend_mode: 'mower',
+      maa_mall_mode: 'mower',
+      clue_credit_on_demand: true,
+      credit_shop_by_value: true,
+      credit_shop_value_threshold: 0.032,
+      maa_mall_buy: '招聘许可',
+      maa_mall_blacklist: '家具零件'
+    })
+    expect(axios.patch).not.toHaveBeenCalled()
+  })
+
+  it.each([0, 0.036])('saves only the edited threshold from %s', async (threshold) => {
+    await setup({ credit_shop_value_threshold: threshold })
+    expect(store.credit_shop_value_threshold).toBe(threshold)
+    expect(axios.patch).not.toHaveBeenCalled()
+    store.credit_shop_value_threshold = 0.043
     await nextTick()
     await store.flush_config_saves()
     expect(axios.patch).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('/conf'), {
-      visit_friend_mode: 'maa'
+      credit_shop_value_threshold: 0.043
     })
+    expect(store.credit_shop_by_value).toBe(true)
     expect(store.clue_credit_on_demand).toBe(true)
   })
 
@@ -836,4 +813,55 @@ it('loads the explicit three-room order before the legacy switch', async () => {
   await setup({ swap_contact_train: true, right_side_room_order: ['recycle', 'train', 'contact'] })
   expect(store.right_side_room_order).toEqual(['recycle', 'train', 'contact'])
   expect(store.build_config()).not.toHaveProperty('swap_contact_train')
+})
+
+describe('growth automation dependency', () => {
+  it.each([false, true])(
+    'migrates the legacy combined switch %s without saving on load',
+    async (enabled) => {
+      await setup({ enable_mastery: enabled })
+      expect(store.enable_crafting).toBe(enabled)
+      expect(store.enable_mastery).toBe(enabled)
+      expect(axios.patch).not.toHaveBeenCalled()
+    }
+  )
+
+  it('saves only the crafting switch and preserves dependent choices across reloads', async () => {
+    await setup({ enable_crafting: true, enable_mastery: true, maa_growth_enable: true })
+    store.enable_mastery = false
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch.mock.lastCall[1]).toEqual({ enable_mastery: false })
+    expect(store.enable_crafting).toBe(true)
+    expect(store.maa_growth_enable).toBe(true)
+    store.enable_mastery = true
+    await nextTick()
+    await store.flush_config_saves()
+    store.enable_crafting = false
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch.mock.lastCall[1]).toEqual({ enable_crafting: false })
+    expect(store.enable_mastery).toBe(true)
+    expect(store.maa_growth_enable).toBe(true)
+    store.enable_crafting = true
+    await nextTick()
+    await store.flush_config_saves()
+    expect(axios.patch.mock.lastCall[1]).toEqual({ enable_crafting: true })
+    expect(store.enable_mastery).toBe(true)
+    expect(store.maa_growth_enable).toBe(true)
+  })
+
+  it('loads explicit crafting-only preferences and retains paused imported selections', async () => {
+    const { data } = await setup({
+      enable_crafting: true,
+      enable_mastery: false,
+      maa_growth_enable: false
+    })
+    expect(store.enable_crafting).toBe(true)
+    expect(store.enable_mastery).toBe(false)
+    Object.assign(data, { enable_crafting: false, enable_mastery: true, maa_growth_enable: true })
+    await store.load_config()
+    expect(store.enable_mastery).toBe(true)
+    expect(store.maa_growth_enable).toBe(true)
+  })
 })

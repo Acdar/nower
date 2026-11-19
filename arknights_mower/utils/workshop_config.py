@@ -166,12 +166,13 @@ def save_user_config(req):
         # Web forms only submit fields they expose. Keep all other settings,
         # including values restored from a full configuration backup.
         conf = state.updated(editable)
-        if not conf.enable_mastery:
+        if not conf.enable_crafting:
             restore_manual_settings(conf)
         save_conf(conf)
         if any(
             getattr(previous, key) != getattr(conf, key)
             for key in (
+                "enable_crafting",
                 "enable_mastery",
                 "maa_growth_enable",
                 "fodder_operators",
@@ -189,7 +190,17 @@ def save_user_config(req):
 
             workshop_inventory_changed.set()
             _wake_scheduler_if_running()
-        if previous_maintenance_policy != (
+        long_windows_changed = (previous.maa_rg_enable or conf.maa_rg_enable) and any(
+            getattr(previous, key) != getattr(conf, key)
+            for key in (
+                "maa_rg_enable",
+                "maa_long_task_type",
+                "maa_rg_sleep_max",
+                "maa_rg_sleep_min",
+                "maa_long_task_extra_windows",
+            )
+        )
+        if long_windows_changed or previous_maintenance_policy != (
             conf.version_update_resting_threshold,
             conf.version_update_threshold_advance_hours,
         ):
