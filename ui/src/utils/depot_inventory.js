@@ -1174,12 +1174,6 @@ export function formatRelative(at, now = Date.now()) {
   return formatTimestamp(seconds)
 }
 
-/** 图标地址：后端按 depot/ 前缀从资源包提供，缺失时页面走 fallback。 */
-export function itemIconUrl(icon) {
-  if (!icon) return ''
-  return `/depot/${encodeURIComponent(icon)}.webp`
-}
-
 /**
  * 复制到明日方舟工具箱用的文本。后端给的是它自己序列化的 json 字符串，
  * 直接用它即可；为空时给一个明确的提示而不是复制空串。

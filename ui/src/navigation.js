@@ -2,6 +2,7 @@
 // mobile page drawer all render from these sections. Every page route appears exactly once.
 import BarChartOutline from '@vicons/ionicons5/es/BarChartOutline'
 import BookOutline from '@vicons/ionicons5/es/BookOutline'
+import CalendarNumberOutline from '@vicons/ionicons5/es/CalendarNumberOutline'
 import CalendarOutline from '@vicons/ionicons5/es/CalendarOutline'
 import ConstructOutline from '@vicons/ionicons5/es/ConstructOutline'
 import CubeOutline from '@vicons/ionicons5/es/CubeOutline'
@@ -19,6 +20,7 @@ import Recycle from '@vicons/tabler/es/Recycle'
 import PlugConnected20Regular from '@vicons/fluent/es/PlugConnected20Regular'
 import { settingsEditors, settingsShortcutPrefix } from './task-workflow/model'
 import MowerAIIcon from './components/MowerAIIcon.vue'
+import SanityIcon from './components/SanityIcon.vue'
 
 // Entries carry either `to` (a registered route path) or `href` (an external https URL).
 // `tab` sets an entry or section's mobile tab order under its `shortLabel`.
@@ -93,6 +95,12 @@ export const navigationSections = [
         label: '日志调度',
         icon: TimeOutline,
         to: '/record/log-schedule'
+      },
+      {
+        key: 'record-skland',
+        label: '森空岛签到',
+        icon: CalendarNumberOutline,
+        to: '/record/skland'
       }
     ]
   },
@@ -135,9 +143,12 @@ export const sidebarNavigationItems = [
 
 const settingsShortcutIcons = {
   device: PlugConnected20Regular,
-  'stage-plan': FlashOutline,
-  long: TimeOutline
+  'stage-plan': SanityIcon
 }
+
+export const defaultSidebarShortcuts = [
+  { key: `${settingsShortcutPrefix}stage-plan`, group: 'daily' }
+]
 
 export function settingsShortcuts(config) {
   return settingsEditors(config).map(({ id, title, searchKeywords }) => {

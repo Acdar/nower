@@ -1,3 +1,4 @@
+import { publicAsset } from '@/utils/publicAsset'
 import { computed, onScopeDispose, ref } from 'vue'
 import { defineStore } from 'pinia'
 import axios from 'axios'
@@ -15,8 +16,8 @@ export const useLogBackgroundStore = defineStore('log-background', () => {
   const loaded = ref(false)
   const busy = ref(false)
   const error = ref('')
-  const defaultUrl = computed(
-    () => DEFAULT_BACKGROUND_URLS[theme.value] || DEFAULT_BACKGROUND_URLS.light
+  const defaultUrl = computed(() =>
+    publicAsset(DEFAULT_BACKGROUND_URLS[theme.value] || DEFAULT_BACKGROUND_URLS.light)
   )
   const url = computed(() => customUrl.value || defaultUrl.value)
   let loading = null

@@ -4,6 +4,7 @@ import {
   mobileTabs,
   navigationItems,
   navigationSections,
+  settingsShortcuts,
   sidebarNavigationItems
 } from './navigation'
 import { routes } from './routes'
@@ -68,6 +69,12 @@ describe('[INV-UI-04] Single Navigation Definition', () => {
     expect(mobileTabs.some((item) => item.key === 'mower-settings')).toBe(false)
   })
 
+  it('uses the general settings icon for the idle long task shortcut', () => {
+    expect(settingsShortcuts({}).find((item) => item.key === 'settings-long').icon).toBe(
+      SettingsOutline
+    )
+  })
+
   it('opens external entries over canonical https URLs only', () => {
     expect(externalItems.length).toBeGreaterThan(0)
     for (const item of externalItems) {
@@ -122,7 +129,8 @@ describe('[INV-UI-04] Single Navigation Definition', () => {
       '/record/report',
       '/record/depot',
       '/record/recycling',
-      '/record/log-schedule'
+      '/record/log-schedule',
+      '/record/skland'
     ])
   })
 
@@ -134,7 +142,8 @@ describe('[INV-UI-04] Single Navigation Definition', () => {
       '/record/report',
       '/record/depot',
       '/record/recycling',
-      '/record/log-schedule'
+      '/record/log-schedule',
+      '/record/skland'
     ])
     expect(navigationSections.some((section) => section.title === '数据工具')).toBe(false)
   })

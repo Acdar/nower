@@ -17,7 +17,8 @@ function add_account() {
     password: '',
     sign_in_official: true,
     sign_in_bilibili: true,
-    sign_in_endfield: false,
+    sign_in_endfield_official: true,
+    sign_in_endfield_bilibili: true,
     cultivate_select: true
   }
 }

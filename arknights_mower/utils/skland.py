@@ -18,10 +18,10 @@ app_code = "4ca99fa6b56cc2ba"
 # Global session cache - persists for entire program runtime
 skland_cache = {}
 
-# 明日方舟签到url
-ak_sign_url = "https://zonai.skland.com/api/v1/game/attendance"
+# 签到url
+sign_url = "https://zonai.skland.com/api/v1/game/attendance"
 # 终末地签到url
-ef_sign_url = "https://zonai.skland.com/api/v1/game/endfield/attendance"
+sign_endfield_url = "https://zonai.skland.com/web/v1/game/endfield/attendance"
 # 绑定的角色url
 binding_url = "https://zonai.skland.com/api/v1/game/player/binding"
 player_info_url = "https://zonai.skland.com/api/v1/game/player/info"
@@ -207,25 +207,6 @@ def get_sign_header(url: str, method, body, sign_token, old_header=header):
     return h
 
 
-def get_ef_sign_header(url: str, method, body, sign_token, old_header=header):
-    h = json.loads(json.dumps(old_header))
-    p = parse.urlparse(url)
-    if method.lower() == "get":
-        h["sign"], header_ca = generate_signature(sign_token, p.path, p.query)
-    else:
-        h["sign"], header_ca = generate_signature(sign_token, p.path, json.dumps(body))
-    for i in header_ca:
-        h[i] = header_ca[i]
-
-    # 按照需求补充新的 Header 字段
-    h["Content-Type"] = "application/json"
-    # role_str 可以直接从 body 中提取，因为 solvers/skland.py 已经在 body 传入了 sk-game-role
-    if isinstance(body, dict) and "sk-game-role" in body:
-        h["sk-game-role"] = body["sk-game-role"]
-
-    return h
-
-
 # 森空岛认证与仓库数据请求的远端服务（as.hypergryph.com / zonai.skland.com）偶发瞬时不可达：
 # 给每次请求设超时并对连接层瞬时错误重试几次，避免一次网络抖动就中断认证、连带仓库扫描等任务失败。
 # 重试节奏与 _ensure_device_id 一致；认证被拒（如「设备信息无效」）是语义性失败，不在重试范围内。
@@ -329,18 +310,20 @@ def get_cred(grant):
     return resp["data"]
 
 
-def get_binding_list(sign_token):
-    """读取账号下明日方舟与终末地的绑定角色，忽略其他游戏。"""
+def get_binding_list(sign_token, *, old_header=None, timeout=_AUTH_REQUEST_TIMEOUT):
+    request_header = header if old_header is None else old_header
     v = []
     # 用 headers_factory 每次尝试现算签名头：重试不再携带过期时间戳
     resp = request_with_retry(
         "get",
         binding_url,
+        timeout=timeout,
         headers_factory=lambda: get_sign_header(
             binding_url,
             "get",
             None,
             sign_token,
+            request_header,
         ),
     )
     _sync_server_time(resp)
@@ -352,7 +335,7 @@ def get_binding_list(sign_token):
             "请求角色列表失败（状态码：%s）：%s",
             code if isinstance(code, int) else "未知",
             redact_signing_text(
-                body.get("message", ""), sign_token, header.get("cred")
+                body.get("message", ""), sign_token, request_header.get("cred")
             ),
         )
         if body.get("message") == "用户未登录":
@@ -361,7 +344,7 @@ def get_binding_list(sign_token):
     for i in body["data"]["list"]:
         if i.get("appCode") not in ("arknights", "endfield"):
             continue
-        v.extend(i.get("bindingList") or [])
+        v.extend(i.get("bindingList"))
     return v
 
 
